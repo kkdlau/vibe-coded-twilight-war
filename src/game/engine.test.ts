@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { sfx } from '../audio/sfx';
 import { FACTION_CHARACTERS, GUNS, MELEES, getReputationQiMultiplier, getWeaponSwapDuration } from './data';
 import { TwilightEngine, snapToEightDirections } from './engine';
 import { TILE, createArenaMap } from './maps';
+import { AI_COMBAT, RESPAWN_DELAY_SECONDS } from './tuning';
 import { EnemyEntity, FactionId, HudSnapshot, MapId, WeaponHand } from './types';
 
 function createTestEngine(
@@ -219,6 +221,37 @@ describe('KeyR reload & infinite ranged weapon range', () => {
     expect(engine.player.reserveAmmo).toBe(26);
   });
 
+  it.each(['shotgun', 'sniper'] as const)('times each %s reload cue to the reload and waits over two seconds', (kind) => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const weapon = gunInHand(engine);
+    weapon.def = GUNS.find(gun => gun.kind === kind)!;
+    weapon.ammoInMag = 0;
+    expect(weapon.def.reloadTime).toBeGreaterThan(2);
+
+    const reload = vi.spyOn(sfx, 'reload');
+    try {
+      engine.startReload();
+      expect(reload.mock.calls).toEqual([[kind, 'start']]);
+      engine.update(weapon.def.reloadTime * 0.30, 1280, 720);
+      expect(reload.mock.calls).toEqual([[kind, 'start'], [kind, 'remove']]);
+      engine.setKey('KeyP', true);
+      engine.setKey('KeyP', false);
+      engine.update(1.5, 1280, 720);
+      expect(reload).toHaveBeenCalledTimes(2);
+      expect(weapon.ammoInMag).toBe(0);
+      engine.setKey('KeyP', true);
+      engine.setKey('KeyP', false);
+      engine.update(weapon.def.reloadTime * 0.65, 1280, 720);
+      expect(reload.mock.calls.slice(2)).toEqual([[kind, 'insert'], [kind, 'close']]);
+      expect(weapon.ammoInMag).toBe(0);
+      engine.update(weapon.def.reloadTime * 0.06, 1280, 720);
+      expect(reload).toHaveBeenLastCalledWith(kind, 'ready');
+      expect(weapon.ammoInMag).toBe(weapon.def.magSize);
+    } finally {
+      reload.mockRestore();
+    }
+  });
+
   it('gives all 4 ranged guns infinite map-spanning range and stops on first hit (no multi-target pierce)', () => {
     for (const g of GUNS) {
       expect(g.range).toBeGreaterThanOrEqual(9000);
@@ -258,11 +291,16 @@ describe('KeyR reload & infinite ranged weapon range', () => {
     // Bullet traces all the way across the 28-tile map without dying mid-air
     expect(seg.x2).toBeGreaterThan(26 * TILE);
 
-    // Fire pistol via mouseDown: must hit the first distant enemy (~984px away) and NOT pierce the second!
+    // Center the shot to test map-spanning travel independently of long-range dispersion.
     const hp1Before = shadowEnemies[0].hp;
     const hp2Before = shadowEnemies[1].hp;
-    engine.setMouseDown(true);
-    engine.setMouseDown(false);
+    const random = vi.spyOn(Math, 'random').mockReturnValueOnce(0.5);
+    try {
+      engine.setMouseDown(true);
+      engine.setMouseDown(false);
+    } finally {
+      random.mockRestore();
+    }
 
     expect(shadowEnemies[0].hp).toBeLessThan(hp1Before);
     expect(shadowEnemies[1].hp).toBe(hp2Before);
@@ -392,6 +430,47 @@ describe('Default loadout, player respawn, and map crate placement invariants', 
     }
   });
 
+  it.each(['pistol', 'shotgun'] as const)('tightens actual %s dispersion at close range', (kind) => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const player = engine.player;
+    player.x = 10.5 * TILE;
+    player.y = 19.3 * TILE;
+    player.elevation = 0;
+    engine.enemies = [];
+    const aim = engine as unknown as {
+      camera: { x: number; y: number; zoom: number };
+      resetGunFeedback: () => void;
+    };
+    aim.camera.x = player.x;
+    aim.camera.y = player.y;
+    aim.camera.zoom = 1;
+
+    const weapon = gunInHand(engine);
+    weapon.def = GUNS.find(gun => gun.kind === kind)!;
+    const fire = (distance: number) => {
+      weapon.ammoInMag = weapon.def.magSize;
+      engine.setMousePos(640 + distance, 360);
+      aim.resetGunFeedback();
+      player.attackCooldown = 0;
+      engine.beams = [];
+      engine.setMouseDown(true);
+      engine.setMouseDown(false);
+      expect(player.gunfireTimer).toBeGreaterThan(0);
+      const shot = engine.beams[0];
+      return Math.abs(Math.atan2(shot.y2 - shot.y1, shot.x2 - shot.x1));
+    };
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.75);
+    try {
+      const nearAngle = fire(24);
+      const farAngle = fire(420);
+      expect(nearAngle).toBeGreaterThan(0);
+      expect(farAngle).toBeGreaterThan(nearAngle * 4.5);
+      expect(farAngle).toBeLessThan(0.085);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
   it('respawns the player back at their faction spawn point upon death', () => {
     const { engine } = createTestEngine('shadow', 'desert_ruins', 10);
     const spawnPt = engine.map.factionSpawns.shadow[0];
@@ -407,10 +486,58 @@ describe('Default loadout, player respawn, and map crate placement invariants', 
     }).damagePlayer(999, false);
 
     expect(engine.player.lives).toBe(2);
+    expect(engine.status).toBe('RESPAWNING');
+    expect(engine.player.hp).toBe(0);
+    expect(engine.player.x).toBe(8.5 * TILE);
+    engine.setKey('KeyD', true);
+    engine.setMouseDown(true);
+    engine.update(RESPAWN_DELAY_SECONDS - 0.5, 1280, 720);
+    expect(engine.status).toBe('RESPAWNING');
+    expect(engine.player.x).toBe(8.5 * TILE);
+    engine.update(0.5, 1280, 720);
+    expect(engine.status).toBe('PLAYING');
     expect(engine.player.hp).toBe(engine.player.maxHp);
     expect(engine.player.x).toBe(spawnPt.x);
     expect(engine.player.y).toBe(spawnPt.y);
     expect(engine.player.elevation).toBe(0);
+  });
+
+  it('continues the battle while the player is down and does not target the body', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const attacker = engine.enemies.find(e => e.faction === 'shadow')!;
+    const rival = engine.enemies.find(e => e.faction === 'mercenary')!;
+    engine.enemies = [attacker, rival];
+    engine.pickups = [];
+    attacker.x = 12.5 * TILE;
+    attacker.y = rival.y = engine.player.y = 19.3 * TILE;
+    attacker.elevation = rival.elevation = engine.player.elevation = 0;
+    attacker.speed = rival.speed = 0;
+    attacker.attackCooldown = 0;
+    attacker.skillCooldown = 99;
+    rival.attackCooldown = rival.skillCooldown = 99;
+    rival.x = attacker.x + 205;
+    engine.player.x = attacker.x + 100;
+    engine.player.invulnTimer = 0;
+    attacker.focusedTargetId = 'player';
+    const downX = engine.player.x;
+
+    const damagePlayer = (engine as unknown as {
+      damagePlayer: (damage: number, melee: boolean) => void;
+    }).damagePlayer.bind(engine);
+    damagePlayer(999, false);
+
+    let firedDuringRespawn = false;
+    for (let i = 0; i < 50; i++) {
+      engine.update(1 / 60, 1280, 720);
+      firedDuringRespawn ||= engine.beams.length > 0;
+    }
+    expect(engine.status).toBe('RESPAWNING');
+    expect(attacker.focusedTargetId).toBe(rival.id);
+    expect(firedDuringRespawn).toBe(true);
+    expect(rival.hp).toBeLessThan(rival.maxHp);
+    expect(engine.player.hp).toBe(0);
+    expect(engine.player.x).toBe(downX);
+    expect(engine.player.lives).toBe(2);
   });
 
   it('never places any crate straddling different terrain elevations, water, or stairs on any map', () => {
@@ -948,6 +1075,8 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     expect(enemy.hasLosToTarget).toBe(true);
     expect(enemy.activeSlot).toBe('gun');
     expect(enemy.chargingSkillTimer).toBe(0);
+    enemy.speed = 0;
+    engine.update(AI_COMBAT[enemy.archetype].reactionSeconds, 1280, 720);
 
     engine.player.x = enemy.x + 55;
     engine.update(0.05, 1280, 720);
@@ -965,6 +1094,90 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     engine.update(0.7, 1280, 720);
     expect(enemy.chargingSkillTimer).toBe(0);
     expect(enemy.shadowCloneTimer).toBeGreaterThan(0);
+  });
+
+  it('gives each AI archetype a reaction window before firing or reacquiring a target', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    engine.pickups = [];
+    enemy.archetype = 'sniper';
+    enemy.speed = 0;
+    enemy.x = 12.5 * TILE;
+    enemy.y = engine.player.y = 19.3 * TILE;
+    enemy.elevation = engine.player.elevation = 0;
+    enemy.attackCooldown = 0;
+    engine.player.x = enemy.x + 5 * TILE;
+    engine.update(0.05, 1280, 720);
+    expect(enemy.hasLosToTarget).toBe(true);
+    expect(enemy.reactionTimer).toBe(AI_COMBAT.sniper.reactionSeconds);
+    engine.update(AI_COMBAT.phantom.reactionSeconds, 1280, 720);
+    expect(enemy.gunfireTimer).toBe(0);
+    engine.update(AI_COMBAT.sniper.reactionSeconds, 1280, 720);
+    expect(enemy.gunfireTimer).toBeGreaterThan(0);
+
+    engine.player.x = 26.5 * TILE;
+    engine.update(0.05, 1280, 720);
+    expect(enemy.hasLosToTarget).toBe(false);
+    engine.player.x = enemy.x + 5 * TILE;
+    engine.update(0.15, 1280, 720);
+    expect(enemy.reactionTimer).toBe(AI_COMBAT.sniper.reactionSeconds);
+    expect(enemy.gunfireTimer).toBe(0);
+  });
+
+  it('patrols nearby when AI reaches the last known target position', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const soldier = engine.enemies.find(e => e.faction === 'shadow')!;
+    engine.enemies = [soldier];
+    engine.pickups = [];
+    soldier.x = 12.5 * TILE;
+    soldier.y = 19.3 * TILE;
+    soldier.elevation = 0;
+    soldier.lastSeenTargetPos = { x: soldier.x, y: soldier.y };
+    soldier.alertTimer = 5;
+    engine.player.x = 26.5 * TILE;
+    engine.player.y = 1.5 * TILE;
+    const start = { x: soldier.x, y: soldier.y };
+
+    for (let i = 0; i < 30; i++) engine.update(1 / 60, 1280, 720);
+
+    expect(soldier.hasLosToTarget).toBe(false);
+    expect(soldier.lastSeenTargetPos).toBeNull();
+    expect(soldier.patrolTarget).not.toBeNull();
+    expect(Math.hypot(soldier.x - start.x, soldier.y - start.y)).toBeGreaterThan(12);
+    expect(soldier.moveIntensity).toBeGreaterThan(0);
+  });
+
+  it('plays surface footsteps on movement and releases the melee charging cue on switch', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    engine.enemies = [];
+    engine.player.x = 12.5 * TILE;
+    engine.player.y = 19.3 * TILE;
+    engine.player.elevation = 0;
+    const step = vi.spyOn(sfx, 'footstep');
+    const charge = vi.spyOn(sfx, 'setMeleeCharge');
+    try {
+      engine.update(0.15, 1280, 720);
+      expect(step).not.toHaveBeenCalled();
+      engine.setKey('KeyD', true);
+      for (let frame = 0; frame < 24; frame++) engine.update(1 / 60, 1280, 720);
+      engine.setKey('KeyD', false);
+      expect(step).toHaveBeenCalledWith('hard');
+
+      engine.setMouseDown(true);
+      engine.setMouseDown(false);
+      expect(charge).not.toHaveBeenCalledWith(0);
+      engine.equipHand(1);
+      engine.setMouseDown(true);
+      engine.update(0.15, 1280, 720);
+      expect(charge).toHaveBeenCalledWith(0);
+      expect(charge.mock.calls.some(([progress]) => progress !== null && progress > 0)).toBe(true);
+      engine.equipHand(0);
+      expect(charge).toHaveBeenLastCalledWith(null);
+    } finally {
+      step.mockRestore();
+      charge.mockRestore();
+    }
   });
 
   it('advances walkPhase and moveIntensity when player walks', () => {
@@ -1209,6 +1422,7 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     expect(meleeInHand(engine).durability).toBe(100);
 
     // 8. Dropping to 0 durability shatters shield back to knife
+    engine.player.angle = 0;
     engine.player.invulnTimer = 0;
     damagePlayer(150, false, undefined, engine.player.x + 120, engine.player.y);
     expect(meleeInHand(engine).durability).toBe(0);
@@ -1229,6 +1443,7 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     }).damagePlayer(999, true);
 
     expect(engine.player.lives).toBe(2);
+    engine.update(RESPAWN_DELAY_SECONDS, 1280, 720);
     expect(gunInHand(engine).def.kind).toBe('pistol');
     expect(meleeInHand(engine).def.kind).toBe('knife');
     expect(meleeInHand(engine).durability).toBe(0);
@@ -1239,7 +1454,12 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
   it('fires yellow friendly-fire Light Orbs for Royal Greatsword and slow bouncing non-FF Black Dragon (head 20 / body 15) for Shadow Greatsword', () => {
     // 1. Royal Light Orbs are yellow and hurt teammates
     const { engine: rEng } = createTestEngine('royal', 'european_castle', 10);
+    for (const soldier of rEng.enemies) {
+      soldier.attackCooldown = 99;
+      soldier.skillCooldown = 99;
+    }
     const ally = rEng.enemies.find((e) => e.faction === 'royal')!;
+    ally.stunTimer = 5;
     rEng.player.activeHand = 1;
     meleeInHand(rEng).def = MELEES.find((m) => m.kind === 'greatsword')!;
     rEng.player.x = 10 * TILE;
@@ -1265,6 +1485,10 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
 
     // 2. Shadow Black Dragon does NOT hurt allies, deals 20 head damage, and bounces off map walls/obstacles
     const { engine: sEng } = createTestEngine('shadow', 'tokyo_shrine', 10);
+    for (const soldier of sEng.enemies) {
+      soldier.attackCooldown = 99;
+      soldier.skillCooldown = 99;
+    }
     const sAlly = sEng.enemies.find((e) => e.faction === 'shadow')!;
     sEng.player.activeHand = 1;
     meleeInHand(sEng).def = MELEES.find((m) => m.kind === 'greatsword')!;

@@ -93,6 +93,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
     if (!ctx) return;
 
     canvas.focus();
+    sfx.prepareGunshot();
     recordSavedRef.current = false;
     const engine = new TwilightEngine(
       faction,
@@ -117,6 +118,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
         setTabHeld(true);
         return;
       }
+      if (!e.repeat) sfx.unlock();
       const norm = normalizeControlCode(e);
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'Escape'].includes(norm)) {
         e.preventDefault();
@@ -162,6 +164,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
 
     return () => {
       cancelAnimationFrame(rafId);
+      engine.clearInputs();
       window.removeEventListener('resize', resize);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
@@ -215,7 +218,10 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
         onMouseMove={(e) => engineRef.current?.setMousePos(e.clientX, e.clientY)}
         onMouseDown={(e) => {
           canvasRef.current?.focus();
-          if (e.button === 0) engineRef.current?.setMouseDown(true);
+          if (e.button === 0) {
+            sfx.unlock();
+            engineRef.current?.setMouseDown(true);
+          }
         }}
         onMouseUp={(e) => {
           if (e.button === 0) engineRef.current?.setMouseDown(false);
@@ -340,7 +346,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       {/* BOTTOM-LEFT: Controls & Pickup Prompt */}
       {hud && p && (
         <div className="pointer-events-none fixed bottom-3 left-3 flex flex-col items-start gap-2">
-          {hud.nearbyPickup && (
+          {hud.status === 'PLAYING' && hud.nearbyPickup && (
             <div className="bg-emerald-500 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-lg">
               按 [Space] 拾取：{hud.nearbyPickup}
             </div>
@@ -449,6 +455,15 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
                 <div className="text-amber-300 mt-1">第三聲望：{p.reputations.mercenary}</div>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {hud?.status === 'RESPAWNING' && (
+        <div className="pointer-events-none fixed inset-x-0 top-20 z-20 flex justify-center" role="status">
+          <div className="rounded-xl border border-rose-400/50 bg-slate-950/90 px-6 py-4 text-center shadow-xl">
+            <div className="text-lg font-bold text-rose-200">你已倒下</div>
+            <div className="mt-1 text-sm tabular-nums text-slate-200">{hud.respawnSeconds} 秒後重返戰場</div>
           </div>
         </div>
       )}
