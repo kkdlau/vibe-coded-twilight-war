@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { FACTION_CHARACTERS, GUNS, MELEES, getReputationQiMultiplier, getWeaponSwapDuration } from './data';
 import { TwilightEngine, snapToEightDirections } from './engine';
 import { TILE, createArenaMap } from './maps';
-import { EnemyEntity, FactionId, HudSnapshot, MapId } from './types';
+import { EnemyEntity, FactionId, HudSnapshot, MapId, WeaponHand } from './types';
 
 function createTestEngine(
   faction: FactionId = 'royal',
@@ -33,6 +33,18 @@ function createTestEngine(
     }
   );
   return { engine, getHud: () => latestHud, getRep: () => latestReps[faction], getReps: () => latestReps };
+}
+
+function gunInHand(engine: TwilightEngine, hand: WeaponHand = 0) {
+  const weapon = engine.player.weapons[hand];
+  if (weapon.type !== 'gun') throw new Error('Expected a gun');
+  return weapon;
+}
+
+function meleeInHand(engine: TwilightEngine, hand: WeaponHand = 1) {
+  const weapon = engine.player.weapons[hand];
+  if (weapon.type !== 'melee') throw new Error('Expected a melee weapon');
+  return weapon;
 }
 
 describe('Reputation logarithmic Qi speed & independent per-faction kill adjustments', () => {
@@ -189,21 +201,21 @@ describe('10 soldiers per faction & max 2 active per faction', () => {
 describe('KeyR reload & infinite ranged weapon range', () => {
   it('reloads magazine from reserve ammo when pressing R and completes after reloadTime', () => {
     const { engine, getHud } = createTestEngine('royal', 'tokyo_shrine', 10);
-    engine.player.ammoInMag = 2;
+    gunInHand(engine).ammoInMag = 2;
     engine.player.reserveAmmo = 30;
 
     engine.setKey('KeyR', true);
     engine.setKey('KeyR', false);
 
-    expect(engine.player.reloadTimer).toBeGreaterThan(0);
+    expect(gunInHand(engine).reloadTimer).toBeGreaterThan(0);
     expect(getHud()!.player.reloadProgress).toBeGreaterThan(0);
 
     // Advance past pistol reload time (0.95s)
     engine.update(0.5, 1280, 720);
     engine.update(0.6, 1280, 720);
 
-    expect(engine.player.reloadTimer).toBe(0);
-    expect(engine.player.ammoInMag).toBe(engine.player.gun.magSize);
+    expect(gunInHand(engine).reloadTimer).toBe(0);
+    expect(gunInHand(engine).ammoInMag).toBe(gunInHand(engine).def.magSize);
     expect(engine.player.reserveAmmo).toBe(26);
   });
 
@@ -218,8 +230,8 @@ describe('KeyR reload & infinite ranged weapon range', () => {
     engine.player.y = 9.5 * TILE;
     engine.player.elevation = 0;
     engine.player.angle = 0;
-    engine.player.gun = GUNS.find((g) => g.kind === 'pistol')!;
-    engine.player.ammoInMag = 6;
+    gunInHand(engine).def = GUNS.find((g) => g.kind === 'pistol')!;
+    gunInHand(engine).ammoInMag = 6;
 
     const shadowEnemies = engine.enemies.filter((e) => e.faction === 'shadow');
     // Line up two enemies at gx=21 (~960px away!) and gx=23 (~1056px away!) along y=9.5*TILE
@@ -363,7 +375,7 @@ describe('Faction skill combat rules', () => {
   it('breaks Royal Shield when the shielded player fires a gun', () => {
     const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
     engine.player.royalShieldTimer = 6.0;
-    engine.player.activeSlot = 'gun';
+    engine.player.activeHand = 0;
     engine.setMouseDown(true);
     engine.setMouseDown(false);
 
@@ -375,8 +387,8 @@ describe('Default loadout, player respawn, and map crate placement invariants', 
   it('gives every faction (including Shadow) pistol and knife as default starting weapons', () => {
     for (const fac of ['royal', 'shadow', 'mercenary'] as FactionId[]) {
       const { engine } = createTestEngine(fac, 'tokyo_shrine', 10);
-      expect(engine.player.gun.kind).toBe('pistol');
-      expect(engine.player.melee.kind).toBe('knife');
+      expect(gunInHand(engine).def.kind).toBe('pistol');
+      expect(meleeInHand(engine).def.kind).toBe('knife');
     }
   });
 
@@ -448,24 +460,24 @@ describe('Shotgun 5-round burst, 1xN tunnel traversal, and full map BFS reachabi
   it('shotgun fires 5 pellets at once and drains magazine from 5/5 to 0/5 without auto-reloading until R or a fresh click', () => {
     const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
     const shotgun = GUNS.find((g) => g.kind === 'shotgun')!;
-    engine.player.gun = shotgun;
-    engine.player.ammoInMag = 5;
+    gunInHand(engine).def = shotgun;
+    gunInHand(engine).ammoInMag = 5;
     engine.player.reserveAmmo = 30;
-    engine.player.activeSlot = 'gun';
+    engine.player.activeHand = 0;
     engine.beams = [];
 
     engine.setMouseDown(true);
     engine.setMouseDown(false);
 
     expect(engine.beams.length).toBe(5);
-    expect(engine.player.ammoInMag).toBe(0);
+    expect(gunInHand(engine).ammoInMag).toBe(0);
     // Must NOT auto-reload when hitting 0/5
-    expect(engine.player.reloadTimer).toBe(0);
+    expect(gunInHand(engine).reloadTimer).toBe(0);
 
     // Clicking again while 0/5 triggers reload
     engine.setMouseDown(true);
     engine.setMouseDown(false);
-    expect(engine.player.reloadTimer).toBeGreaterThan(0);
+    expect(gunInHand(engine).reloadTimer).toBeGreaterThan(0);
   });
 
   it('allows a character to walk smoothly through a 1xN tunnel in East Port', () => {
@@ -757,8 +769,7 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
 
     const countNonDefaultWeapons = () => {
       let total = engine.pickups.filter((pk) => pk.kind === 'gun' || pk.kind === 'melee').length;
-      if (engine.player.gun.kind !== 'pistol') total += 1;
-      if (engine.player.melee.kind !== 'knife') total += 1;
+      total += engine.player.weapons.filter(({ def }) => def.kind !== 'pistol' && def.kind !== 'knife').length;
       for (const e of engine.enemies) {
         if (e.gunKind !== 'pistol') total += 1;
         if (e.meleeKind !== 'knife') total += 1;
@@ -776,27 +787,29 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     engine.player.y = riflePickup.y;
     engine.tryPickup();
 
-    expect(engine.player.gun.kind).toBe('rifle');
+    expect(gunInHand(engine).def.kind).toBe('rifle');
     expect(engine.pickups.some((pk) => pk.kind === 'gun' && pk.gunDef?.kind === 'pistol')).toBe(false);
     expect(countNonDefaultWeapons()).toBe(initialPoolCount);
 
     // 2. Player picks up a claw while holding default knife -> knife MUST NOT drop onto ground
+    engine.equipHand(1);
     const clawPickup = engine.pickups.find((pk) => pk.kind === 'melee' && pk.meleeDef?.kind === 'claw')!;
     engine.player.x = clawPickup.x;
     engine.player.y = clawPickup.y;
     engine.tryPickup();
 
-    expect(engine.player.melee.kind).toBe('claw');
+    expect(meleeInHand(engine).def.kind).toBe('claw');
     expect(engine.pickups.some((pk) => pk.kind === 'melee' && pk.meleeDef?.kind === 'knife')).toBe(false);
     expect(countNonDefaultWeapons()).toBe(initialPoolCount);
 
     // 3. Player swaps rifle with shotgun -> old rifle DOES drop, pool stays constant
+    engine.equipHand(0);
     const shotgunPickup = engine.pickups.find((pk) => pk.kind === 'gun' && pk.gunDef?.kind === 'shotgun')!;
     engine.player.x = shotgunPickup.x;
     engine.player.y = shotgunPickup.y;
     engine.tryPickup();
 
-    expect(engine.player.gun.kind).toBe('shotgun');
+    expect(gunInHand(engine).def.kind).toBe('shotgun');
     expect(engine.pickups.some((pk) => pk.kind === 'gun' && pk.gunDef?.kind === 'rifle')).toBe(true);
     expect(countNonDefaultWeapons()).toBe(initialPoolCount);
 
@@ -918,6 +931,42 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     expect(enemy.activeSlot).toBe('gun');
   });
 
+  it('charges and casts the equipped melee skill only while the enemy holds a melee weapon', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    engine.pickups = [];
+    enemy.x = 12.5 * TILE;
+    enemy.y = engine.player.y = 19.3 * TILE;
+    enemy.elevation = engine.player.elevation = 0;
+    enemy.meleeKind = 'claw';
+    enemy.skillCooldown = 0;
+    enemy.attackCooldown = 99;
+
+    engine.player.x = enemy.x + 5 * TILE;
+    engine.update(0.05, 1280, 720);
+    expect(enemy.hasLosToTarget).toBe(true);
+    expect(enemy.activeSlot).toBe('gun');
+    expect(enemy.chargingSkillTimer).toBe(0);
+
+    engine.player.x = enemy.x + 55;
+    engine.update(0.05, 1280, 720);
+    expect(enemy.activeSlot).toBe('melee');
+    expect(enemy.chargingSkillTimer).toBeGreaterThan(0);
+
+    engine.player.x = enemy.x + 5 * TILE;
+    engine.update(0.7, 1280, 720);
+    expect(enemy.activeSlot).toBe('gun');
+    expect(enemy.chargingSkillTimer).toBe(0);
+    expect(enemy.shadowCloneTimer).toBe(0);
+
+    engine.player.x = enemy.x + 55;
+    engine.update(0.05, 1280, 720);
+    engine.update(0.7, 1280, 720);
+    expect(enemy.chargingSkillTimer).toBe(0);
+    expect(enemy.shadowCloneTimer).toBeGreaterThan(0);
+  });
+
   it('advances walkPhase and moveIntensity when player walks', () => {
     const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
     expect(engine.player.walkPhase).toBe(0);
@@ -934,7 +983,7 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
   });
 });
 
-describe('Esc drops current weapon without pausing, 1/2 equips gun/melee hand, and enemies match faction UI roster', () => {
+describe('Esc drops current weapon without pausing, 1/2 selects a hand, and enemies match faction UI roster', () => {
   it('pressing Escape drops held non-default weapon onto map and reverts to pistol/knife without pausing', () => {
     const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
 
@@ -943,23 +992,24 @@ describe('Esc drops current weapon without pausing, 1/2 equips gun/melee hand, a
     engine.player.x = riflePickup.x;
     engine.player.y = riflePickup.y;
     engine.tryPickup();
-    expect(engine.player.gun.kind).toBe('rifle');
+    expect(gunInHand(engine).def.kind).toBe('rifle');
 
+    engine.equipHand(1);
     const clawPickup = engine.pickups.find((pk) => pk.kind === 'melee' && pk.meleeDef?.kind === 'claw')!;
     engine.player.x = clawPickup.x;
     engine.player.y = clawPickup.y;
     engine.tryPickup();
-    expect(engine.player.melee.kind).toBe('claw');
+    expect(meleeInHand(engine).def.kind).toBe('claw');
 
     // Digit1 equips first hand (gun), press Esc -> drops rifle back onto map, reverts to pistol, stays PLAYING
     engine.setKey('Digit1', true);
     engine.setKey('Digit1', false);
-    expect(engine.player.activeSlot).toBe('gun');
+    expect(engine.player.activeHand).toBe(0);
 
     engine.setKey('Escape', true);
     engine.setKey('Escape', false);
     expect(engine.status).toBe('PLAYING');
-    expect(engine.player.gun.kind).toBe('pistol');
+    expect(gunInHand(engine).def.kind).toBe('pistol');
     expect(engine.pickups.some((pk) => pk.kind === 'gun' && pk.gunDef?.kind === 'rifle')).toBe(true);
 
     // Pressing Esc again while holding default pistol does not drop pistol or pause
@@ -972,13 +1022,51 @@ describe('Esc drops current weapon without pausing, 1/2 equips gun/melee hand, a
     // Digit2 equips second hand (melee), press Esc -> drops claw back onto map, reverts to knife
     engine.setKey('Digit2', true);
     engine.setKey('Digit2', false);
-    expect(engine.player.activeSlot).toBe('melee');
+    expect(engine.player.activeHand).toBe(1);
 
     engine.setKey('Escape', true);
     engine.setKey('Escape', false);
     expect(engine.status).toBe('PLAYING');
-    expect(engine.player.melee.kind).toBe('knife');
+    expect(meleeInHand(engine).def.kind).toBe('knife');
     expect(engine.pickups.some((pk) => pk.kind === 'melee' && pk.meleeDef?.kind === 'claw')).toBe(true);
+  });
+
+  it('uses Space to replace the selected hand across weapon types and preserves the other hand', () => {
+    const { engine, getHud } = createTestEngine();
+    const pickUp = (kind: string) => {
+      const pickup = engine.pickups.find((item) => item.gunDef?.kind === kind || item.meleeDef?.kind === kind)!;
+      engine.player.x = pickup.x;
+      engine.player.y = pickup.y;
+      engine.setKey('Space', true);
+      engine.setKey('Space', false);
+    };
+
+    pickUp('rifle');
+    pickUp('claw');
+    expect(engine.player.activeHand).toBe(0);
+    expect(engine.player.weapons.map(({ def }) => def.kind)).toEqual(['claw', 'knife']);
+    expect(engine.pickups.some((item) => item.gunDef?.kind === 'rifle')).toBe(true);
+
+    engine.setKey('Digit2', true);
+    engine.setKey('Digit2', false);
+    pickUp('rifle');
+    const rifleInSecondHand = gunInHand(engine, 1);
+    rifleInSecondHand.ammoInMag = 2;
+
+    engine.setKey('KeyQ', true);
+    engine.setKey('KeyQ', false);
+    pickUp('shotgun');
+    expect(engine.player.activeHand).toBe(0);
+    expect(engine.player.weapons.map(({ def }) => def.kind)).toEqual(['shotgun', 'rifle']);
+    expect(gunInHand(engine, 1).ammoInMag).toBe(2);
+    expect(getHud()!.player.weapon.def.kind).toBe('shotgun');
+    expect(getHud()!.player.offHandWeapon.def.kind).toBe('rifle');
+    expect(engine.pickups.some((item) => item.meleeDef?.kind === 'claw')).toBe(true);
+
+    engine.setKey('Digit2', true);
+    engine.setKey('Digit2', false);
+    expect(engine.player.activeHand).toBe(1);
+    expect(getHud()!.player.weapon).toMatchObject({ type: 'gun', ammoInMag: 2 });
   });
 
   it('spawns all battlefield soldiers from their FACTION_CHARACTERS roster with matching name and characterSkin', () => {
@@ -1002,8 +1090,8 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     }).damagePlayer.bind(engine);
 
     // 1. Default spawn starts with knife and 0 shield -> frontal hit deals full HP damage
-    expect(engine.player.melee.kind).toBe('knife');
-    expect(engine.player.shield).toBe(0);
+    expect(meleeInHand(engine).def.kind).toBe('knife');
+    expect(meleeInHand(engine).durability).toBe(0);
     expect(getHud()!.player.shield).toBe(0);
 
     engine.player.invulnTimer = 0;
@@ -1017,45 +1105,46 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     expect(shieldPickup).toBeTruthy();
     expect(shieldPickup.durability).toBe(100);
 
+    engine.player.activeHand = 1;
     engine.player.x = shieldPickup.x;
     engine.player.y = shieldPickup.y;
     engine.tryPickup();
-    expect(engine.player.melee.kind).toBe('shield');
-    expect(engine.player.shield).toBe(100);
+    expect(meleeInHand(engine).def.kind).toBe('shield');
+    expect(meleeInHand(engine).durability).toBe(100);
 
-    // 3. Blocking ONLY happens when shield is actively held in hand (activeSlot === 'melee')
-    engine.player.activeSlot = 'gun';
+    // 3. Blocking only happens when the shield is actively held
+    engine.player.activeHand = 0;
     engine.player.angle = 0;
     engine.player.invulnTimer = 0;
     const hpGun = engine.player.hp;
     damagePlayer(30, false, undefined, engine.player.x + 120, engine.player.y);
     expect(engine.player.hp).toBe(hpGun - 30);
-    expect(engine.player.shield).toBe(100);
+    expect(meleeInHand(engine).durability).toBe(100);
 
     // Switch back to shield -> frontal bullet is absorbed by shield durability
-    engine.player.activeSlot = 'melee';
+    engine.player.activeHand = 1;
     engine.player.angle = 0;
     engine.player.invulnTimer = 0;
     damagePlayer(40, false, undefined, engine.player.x + 120, engine.player.y);
     expect(engine.player.hp).toBe(hpGun - 30);
-    expect(engine.player.shield).toBe(60);
+    expect(meleeInHand(engine).durability).toBe(60);
 
     // 4. Side (90 deg) and rear (180 deg) attacks bypass frontal shield completely
     engine.player.invulnTimer = 0;
     damagePlayer(15, false, undefined, engine.player.x, engine.player.y + 120);
     expect(engine.player.hp).toBe(hpGun - 45);
-    expect(engine.player.shield).toBe(60);
+    expect(meleeInHand(engine).durability).toBe(60);
 
     engine.player.invulnTimer = 0;
     damagePlayer(10, true, undefined, engine.player.x - 120, engine.player.y);
     expect(engine.player.hp).toBe(hpGun - 55);
-    expect(engine.player.shield).toBe(60);
+    expect(meleeInHand(engine).durability).toBe(60);
 
     // Frontal melee attack halves HP damage and reduces shield durability
     engine.player.invulnTimer = 0;
     damagePlayer(20, true, undefined, engine.player.x + 120, engine.player.y);
     expect(engine.player.hp).toBe(hpGun - 65);
-    expect(engine.player.shield).toBe(50);
+    expect(meleeInHand(engine).durability).toBe(50);
 
     // 5. Left-click normal melee with shield shoves & stuns target
     const enemy = engine.enemies[0];
@@ -1078,8 +1167,8 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     // 6. Dropping shield (Esc) preserves exact durability (50), AI pickup/death or re-pickup preserves 50
     engine.setKey('Escape', true);
     engine.setKey('Escape', false);
-    expect(engine.player.melee.kind).toBe('knife');
-    expect(engine.player.shield).toBe(0);
+    expect(meleeInHand(engine).def.kind).toBe('knife');
+    expect(meleeInHand(engine).durability).toBe(0);
     const droppedShield = engine.pickups.find((pk) => pk.kind === 'melee' && pk.meleeDef?.kind === 'shield' && pk.durability === 50)!;
     expect(droppedShield).toBeTruthy();
 
@@ -1107,30 +1196,30 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     engine.player.x = reDropped.x;
     engine.player.y = reDropped.y;
     engine.tryPickup();
-    expect(engine.player.melee.kind).toBe('shield');
-    expect(engine.player.shield).toBe(37);
+    expect(meleeInHand(engine).def.kind).toBe('shield');
+    expect(meleeInHand(engine).durability).toBe(37);
 
     // 7. Shield Qi skill restores held shield durability to 100
-    engine.player.activeSlot = 'melee';
+    engine.player.activeHand = 1;
     engine.player.qi = engine.player.maxQi;
     engine.setMouseDown(true);
     engine.update(1.5, 1280, 720);
     expect(engine.player.chargeReady).toBe(true);
     engine.setMouseDown(false);
-    expect(engine.player.shield).toBe(100);
+    expect(meleeInHand(engine).durability).toBe(100);
 
     // 8. Dropping to 0 durability shatters shield back to knife
     engine.player.invulnTimer = 0;
     damagePlayer(150, false, undefined, engine.player.x + 120, engine.player.y);
-    expect(engine.player.shield).toBe(0);
-    expect(engine.player.melee.kind).toBe('knife');
+    expect(meleeInHand(engine).durability).toBe(0);
+    expect(meleeInHand(engine).def.kind).toBe('knife');
   });
 
   it('drops non-default weapons on player death and resets to pistol, knife, and 0 shield on respawn', () => {
     const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
-    engine.player.gun = GUNS.find((g) => g.kind === 'rifle')!;
-    engine.player.melee = MELEES.find((m) => m.kind === 'greatsword')!;
-    engine.player.shield = 0;
+    gunInHand(engine).def = GUNS.find((g) => g.kind === 'rifle')!;
+    meleeInHand(engine).def = MELEES.find((m) => m.kind === 'greatsword')!;
+    meleeInHand(engine).durability = 0;
     engine.player.invulnTimer = 0;
     const deathX = engine.player.x;
     const deathY = engine.player.y;
@@ -1140,9 +1229,9 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     }).damagePlayer(999, true);
 
     expect(engine.player.lives).toBe(2);
-    expect(engine.player.gun.kind).toBe('pistol');
-    expect(engine.player.melee.kind).toBe('knife');
-    expect(engine.player.shield).toBe(0);
+    expect(gunInHand(engine).def.kind).toBe('pistol');
+    expect(meleeInHand(engine).def.kind).toBe('knife');
+    expect(meleeInHand(engine).durability).toBe(0);
     expect(engine.pickups.some((pk) => pk.kind === 'gun' && pk.gunDef?.kind === 'rifle' && Math.hypot(pk.x - deathX, pk.y - deathY) < 40)).toBe(true);
     expect(engine.pickups.some((pk) => pk.kind === 'melee' && pk.meleeDef?.kind === 'greatsword' && Math.hypot(pk.x - deathX, pk.y - deathY) < 40)).toBe(true);
   });
@@ -1151,8 +1240,8 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     // 1. Royal Light Orbs are yellow and hurt teammates
     const { engine: rEng } = createTestEngine('royal', 'european_castle', 10);
     const ally = rEng.enemies.find((e) => e.faction === 'royal')!;
-    rEng.player.activeSlot = 'melee';
-    rEng.player.melee = MELEES.find((m) => m.kind === 'greatsword')!;
+    rEng.player.activeHand = 1;
+    meleeInHand(rEng).def = MELEES.find((m) => m.kind === 'greatsword')!;
     rEng.player.x = 10 * TILE;
     rEng.player.y = 18.5 * TILE;
     rEng.player.elevation = 0;
@@ -1177,8 +1266,8 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     // 2. Shadow Black Dragon does NOT hurt allies, deals 20 head damage, and bounces off map walls/obstacles
     const { engine: sEng } = createTestEngine('shadow', 'tokyo_shrine', 10);
     const sAlly = sEng.enemies.find((e) => e.faction === 'shadow')!;
-    sEng.player.activeSlot = 'melee';
-    sEng.player.melee = MELEES.find((m) => m.kind === 'greatsword')!;
+    sEng.player.activeHand = 1;
+    meleeInHand(sEng).def = MELEES.find((m) => m.kind === 'greatsword')!;
     sEng.player.x = 26 * TILE;
     sEng.player.y = 18.5 * TILE;
     sEng.player.elevation = 0;
@@ -1228,13 +1317,13 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     expect(getWeaponSwapDuration('rifle')).toBeGreaterThan(getWeaponSwapDuration('claw'));
 
     const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
-    engine.player.melee = MELEES.find((m) => m.kind === 'greatsword')!;
-    engine.player.activeSlot = 'gun';
+    meleeInHand(engine).def = MELEES.find((m) => m.kind === 'greatsword')!;
+    engine.player.activeHand = 0;
     engine.switchWeapon();
     const gsSwap = engine.player.swapTimer;
 
-    engine.player.melee = MELEES.find((m) => m.kind === 'claw')!;
-    engine.player.activeSlot = 'gun';
+    meleeInHand(engine).def = MELEES.find((m) => m.kind === 'claw')!;
+    engine.player.activeHand = 0;
     engine.switchWeapon();
     const clawSwap = engine.player.swapTimer;
 
@@ -1302,15 +1391,15 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
 
   it('non-shield Qi skills do not grant phantom shield durability when holding knife', () => {
     const { engine, getHud } = createTestEngine('mercenary', 'tokyo_shrine', 10);
-    engine.player.activeSlot = 'melee';
-    engine.player.melee = MELEES.find((m) => m.kind === 'knife')!;
+    engine.player.activeHand = 1;
+    meleeInHand(engine).def = MELEES.find((m) => m.kind === 'knife')!;
     engine.player.qi = engine.player.maxQi;
     engine.setMouseDown(true);
     engine.update(1.5, 1280, 720);
     expect(engine.player.chargeReady).toBe(true);
     engine.setMouseDown(false);
 
-    expect(engine.player.shield).toBe(0);
+    expect(meleeInHand(engine).durability).toBe(0);
     expect(getHud()!.player.activeTimedSkills.some((s) => s.id === 'vampire')).toBe(true);
   });
 });
@@ -1399,8 +1488,8 @@ describe('Charge movement speed, heavy weapon balance, 1x1 non-adjacent hill sta
     engine.player.x = 10 * TILE;
     engine.player.y = 18.5 * TILE;
     engine.player.elevation = 0;
-    engine.player.activeSlot = 'melee';
-    engine.player.melee = MELEES.find((m) => m.kind === 'knife')!;
+    engine.player.activeHand = 1;
+    meleeInHand(engine).def = MELEES.find((m) => m.kind === 'knife')!;
     engine.player.qi = engine.player.maxQi;
 
     // Measure distance moved walking right without charging
@@ -1518,8 +1607,8 @@ describe('Charge movement speed, heavy weapon balance, 1x1 non-adjacent hill sta
 
     // End-to-end player Black Dragon Wave trigger at an arbitrary 20-degree aim snaps to 0 degrees (dx=1, dy=0)
     const { engine } = createTestEngine('shadow', 'european_castle', 10);
-    engine.player.activeSlot = 'melee';
-    engine.player.melee = MELEES.find((m) => m.kind === 'greatsword')!;
+    engine.player.activeHand = 1;
+    meleeInHand(engine).def = MELEES.find((m) => m.kind === 'greatsword')!;
     engine.player.x = 12 * TILE;
     engine.player.y = 18.5 * TILE;
     engine.player.elevation = 0;

@@ -7,6 +7,7 @@ import {
   CharacterSkin,
   EnemyArchetype,
   EnemyEntity,
+  EquippedWeapon,
   FactionId,
   FloatingText,
   GridTile,
@@ -20,8 +21,20 @@ import {
   PlayerState,
   Projectile,
   SlashEffect,
+  WeaponHand,
   WeaponSlot,
 } from './types';
+
+const DEFAULT_PISTOL = GUNS.find((gun) => gun.kind === 'pistol') || GUNS[0];
+const DEFAULT_KNIFE = MELEES.find((melee) => melee.kind === 'knife') || MELEES[0];
+
+function equipGun(def: GunDef): Extract<EquippedWeapon, { type: 'gun' }> {
+  return { type: 'gun', def, ammoInMag: def.magSize, reloadTimer: 0 };
+}
+
+function defaultWeaponForHand(hand: WeaponHand): EquippedWeapon {
+  return hand === 0 ? equipGun(DEFAULT_PISTOL) : { type: 'melee', def: DEFAULT_KNIFE, durability: 0 };
+}
 
 let uidCounter = 1;
 const uid = (prefix: string) => `${prefix}_${uidCounter++}`;
@@ -215,7 +228,6 @@ export class TwilightEngine {
       elevation: 0,
       hp: 150,
       maxHp: 150,
-      shield: 0,
       maxShield: 100,
       qi: 100,
       maxQi: 100,
@@ -231,13 +243,10 @@ export class TwilightEngine {
       comboTimer: 0,
       faction,
       characterSkin,
-      activeSlot: 'gun',
-      gun: startGun,
-      melee: startMelee,
-      ammoInMag: startGun.magSize,
+      activeHand: 0,
+      weapons: [equipGun(startGun), { type: 'melee', def: startMelee, durability: 0 }],
       reserveAmmo: 30,
       maxReserveAmmo: 45,
-      reloadTimer: 0,
       swapTimer: 0,
       swapDuration: 0,
       attackAnimTimer: 0,
@@ -992,6 +1001,10 @@ export class TwilightEngine {
   public clearInputs() {
     this.keys.clear();
     this.mouseDown = false;
+    this.cancelMeleeCharge();
+  }
+
+  private cancelMeleeCharge() {
     this.player.chargingMelee = false;
     this.player.chargeReady = false;
     this.chargeSessionAllowed = false;
@@ -1002,8 +1015,9 @@ export class TwilightEngine {
     this.mouseScreen.x = x;
     this.mouseScreen.y = y;
 
-    if (this.status === 'PLAYING' && this.player.activeSlot === 'gun') {
-      const gun = this.player.gun;
+    const weapon = this.player.weapons[this.player.activeHand];
+    if (this.status === 'PLAYING' && weapon.type === 'gun') {
+      const gun = weapon.def;
       const mult = this.player.eagleEyeTimer > 0 ? 0.45 : 1;
       const maxR = gun.maxCrosshair * mult;
       this.crosshairRadius = Math.min(maxR, this.crosshairRadius + Math.min(8, moveDist * 0.22));
@@ -1015,14 +1029,15 @@ export class TwilightEngine {
       this.mouseDown = false;
       return;
     }
+    const weapon = this.player.weapons[this.player.activeHand];
     if (down && !this.mouseDown) {
       this.mouseDown = true;
-      if (this.player.activeSlot === 'melee') {
+      if (weapon.type === 'melee') {
         this.player.chargingMelee = true;
         this.chargeSessionAllowed = this.player.qi >= this.player.maxQi - 0.5;
         this.player.chargeReady = false;
       } else {
-        if (this.player.swapTimer <= 0 && this.player.ammoInMag <= 0 && this.player.reloadTimer === 0) {
+        if (this.player.swapTimer <= 0 && weapon.ammoInMag <= 0 && weapon.reloadTimer === 0) {
           this.startReload();
         } else {
           this.tryAttack();
@@ -1030,12 +1045,10 @@ export class TwilightEngine {
       }
     } else if (!down && this.mouseDown) {
       this.mouseDown = false;
-      if (this.player.activeSlot === 'melee' && this.player.chargingMelee) {
+      if (weapon.type === 'melee' && this.player.chargingMelee) {
         this.releaseMeleeAttack();
       }
-      this.player.chargingMelee = false;
-      this.player.chargeReady = false;
-      this.chargeSessionAllowed = false;
+      this.cancelMeleeCharge();
     }
   }
 
@@ -1057,9 +1070,9 @@ export class TwilightEngine {
     if (code === 'Escape') {
       this.dropActiveWeapon();
     } else if (code === 'Digit1') {
-      this.equipSlot('gun');
+      this.equipHand(0);
     } else if (code === 'Digit2') {
-      this.equipSlot('melee');
+      this.equipHand(1);
     } else if (code === 'KeyQ') {
       this.switchWeapon();
     } else if (code === 'KeyR') {
@@ -1069,88 +1082,61 @@ export class TwilightEngine {
     }
   }
 
-  public equipSlot(slot: WeaponSlot) {
-    if (this.player.activeSlot === slot) return;
-    this.switchWeapon();
+  public equipHand(hand: WeaponHand) {
+    if (this.player.activeHand !== hand) this.switchWeapon();
+  }
+
+  private dropWeapon(weapon: EquippedWeapon, x: number, y: number): boolean {
+    if (weapon.def.kind === 'pistol' || weapon.def.kind === 'knife') return false;
+    if (weapon.def.kind === 'shield' && weapon.type === 'melee' && weapon.durability <= 0) return false;
+
+    this.pickups.push({
+      id: uid(weapon.type === 'gun' ? 'dropgun' : 'dropmelee'),
+      x,
+      y,
+      kind: weapon.type,
+      label: weapon.def.name,
+      color: weapon.def.color,
+      ...(weapon.type === 'gun'
+        ? { gunDef: weapon.def }
+        : { meleeDef: weapon.def, durability: weapon.def.kind === 'shield' ? Math.round(weapon.durability) : undefined }),
+      bobPhase: 0,
+    });
+    return true;
   }
 
   public dropActiveWeapon() {
     const p = this.player;
-    if (p.activeSlot === 'gun') {
-      if (p.gun.kind === 'pistol') {
-        this.spawnText(p.x, p.y - 36, '預設制式小槍無法放下', '#94A3B8', 0.9);
-        return;
-      }
-      const dropped = p.gun;
-      this.pickups.push({
-        id: uid('dropgun'),
-        x: p.x,
-        y: p.y,
-        kind: 'gun',
-        label: dropped.name,
-        color: dropped.color,
-        gunDef: dropped,
-        bobPhase: 0,
-      });
-      const defaultPistol = GUNS.find((g) => g.kind === 'pistol') || GUNS[0];
-      p.gun = defaultPistol;
-      p.reloadTimer = 0;
-      p.ammoInMag = defaultPistol.magSize;
-      p.swapDuration = getWeaponSwapDuration('pistol');
-      p.swapTimer = p.swapDuration;
-      this.crosshairRadius = defaultPistol.baseCrosshair * (p.eagleEyeTimer > 0 ? 0.45 : 1);
-      sfx.switchWeapon(false);
-      this.spawnText(p.x, p.y - 38, `放下 ${dropped.name} · 換回制式小槍`, '#FBBF24', 1.05);
-      this.emitHud();
+    const weapon = p.weapons[p.activeHand];
+    if (weapon.def.kind === 'pistol' || weapon.def.kind === 'knife') {
+      this.spawnText(p.x, p.y - 36, `預設${weapon.def.name}無法放下`, '#94A3B8', 0.9);
       return;
     }
 
-    if (p.melee.kind === 'knife') {
-      this.spawnText(p.x, p.y - 36, '預設戰術小刀無法放下', '#94A3B8', 0.9);
-      return;
-    }
-    const dropped = p.melee;
-    const droppedDurability = dropped.kind === 'shield' ? Math.max(0, Math.round(p.shield)) : undefined;
-    if (dropped.kind !== 'shield' || (droppedDurability ?? 0) > 0) {
-      this.pickups.push({
-        id: uid('dropmelee'),
-        x: p.x,
-        y: p.y,
-        kind: 'melee',
-        label: dropped.name,
-        color: dropped.color,
-        meleeDef: dropped,
-        durability: droppedDurability,
-        bobPhase: 0,
-      });
-    }
-    const defaultKnife = MELEES.find((m) => m.kind === 'knife') || MELEES[0];
-    p.melee = defaultKnife;
-    p.shield = 0;
-    p.chargingMelee = false;
-    p.chargeReady = false;
-    this.chargeSessionAllowed = false;
-    p.swapDuration = getWeaponSwapDuration('knife');
+    this.dropWeapon(weapon, p.x, p.y);
+    const fallback = defaultWeaponForHand(p.activeHand);
+    p.weapons[p.activeHand] = fallback;
+    this.cancelMeleeCharge();
+    p.swapDuration = getWeaponSwapDuration(fallback.def.kind);
     p.swapTimer = p.swapDuration;
+    if (fallback.type === 'gun') this.resetCrosshair(fallback.def);
     sfx.switchWeapon(false);
-    this.spawnText(p.x, p.y - 38, `放下 ${dropped.name} · 換回戰術小刀`, '#FBBF24', 1.05);
+    this.spawnText(p.x, p.y - 38, `放下 ${weapon.def.name} · 換回${fallback.def.name}`, '#FBBF24', 1.05);
     this.emitHud();
+  }
+
+  private resetCrosshair(gun: GunDef) {
+    this.crosshairRadius = gun.baseCrosshair * (this.player.eagleEyeTimer > 0 ? 0.45 : 1);
   }
 
   public switchWeapon() {
     const p = this.player;
-    p.chargingMelee = false;
-    p.chargeReady = false;
-    this.chargeSessionAllowed = false;
-    p.activeSlot = p.activeSlot === 'gun' ? 'melee' : 'gun';
+    this.cancelMeleeCharge();
+    p.activeHand = p.activeHand === 0 ? 1 : 0;
+    const weapon = p.weapons[p.activeHand];
+    if (weapon.type === 'gun') this.resetCrosshair(weapon.def);
 
-    if (p.activeSlot === 'gun') {
-      const mult = p.eagleEyeTimer > 0 ? 0.45 : 1;
-      this.crosshairRadius = p.gun.baseCrosshair * mult;
-    }
-
-    const nextWeaponKind = p.activeSlot === 'gun' ? p.gun.kind : p.melee.kind;
-    const baseSwapDur = getWeaponSwapDuration(nextWeaponKind);
+    const baseSwapDur = getWeaponSwapDuration(weapon.def.kind);
     const sinceAttack = this.time - p.lastAttackAt;
     if (p.delayCancelReady && sinceAttack <= 0.34 && sinceAttack >= 0.02) {
       p.attackCooldown = 0;
@@ -1171,8 +1157,10 @@ export class TwilightEngine {
 
   public startReload() {
     const p = this.player;
-    if (p.reloadTimer > 0) return;
-    if (p.ammoInMag >= p.gun.magSize) {
+    const active = p.weapons[p.activeHand];
+    const weapon = active.type === 'gun' ? active : p.weapons[p.activeHand === 0 ? 1 : 0];
+    if (weapon.type !== 'gun' || weapon.reloadTimer > 0) return;
+    if (weapon.ammoInMag >= weapon.def.magSize) {
       this.spawnText(p.x, p.y - 36, '彈匣已滿', '#94A3B8', 0.9);
       return;
     }
@@ -1180,7 +1168,7 @@ export class TwilightEngine {
       this.spawnText(p.x, p.y - 36, '備彈已空！請按 Space 拾取地圖彈藥箱', '#F87171', 1.0);
       return;
     }
-    p.reloadTimer = p.gun.reloadTime;
+    weapon.reloadTimer = weapon.def.reloadTime;
     sfx.reload();
     this.spawnText(p.x, p.y - 36, '裝填彈藥中...', '#FBBF24', 0.95);
     this.emitHud();
@@ -1200,7 +1188,11 @@ export class TwilightEngine {
     if (bestIdx === -1) return;
 
     const item = this.pickups[bestIdx];
-    if (item.kind === 'ammo' && p.reserveAmmo >= p.maxReserveAmmo && p.ammoInMag >= p.gun.magSize) {
+    if (
+      item.kind === 'ammo' &&
+      p.reserveAmmo >= p.maxReserveAmmo &&
+      p.weapons.every((weapon) => weapon.type !== 'gun' || weapon.ammoInMag >= weapon.def.magSize)
+    ) {
       this.spawnText(p.x, p.y - 36, '彈藥已達上限 (45 發)', '#94A3B8', 0.95);
       return;
     }
@@ -1219,62 +1211,28 @@ export class TwilightEngine {
           pad.respawnTimer = 10.0;
         }
       }
-    } else if (item.kind === 'gun' && item.gunDef) {
-      const oldGun = p.gun;
-      // 預設制式小槍不會因拾取武器而掉落到地上
-      if (oldGun.id !== item.gunDef.id && oldGun.kind !== 'pistol') {
-        this.pickups.push({
-          id: uid('dropgun'),
-          x: item.x,
-          y: item.y,
-          kind: 'gun',
-          label: oldGun.name,
-          color: oldGun.color,
-          gunDef: oldGun,
-          bobPhase: 0,
-        });
-      }
-      p.gun = item.gunDef;
-      p.ammoInMag = item.gunDef.magSize;
-      p.reloadTimer = 0;
-      p.activeSlot = 'gun';
-      this.crosshairRadius = item.gunDef.baseCrosshair * (p.eagleEyeTimer > 0 ? 0.45 : 1);
-      this.spawnText(p.x, p.y - 38, `拾取 ${item.gunDef.name}`, item.gunDef.color, 1.15);
-    } else if (item.kind === 'melee' && item.meleeDef) {
-      const oldMelee = p.melee;
-      const oldShieldDur = oldMelee.kind === 'shield' ? Math.max(0, Math.round(p.shield)) : undefined;
-      // 預設戰術小刀不會因拾取武器而掉落到地上；若身上原有防彈盾且仍有耐久，保留原耐久掉回地面
-      const shouldDropOld =
-        oldMelee.kind !== 'knife' &&
-        (oldMelee.id !== item.meleeDef.id || oldMelee.kind === 'shield') &&
-        (oldMelee.kind !== 'shield' || (oldShieldDur ?? 0) > 0);
-      if (shouldDropOld) {
-        this.pickups.push({
-          id: uid('dropmelee'),
-          x: item.x,
-          y: item.y,
-          kind: 'melee',
-          label: oldMelee.name,
-          color: oldMelee.color,
-          meleeDef: oldMelee,
-          durability: oldShieldDur,
-          bobPhase: 0,
-        });
-      }
-      p.melee = item.meleeDef;
-      if (item.meleeDef.kind === 'shield') {
-        p.shield = clamp(item.durability ?? p.maxShield, 1, p.maxShield);
+    } else {
+      let weapon: EquippedWeapon;
+      if (item.kind === 'gun' && item.gunDef) {
+        weapon = equipGun(item.gunDef);
+      } else if (item.kind === 'melee' && item.meleeDef) {
+        weapon = {
+          type: 'melee',
+          def: item.meleeDef,
+          durability: item.meleeDef.kind === 'shield' ? clamp(item.durability ?? p.maxShield, 1, p.maxShield) : 0,
+        };
       } else {
-        p.shield = 0;
+        return;
       }
-      p.activeSlot = 'melee';
-      this.spawnText(
-        p.x,
-        p.y - 38,
-        item.meleeDef.kind === 'shield' ? `拾取 ${item.meleeDef.name} (${Math.round(p.shield)}/100)` : `拾取 ${item.meleeDef.name}`,
-        item.meleeDef.color,
-        1.15
-      );
+
+      this.dropWeapon(p.weapons[p.activeHand], item.x, item.y);
+      p.weapons[p.activeHand] = weapon;
+      this.cancelMeleeCharge();
+      if (weapon.type === 'gun') this.resetCrosshair(weapon.def);
+      const label = weapon.type === 'melee' && weapon.def.kind === 'shield'
+        ? `${weapon.def.name} (${Math.round(weapon.durability)}/100)`
+        : weapon.def.name;
+      this.spawnText(p.x, p.y - 38, `拾取 ${label}`, weapon.def.color, 1.15);
     }
     this.emitHud();
   }
@@ -1301,21 +1259,22 @@ export class TwilightEngine {
     const p = this.player;
     if (p.attackCooldown > 0 || p.swapTimer > 0) return;
 
-    if (p.activeSlot === 'gun') {
-      if (p.reloadTimer > 0 || p.ammoInMag <= 0) return;
+    const weapon = p.weapons[p.activeHand];
+    if (weapon.type === 'gun') {
+      if (weapon.reloadTimer > 0 || weapon.ammoInMag <= 0) return;
 
       if (p.royalShieldTimer > 0) {
         p.royalShieldTimer = 0;
         this.spawnText(p.x, p.y - 40, '遠程開火 · 聖光護盾破裂!', '#38BDF8', 1.1);
       }
 
-      const gun = p.gun;
-      const pelletsToFire = gun.kind === 'shotgun' ? Math.max(1, Math.min(gun.pellets, p.ammoInMag)) : gun.pellets;
+      const gun = weapon.def;
+      const pelletsToFire = gun.kind === 'shotgun' ? Math.max(1, Math.min(gun.pellets, weapon.ammoInMag)) : gun.pellets;
       const ammoCost = gun.kind === 'shotgun' ? pelletsToFire : 1;
       p.attackCooldown = 1 / gun.fireRate;
       p.lastAttackAt = this.time;
       p.delayCancelReady = true;
-      p.ammoInMag = Math.max(0, p.ammoInMag - ammoCost);
+      weapon.ammoInMag = Math.max(0, weapon.ammoInMag - ammoCost);
 
       const highGroundMult = p.onHighGround ? 1.15 : 1.0;
       const comboMult = p.comboEmpowerTimer > 0 ? 1 + p.delayCancelBonus : 1.0;
@@ -1396,7 +1355,9 @@ export class TwilightEngine {
     const p = this.player;
     if (p.attackCooldown > 0 || p.swapTimer > 0) return;
 
-    const melee = p.melee;
+    const weapon = p.weapons[p.activeHand];
+    if (weapon.type !== 'melee') return;
+    const melee = weapon.def;
     const comboMult = p.comboEmpowerTimer > 0 ? 1 + p.delayCancelBonus : 1.0;
 
     if (p.chargeReady) {
@@ -1410,7 +1371,7 @@ export class TwilightEngine {
       if (p.comboEmpowerTimer > 0) p.comboEmpowerTimer = 0;
       sfx.ultimate();
       this.camera.shake = 8;
-      this.executePlayerFactionMeleeSkill(comboMult);
+      this.executePlayerFactionMeleeSkill(weapon, comboMult);
       return;
     }
 
@@ -1451,10 +1412,10 @@ export class TwilightEngine {
     );
   }
 
-  private executePlayerFactionMeleeSkill(comboMult: number) {
+  private executePlayerFactionMeleeSkill(weapon: Extract<EquippedWeapon, { type: 'melee' }>, comboMult: number) {
     const p = this.player;
     const fac = p.faction;
-    const mk = p.melee.kind;
+    const mk = weapon.def.kind;
     const facColor = FACTIONS[fac].accentHex;
     const skillName = FACTIONS[fac].meleeSkills[mk].name;
 
@@ -1462,7 +1423,7 @@ export class TwilightEngine {
     this.activeSkillBannerTimer = 2.5;
 
     if (mk === 'shield') {
-      p.shield = p.maxShield;
+      weapon.durability = p.maxShield;
       this.spawnText(p.x, p.y - 44, `${skillName}! (盾牌滿 100)`, '#38BDF8', 1.3);
       this.slashes.push({
         x: p.x,
@@ -1587,7 +1548,6 @@ export class TwilightEngine {
     if (fac === 'shadow') {
       if (mk === 'knife') {
         p.eagleEyeTimer = 8.0;
-        this.crosshairRadius = p.gun.baseCrosshair * 0.45;
       } else if (mk === 'claw') {
         p.shadowCloneTimer = 6.5;
       } else {
@@ -1597,7 +1557,7 @@ export class TwilightEngine {
           y: p.y,
           angle: dir.angle,
           arc: Math.PI * 0.9,
-          reach: p.melee.reach + 20,
+          reach: weapon.def.reach + 20,
           color: '#4338CA',
           life: 0.25,
           maxLife: 0.25,
@@ -1803,6 +1763,7 @@ export class TwilightEngine {
         }
         if (enemy.shieldDurability <= 0) {
           enemy.meleeKind = 'knife';
+          enemy.chargingSkillTimer = 0;
           enemy.shieldDurability = 0;
         }
       }
@@ -1988,9 +1949,9 @@ export class TwilightEngine {
 
     let finalDmg = Math.max(2, Math.round(dmg));
 
-    // 手持戰術防彈盾：必須目前正手持盾牌（activeSlot === 'melee' && melee.kind === 'shield'）且攻擊來自正面才能格擋
-    const holdingShield = p.activeSlot === 'melee' && p.melee.kind === 'shield' && p.shield > 0;
-    if (holdingShield) {
+    // 手持盾牌且攻擊來自正面時才能格擋
+    const weapon = p.weapons[p.activeHand];
+    if (weapon.type === 'melee' && weapon.def.kind === 'shield' && weapon.durability > 0) {
       const originPos =
         hitOriginX !== undefined && hitOriginY !== undefined
           ? { x: hitOriginX, y: hitOriginY }
@@ -2005,34 +1966,34 @@ export class TwilightEngine {
         : true;
       if (frontalBlocked) {
         if (!isMeleeAttack) {
-          const absorbed = Math.min(p.shield, finalDmg);
-          p.shield = Math.max(0, p.shield - absorbed);
+          const absorbed = Math.min(weapon.durability, finalDmg);
+          weapon.durability = Math.max(0, weapon.durability - absorbed);
           finalDmg -= absorbed;
           if (absorbed > 0) {
             this.spawnText(
               p.x,
               p.y - 36,
-              p.shield === 0 ? '護盾碎裂!' : `盾擋 -${absorbed}`,
-              p.shield === 0 ? '#F59E0B' : '#38BDF8',
+              weapon.durability === 0 ? '護盾碎裂!' : `盾擋 -${absorbed}`,
+              weapon.durability === 0 ? '#F59E0B' : '#38BDF8',
               0.95
             );
           }
         } else {
           const halfDmg = Math.max(1, Math.round(finalDmg * 0.5));
           const blockedAmt = Math.max(1, finalDmg - halfDmg);
-          p.shield = Math.max(0, p.shield - blockedAmt);
+          weapon.durability = Math.max(0, weapon.durability - blockedAmt);
           finalDmg = halfDmg;
           this.spawnText(
             p.x,
             p.y - 36,
-            p.shield === 0 ? '護盾碎裂!' : `盾格減半`,
-            p.shield === 0 ? '#F59E0B' : '#38BDF8',
+            weapon.durability === 0 ? '護盾碎裂!' : `盾格減半`,
+            weapon.durability === 0 ? '#F59E0B' : '#38BDF8',
             0.95
           );
         }
-        if (p.shield <= 0) {
-          p.melee = MELEES.find((m) => m.kind === 'knife') || MELEES[0];
-          p.shield = 0;
+        if (weapon.durability <= 0) {
+          p.weapons[p.activeHand] = { type: 'melee', def: DEFAULT_KNIFE, durability: 0 };
+          this.cancelMeleeCharge();
         }
       }
     }
@@ -2053,34 +2014,10 @@ export class TwilightEngine {
     sfx.playerHurt();
 
     if (p.hp <= 0) {
-      // 玩家死亡時掉落非預設武器到地面
-      let dropOff = 0;
-      if (p.gun.kind !== 'pistol') {
-        this.pickups.push({
-          id: uid('dropgun'),
-          x: p.x,
-          y: p.y,
-          kind: 'gun',
-          label: p.gun.name,
-          color: p.gun.color,
-          gunDef: p.gun,
-          bobPhase: 0,
-        });
-        dropOff = 18;
-      }
-      if (p.melee.kind !== 'knife' && (p.melee.kind !== 'shield' || p.shield > 0)) {
-        this.pickups.push({
-          id: uid('dropmelee'),
-          x: clamp(p.x + dropOff, TILE * 0.5, this.map.width - TILE * 0.5),
-          y: p.y,
-          kind: 'melee',
-          label: p.melee.name,
-          color: p.melee.color,
-          meleeDef: p.melee,
-          durability: p.melee.kind === 'shield' ? Math.round(p.shield) : undefined,
-          bobPhase: 0,
-        });
-      }
+      // 玩家死亡時掉落兩手的非預設武器
+      const droppedFirst = this.dropWeapon(p.weapons[0], p.x, p.y);
+      const secondX = droppedFirst ? clamp(p.x + 18, TILE * 0.5, this.map.width - TILE * 0.5) : p.x;
+      this.dropWeapon(p.weapons[1], secondX, p.y);
 
       p.lives -= 1;
       if (p.lives > 0) {
@@ -2095,13 +2032,9 @@ export class TwilightEngine {
         p.vy = 0;
         p.elevation = this.getWalkableElevation(p.x, p.y);
         p.onHighGround = p.elevation >= 1.0;
-        p.chargingMelee = false;
-        p.chargeReady = false;
-        this.chargeSessionAllowed = false;
-        p.gun = GUNS.find((g) => g.kind === 'pistol') || GUNS[0];
-        p.melee = MELEES.find((m) => m.kind === 'knife') || MELEES[0];
-        p.activeSlot = 'gun';
-        p.reloadTimer = 0;
+        this.cancelMeleeCharge();
+        p.weapons = [defaultWeaponForHand(0), defaultWeaponForHand(1)];
+        p.activeHand = 0;
         p.swapTimer = 0;
         p.swapDuration = 0;
         p.attackAnimTimer = 0;
@@ -2117,11 +2050,9 @@ export class TwilightEngine {
         p.sizeScale = 1;
         p.radius = p.baseRadius;
         p.hp = p.maxHp;
-        p.shield = 0;
         p.qi = p.maxQi;
-        p.ammoInMag = p.gun.magSize;
         p.reserveAmmo = 30;
-        this.crosshairRadius = p.gun.baseCrosshair;
+        this.crosshairRadius = DEFAULT_PISTOL.baseCrosshair;
         p.invulnTimer = 2.4;
 
         const respawnCam = this.clampCameraToMap(p.x, p.y, 1280, 720);
@@ -2420,18 +2351,20 @@ export class TwilightEngine {
       p.qi = Math.min(p.maxQi, p.qi + (24 + p.qiRegenBonus) * repSpeedMult * dt);
     }
 
-    if (p.activeSlot === 'gun') {
+    const weapon = p.weapons[p.activeHand];
+    if (weapon.type === 'gun') {
       const mult = p.eagleEyeTimer > 0 ? 0.45 : 1;
-      const targetBase = p.gun.baseCrosshair * mult;
+      const targetBase = weapon.def.baseCrosshair * mult;
       this.crosshairRadius = Math.max(targetBase, this.crosshairRadius - 24 * dt);
     }
 
-    if (p.reloadTimer > 0) {
-      p.reloadTimer -= dt;
-      if (p.reloadTimer <= 0) {
-        p.reloadTimer = 0;
-        const needed = Math.min(p.gun.magSize - p.ammoInMag, p.reserveAmmo);
-        p.ammoInMag += needed;
+    for (const equipped of p.weapons) {
+      if (equipped.type !== 'gun' || equipped.reloadTimer <= 0) continue;
+      equipped.reloadTimer -= dt;
+      if (equipped.reloadTimer <= 0) {
+        equipped.reloadTimer = 0;
+        const needed = Math.min(equipped.def.magSize - equipped.ammoInMag, p.reserveAmmo);
+        equipped.ammoInMag += needed;
         p.reserveAmmo -= needed;
         this.emitHud();
       }
@@ -2442,7 +2375,7 @@ export class TwilightEngine {
     p.angle = Math.atan2(worldMouseY - p.y, worldMouseX - p.x);
 
     const mv = this.getMoveVector();
-    const weaponSpeedMult = p.activeSlot === 'melee' ? p.melee.moveSpeedMult : p.gun.moveSpeedMult;
+    const weaponSpeedMult = weapon.def.moveSpeedMult;
     const baseSpeed = 245 * (1 + p.speedBonus) * weaponSpeedMult;
     const prevPlayerX = p.x;
     const prevPlayerY = p.y;
@@ -2467,7 +2400,7 @@ export class TwilightEngine {
       p.moveIntensity = Math.max(0, p.moveIntensity - dt * 10);
     }
 
-    if (this.mouseDown && p.activeSlot === 'gun' && p.ammoInMag > 0) {
+    if (this.mouseDown && weapon.type === 'gun' && weapon.ammoInMag > 0) {
       this.tryAttack();
     }
 
@@ -2986,7 +2919,8 @@ export class TwilightEngine {
         e.activeSlot = lightestSlot;
       }
 
-      // 電腦角色技能集氣與釋放
+      // 必須手持近戰武器才能集氣和施放技能
+      if (e.activeSlot === 'gun') e.chargingSkillTimer = 0;
       if (e.chargingSkillTimer > 0) {
         e.chargingSkillTimer -= dt;
         if (e.chargingSkillTimer <= 0) {
@@ -3001,6 +2935,7 @@ export class TwilightEngine {
       }
 
       if (
+        e.activeSlot === 'melee' &&
         e.skillCooldown <= 0 &&
         ((losTargetPos && bestLosDist <= sightRange) || (e.meleeKind === 'shield' && e.shieldDurability <= 45))
       ) {
@@ -3677,7 +3612,9 @@ export class TwilightEngine {
       ctx.stroke();
     }
 
-    const playerReloadProg = p.reloadTimer > 0 ? clamp(1 - p.reloadTimer / p.gun.reloadTime, 0, 1) : 0;
+    const weapon = p.weapons[p.activeHand];
+    const isReloading = weapon.type === 'gun' && weapon.reloadTimer > 0;
+    const playerReloadProg = isReloading ? clamp(1 - weapon.reloadTimer / weapon.def.reloadTime, 0, 1) : 0;
     const playerSwapProg = p.swapTimer > 0 && p.swapDuration > 0 ? clamp(1 - p.swapTimer / p.swapDuration, 0.01, 1) : 0;
     const playerAtkProg =
       p.attackAnimTimer > 0 && p.attackAnimDuration > 0
@@ -3692,14 +3629,14 @@ export class TwilightEngine {
       p.angle,
       p.invulnTimer > 0 && Math.floor(this.time * 16) % 2 === 0 ? '#FFFFFF' : facHex,
       'PLAYER',
-      p.activeSlot === 'melee',
+      weapon.type === 'melee',
       p.shadowCloneTimer > 0,
-      p.reloadTimer > 0,
+      isReloading,
       playerReloadProg,
-      p.activeSlot === 'gun' ? p.gun.color : p.melee.color,
+      weapon.def.color,
       false,
-      p.gun.kind,
-      p.melee.kind,
+      weapon.type === 'gun' ? weapon.def.kind : undefined,
+      weapon.type === 'melee' ? weapon.def.kind : undefined,
       p.characterSkin,
       p.walkPhase,
       p.moveIntensity,
@@ -3708,7 +3645,7 @@ export class TwilightEngine {
       p.attackAnimKind
     );
 
-    if (p.reloadTimer > 0) {
+    if (isReloading) {
       const barW = 42;
       const barX = p.x - barW / 2;
       const barY = p.y - p.radius - 16;
@@ -4990,12 +4927,13 @@ export class TwilightEngine {
     const mx = this.mouseScreen.x;
     const my = this.mouseScreen.y;
     const p = this.player;
-    const r = p.activeSlot === 'gun' ? this.crosshairRadius : 12;
+    const weapon = p.weapons[p.activeHand];
+    const r = weapon.type === 'gun' ? this.crosshairRadius : 12;
 
     ctx.save();
     ctx.translate(mx, my);
 
-    if (p.activeSlot === 'gun' && p.reloadTimer > 0) {
+    if (weapon.type === 'gun' && weapon.reloadTimer > 0) {
       // 換子彈圖示（對應 換子彈.png：雙橘黃順時針旋轉彎曲箭頭）
       ctx.rotate(this.time * 4.5);
       for (const baseAng of [0, Math.PI]) {
@@ -5031,7 +4969,7 @@ export class TwilightEngine {
         ctx.stroke();
         ctx.restore();
       }
-    } else if (p.activeSlot === 'gun' && p.ammoInMag <= 0) {
+    } else if (weapon.type === 'gun' && weapon.ammoInMag <= 0) {
       // 沒有子彈圖示（對應 沒有子彈.png：紅色空圓環 + 12 道外射警示紅線）
       ctx.strokeStyle = '#EF4444';
       ctx.lineWidth = 2.4;
@@ -5082,7 +5020,9 @@ export class TwilightEngine {
       }
     }
     const hostiles = this.enemies.filter((e) => areHostile(p.faction, 'player', e.faction, e.id));
-    const activeSkill = FACTIONS[p.faction].meleeSkills[p.melee.kind].name;
+    const weapon = p.weapons[p.activeHand];
+    const offHandWeapon = p.weapons[p.activeHand === 0 ? 1 : 0];
+    const activeSkill = weapon.type === 'melee' ? FACTIONS[p.faction].meleeSkills[weapon.def.kind].name : null;
 
     const buffs: string[] = [];
     const activeTimedSkills: HudSnapshot['player']['activeTimedSkills'] = [];
@@ -5142,7 +5082,7 @@ export class TwilightEngine {
       player: {
         hp: Math.round(p.hp),
         maxHp: p.maxHp,
-        shield: Math.round(p.shield),
+        shield: weapon.type === 'melee' ? Math.round(weapon.durability) : 0,
         maxShield: p.maxShield,
         qi: Math.round(p.qi),
         maxQi: p.maxQi,
@@ -5158,13 +5098,13 @@ export class TwilightEngine {
         maxCombo: p.maxCombo,
         faction: p.faction,
         characterSkin: p.characterSkin,
-        activeSlot: p.activeSlot,
-        gun: p.gun,
-        melee: p.melee,
-        ammoInMag: p.ammoInMag,
+        weapon: { ...weapon },
+        offHandWeapon: { ...offHandWeapon },
         reserveAmmo: p.reserveAmmo,
         maxReserveAmmo: p.maxReserveAmmo,
-        reloadProgress: p.reloadTimer > 0 ? Math.max(0.01, 1 - p.reloadTimer / p.gun.reloadTime) : 0,
+        reloadProgress: weapon.type === 'gun' && weapon.reloadTimer > 0
+          ? Math.max(0.01, 1 - weapon.reloadTimer / weapon.def.reloadTime)
+          : 0,
         isSwapping: p.swapTimer > 0,
         chargingMelee: p.chargingMelee && this.chargeSessionAllowed,
         chargeReady: p.chargeReady,
