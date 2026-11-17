@@ -86,7 +86,7 @@ function createTileWallLine(
       result.push({
         ...tRect(gx, gy, 1, 1),
         blocksBullets: true,
-        elevation: 3.0,
+        elevation: 10,
         kind: 'wall',
         style,
       });
@@ -133,6 +133,10 @@ function createTokyoShrineMap(): ArenaMap {
   const goldenGinkgo: [string, string, string, string] = ['#713F12', '#A16207', '#CA8A04', '#FACC15'];
 
   const tileGrid = createTerrainGrid(cols, rows);
+  // 外圍林間改為青綠草地，保留中央古社庭園與南北參道泥石地板
+  paintTerrainRect(tileGrid, 0, 0, cols, rows, 0, 'grass_ground');
+  paintTerrainRect(tileGrid, 9, 5, 12, 12, 0, 'default');
+  paintTerrainRect(tileGrid, 13, 0, 4, rows, 0, 'default');
 
   // 中央神社台基 (1.0)
   paintTerrainRect(tileGrid, 11, 7, 8, 8, 1.0, 'shrine_floor');
@@ -362,7 +366,7 @@ function createEuropeanCastleMap(): ArenaMap {
   const pillars: Obstacle[] = pillarCoords.map(([gx, gy]) => ({
     ...tRect(gx, gy, 1, 1),
     blocksBullets: true,
-    elevation: 3.0,
+    elevation: 10,
     kind: 'wall',
     style: 'castle_pillar',
   }));
@@ -498,6 +502,9 @@ function createDesertRuinsMap(): ArenaMap {
   const obeliskWalls: Obstacle[] = [
     ...createTileWallLine(17, 6, 17, 8, 'stone_wall_tan'),
     ...createTileWallLine(27, 12, 28, 13, 'stone_wall_tan'),
+    // 右上高地西側防禦牆＋中央鑲嵌 1×1 小箱掩體 (25, 4)
+    ...createTileWallLine(25, 2, 25, 3, 'stone_wall_tan'),
+    ...createTileWallLine(25, 5, 25, 6, 'stone_wall_tan'),
   ];
 
   return {
@@ -527,9 +534,10 @@ function createDesertRuinsMap(): ArenaMap {
     ],
     obstacles: [
       { ...tRect(4, 19, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate' },
-      { ...tRect(17, 14, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate' },
+      { ...tRect(16, 14, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate' },
       { ...tRect(28, 9, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate' },
-      { ...tRect(26, 17, 3, 2), blocksBullets: true, elevation: 3.0, kind: 'wall', style: 'house' },
+      { ...tRect(25, 4, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
+      { ...tRect(26, 17, 3, 2), blocksBullets: true, elevation: 10, kind: 'wall', style: 'house' },
       ...obeliskWalls,
     ],
     bushes: [
@@ -705,7 +713,7 @@ function createWesternRailwayMap(): ArenaMap {
     ...createTileWallLine(21, 4, 23, 4, 'stone_wall_tan'),
     ...createTileWallLine(21, 5, 21, 5, 'stone_wall_tan'),
     { ...tRect(21, 6, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
-    { ...tRect(26, 3, 3, 2), blocksBullets: true, elevation: 3.0, kind: 'wall', style: 'house' },
+    { ...tRect(26, 3, 3, 2), blocksBullets: true, elevation: 10, kind: 'wall', style: 'house' },
 
     // 西南Ｌ形石牆（東端改為一格小箱掩體，牆對箱子面明亮）
     ...createTileWallLine(5, 15, 5, 18, 'stone_wall_tan'),
@@ -909,21 +917,29 @@ function createBambooFortressMap(): ArenaMap {
     'hill'
   );
 
-  // 中央啞鈴型鞍部山脊 (1.0 貫穿南北 + 雙峰 2.0)
+  // 中央啞鈴型鞍部山脊 (1.0 向下延伸並直接銜接南方外圍山丘 + 雙峰 2.0)
   paintTerrainRows(
     tileGrid,
     6,
     [
-      [15, 17],
-      [14, 18],
-      [14, 18],
-      [15, 17],
-      [15, 17],
-      [15, 17],
-      [14, 18],
-      [14, 18],
-      [15, 17],
-      [15, 16],
+      [15, 17], // gy=6
+      [14, 18], // gy=7
+      [14, 18], // gy=8
+      [15, 17], // gy=9
+      [15, 17], // gy=10
+      [15, 17], // gy=11
+      [14, 18], // gy=12
+      [14, 18], // gy=13
+      [15, 17], // gy=14
+      [15, 17], // gy=15
+      [15, 17], // gy=16
+      [15, 17], // gy=17
+      [14, 17], // gy=18
+      [14, 18], // gy=19
+      [15, 17], // gy=20
+      [15, 17], // gy=21
+      [15, 17], // gy=22
+      [14, 18], // gy=23 直接連通南緣山脈 [0..13] 與 [18..31]
     ],
     1.0,
     'hill'
@@ -964,8 +980,15 @@ function createBambooFortressMap(): ArenaMap {
   paintTerrainRows(tileGrid, 16, [[11, 13], [10, 12]], 1.0, 'hill');
   paintTerrainRows(tileGrid, 4, [[19, 21], [20, 22]], 1.0, 'hill');
 
-  // 每格三株的密集竹林實牆（只放置於平滑山谷與開闊山脊旁，絕不阻擋階梯口）
+  // 每格三株的密集竹林實牆（遍布平地山谷與山丘高地，絕不阻擋階梯口）
   const bambooCoords: [number, number][] = [
+    // 山丘上竹群 (elev 1.0)
+    [2, 0], [6, 1], [25, 1],
+    [3, 7], [7, 5], [8, 13],
+    [17, 14], [16, 18], [17, 21],
+    [24, 6], [24, 12],
+    [2, 20], [8, 22], [22, 21],
+    // 平地山谷竹群 (elev 0)
     [13, 3], [14, 3], [14, 4],
     [17, 3], [18, 3],
     [5, 4], [5, 5],
@@ -977,16 +1000,15 @@ function createBambooFortressMap(): ArenaMap {
     [19, 14], [19, 15],
     [26, 9], [26, 14],
     [6, 17], [7, 17], [7, 18],
-    [15, 18], [16, 18], [17, 18],
     [23, 17], [24, 17], [24, 18],
     [10, 19], [11, 19],
     [20, 19], [21, 19],
-    [14, 21], [17, 21],
+    [14, 21],
   ];
   const bambooWalls: Obstacle[] = bambooCoords.map(([gx, gy]) => ({
     ...tRect(gx, gy, 1, 1),
     blocksBullets: true,
-    elevation: 3.0,
+    elevation: 10,
     kind: 'wall',
     style: 'bamboo',
   }));
@@ -1023,9 +1045,11 @@ function createBambooFortressMap(): ArenaMap {
       { ...tRect(10, 7, 1, 1), elevation: 1.5, direction: 'west', style: 'hill' },
       { ...tRect(10, 10, 1, 1), elevation: 1.5, direction: 'west', style: 'hill' },
 
-      // 中央鞍部山脊土坡（0.5 位於山腰、1.5 位於南北兩端，保留寬裕平地緩衝）
+      // 中央鞍部與南延山脊土坡（0.5 位於山腰、1.5 位於高峰兩側，保留寬裕平地緩衝）
       { ...tRect(14, 11, 1, 1), elevation: 0.5, direction: 'east', style: 'hill' },
       { ...tRect(18, 11, 1, 1), elevation: 0.5, direction: 'west', style: 'hill' },
+      { ...tRect(18, 17, 1, 1), elevation: 0.5, direction: 'west', style: 'hill' },
+      { ...tRect(13, 19, 1, 1), elevation: 0.5, direction: 'east', style: 'hill' },
       { ...tRect(15, 6, 1, 1), elevation: 1.5, direction: 'south', style: 'hill' },
       { ...tRect(17, 13, 1, 1), elevation: 1.5, direction: 'west', style: 'hill' },
 
@@ -1056,7 +1080,7 @@ function createBambooFortressMap(): ArenaMap {
       { ...tRect(6, 15, 1, 1), canopyRadius: 42, foliagePalette: bambooCanopy },
       { ...tRect(13, 5, 1, 1), canopyRadius: 42, foliagePalette: bambooCanopy },
       { ...tRect(26, 16, 1, 1), canopyRadius: 42, foliagePalette: bambooCanopy },
-      { ...tRect(18, 17, 1, 1), canopyRadius: 40, foliagePalette: bambooCanopy },
+      { ...tRect(19, 18, 1, 1), canopyRadius: 40, foliagePalette: bambooCanopy },
       { ...tRect(10, 4, 1, 1), canopyRadius: 40, foliagePalette: bambooCanopy },
       { ...tRect(22, 19, 1, 1), canopyRadius: 42, foliagePalette: bambooCanopy },
     ],
@@ -1314,7 +1338,7 @@ function createStanleyIslandMap(): ArenaMap {
 
   const obstacles: Obstacle[] = [
     // 東岸石砌海岸防哨小屋 (3.0) — 全地圖零木箱！
-    { ...tRect(24, 26, 3, 2), blocksBullets: true, elevation: 3.0, kind: 'wall', style: 'house' },
+    { ...tRect(24, 26, 3, 2), blocksBullets: true, elevation: 10, kind: 'wall', style: 'house' },
 
     // 北岸面湖Ｌ形與短石牆掩體
     ...createTileWallLine(16, 12, 19, 12, 'stone_wall_tan'),

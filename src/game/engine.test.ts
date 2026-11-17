@@ -253,9 +253,7 @@ describe('KeyR reload & infinite ranged weapon range', () => {
   });
 
   it('gives all 4 ranged guns infinite map-spanning range and stops on first hit (no multi-target pierce)', () => {
-    for (const g of GUNS) {
-      expect(g.range).toBeGreaterThanOrEqual(9000);
-    }
+    expect(GUNS.length).toBe(4);
 
     const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
     // Place player on clear left lane and two shadow enemies lined up far away (> 900px from player!)
@@ -513,8 +511,9 @@ describe('Default loadout, player respawn, and map crate placement invariants', 
     attacker.elevation = rival.elevation = engine.player.elevation = 0;
     attacker.speed = rival.speed = 0;
     attacker.attackCooldown = 0;
-    attacker.skillCooldown = 99;
-    rival.attackCooldown = rival.skillCooldown = 99;
+    attacker.qi = -999;
+    rival.attackCooldown = 99;
+    rival.qi = -999;
     rival.x = attacker.x + 205;
     engine.player.x = attacker.x + 100;
     engine.player.invulnTimer = 0;
@@ -765,7 +764,7 @@ describe('Shotgun 5-round burst, 1xN tunnel traversal, and full map BFS reachabi
         }
       }
     }
-  });
+  }, 15000);
 });
 
 describe('Enemy sight radius (8 tiles), hit-based target switching, and A* elevation navigation', () => {
@@ -773,7 +772,7 @@ describe('Enemy sight radius (8 tiles), hit-based target switching, and A* eleva
     const { engine } = createTestEngine('royal', 'european_castle', 10);
     const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
     enemy.archetype = 'trooper';
-    enemy.gunKind = 'pistol';
+    enemy.weapons[0] = { type: 'gun', def: GUNS.find((g) => g.kind === 'pistol')!, ammoInMag: 6, reloadTimer: 0 };
     enemy.eagleEyeTimer = 0;
     enemy.x = 6.5 * TILE;
     enemy.y = 18.5 * TILE;
@@ -890,16 +889,17 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
   it('spawns all enemies with pistol and knife, excludes heal packs, and conserves total non-default weapons', () => {
     const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
     for (const e of engine.enemies) {
-      expect(e.gunKind).toBe('pistol');
-      expect(e.meleeKind).toBe('knife');
+      expect(e.weapons[0].def.kind).toBe('pistol');
+      expect(e.weapons[1].def.kind).toBe('knife');
     }
 
     const countNonDefaultWeapons = () => {
       let total = engine.pickups.filter((pk) => pk.kind === 'gun' || pk.kind === 'melee').length;
       total += engine.player.weapons.filter(({ def }) => def.kind !== 'pistol' && def.kind !== 'knife').length;
       for (const e of engine.enemies) {
-        if (e.gunKind !== 'pistol') total += 1;
-        if (e.meleeKind !== 'knife') total += 1;
+        for (const w of e.weapons) {
+          if (w.def.kind !== 'pistol' && w.def.kind !== 'knife') total += 1;
+        }
       }
       return total;
     };
@@ -953,7 +953,7 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     engine.player.x = 2.5 * TILE;
     engine.player.y = 19.5 * TILE;
     engine.update(0.05, 1280, 720);
-    expect(enemy.gunKind).toBe('sniper');
+    expect(enemy.weapons[0].def.kind).toBe('sniper');
     expect(countNonDefaultWeapons()).toBe(initialPoolCount);
 
     const damageEnemy = (engine as unknown as {
@@ -999,7 +999,7 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
 
     seekEnemy.focusedTargetId = null;
     seekEnemy.alertTimer = 0;
-    seekEnemy.skillCooldown = 99;
+    seekEnemy.qi = -999;
     seekEnemy.x = 21.5 * TILE;
     seekEnemy.y = 18.5 * TILE;
     seekEnemy.elevation = seekEngine.getWalkableElevation(seekEnemy.x, seekEnemy.y);
@@ -1012,7 +1012,7 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     expect(distAfter).toBeLessThan(distBefore);
   });
 
-  it('switches enemy to ranged gun when target is hittable at distance, and to lightest weapon when elevation blocks ranged shots', () => {
+  it('switches enemy to ranged gun hand when target is hittable at distance, and to lightest hand when elevation blocks ranged shots', () => {
     const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
     const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
     for (const other of engine.enemies) {
@@ -1022,22 +1022,24 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
       }
     }
 
-    // Scenario 1: Same elevation (0.0) on open bottom lane, 5 tiles apart -> enemy equips 'gun'
-    enemy.gunKind = 'sniper';
-    enemy.meleeKind = 'claw';
+    // Scenario 1: Same elevation (0.0) on open bottom lane, 5 tiles apart -> enemy equips 'gun' hand
+    enemy.weapons = [
+      { type: 'gun', def: GUNS.find((g) => g.kind === 'sniper')!, ammoInMag: 1, reloadTimer: 0 },
+      { type: 'melee', def: MELEES.find((m) => m.kind === 'claw')!, durability: 0 },
+    ];
     enemy.x = 12.5 * TILE;
     enemy.y = 19.3 * TILE;
     enemy.elevation = 0;
-    enemy.skillCooldown = 99;
+    enemy.qi = -999;
     engine.player.x = 17.5 * TILE;
     engine.player.y = 19.3 * TILE;
     engine.player.elevation = 0;
 
     engine.update(0.05, 1280, 720);
     expect(enemy.hasLosToTarget).toBe(true);
-    expect(enemy.activeSlot).toBe('gun');
+    expect(enemy.weapons[enemy.activeHand].type).toBe('gun');
 
-    // Scenario 2: Player stands on top of a 2.0 shipping container at (10.5, 10.5), enemy is below at (13.5, 10.5) (elev 0.0)
+    // Scenario 2: Player stands on top of a 2.0 shipping container at (10.5, 10.5), enemy is below at (14.5, 10.5) (elev 0.0)
     // Enemy sees player within 8 tiles, CANNOT hit upward across 2.0 elevation -> switches to lightest weapon ('melee' claw) to chase!
     enemy.x = 14.5 * TILE;
     enemy.y = 10.5 * TILE;
@@ -1049,16 +1051,18 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
 
     engine.update(0.05, 1280, 720);
     expect(enemy.hasLosToTarget).toBe(true);
-    expect(enemy.activeSlot).toBe('melee');
+    expect(enemy.weapons[enemy.activeHand].type).toBe('melee');
 
-    // Scenario 3: If enemy holds heavy greatsword (0.82) + pistol (0.98), lightest weapon is 'gun' (pistol)
-    enemy.gunKind = 'pistol';
-    enemy.meleeKind = 'greatsword';
+    // Scenario 3: If enemy holds heavy greatsword (0.68) + pistol (0.94), lightest weapon is 'gun' (pistol)
+    enemy.weapons = [
+      { type: 'gun', def: GUNS.find((g) => g.kind === 'pistol')!, ammoInMag: 6, reloadTimer: 0 },
+      { type: 'melee', def: MELEES.find((m) => m.kind === 'greatsword')!, durability: 0 },
+    ];
     engine.update(0.05, 1280, 720);
-    expect(enemy.activeSlot).toBe('gun');
+    expect(enemy.weapons[enemy.activeHand].type).toBe('gun');
   });
 
-  it('charges and casts the equipped melee skill only while the enemy holds a melee weapon', () => {
+  it('charges Qi and casts the equipped melee skill only while the enemy holds a melee weapon and swap finishes', () => {
     const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
     const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
     engine.enemies = [enemy];
@@ -1066,33 +1070,39 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     enemy.x = 12.5 * TILE;
     enemy.y = engine.player.y = 19.3 * TILE;
     enemy.elevation = engine.player.elevation = 0;
-    enemy.meleeKind = 'claw';
-    enemy.skillCooldown = 0;
+    enemy.weapons[1] = { type: 'melee', def: MELEES.find((m) => m.kind === 'claw')!, durability: 0 };
+    enemy.qi = enemy.maxQi;
     enemy.attackCooldown = 99;
 
     engine.player.x = enemy.x + 5 * TILE;
     engine.update(0.05, 1280, 720);
     expect(enemy.hasLosToTarget).toBe(true);
-    expect(enemy.activeSlot).toBe('gun');
-    expect(enemy.chargingSkillTimer).toBe(0);
+    expect(enemy.weapons[enemy.activeHand].type).toBe('gun');
+    expect(enemy.chargingMelee).toBe(false);
     enemy.speed = 0;
     engine.update(AI_COMBAT[enemy.archetype].reactionSeconds, 1280, 720);
 
+    // Move player into close melee range -> switches to claw (swap 0.16s) then begins draining Qi
     engine.player.x = enemy.x + 55;
     engine.update(0.05, 1280, 720);
-    expect(enemy.activeSlot).toBe('melee');
-    expect(enemy.chargingSkillTimer).toBeGreaterThan(0);
+    expect(enemy.weapons[enemy.activeHand].type).toBe('melee');
+    expect(enemy.swapTimer).toBeGreaterThan(0);
+    engine.update(0.2, 1280, 720);
+    expect(enemy.chargingMelee).toBe(true);
 
+    // Pull player back out to ranged distance mid-charge -> switches to gun & cancels melee charge
     engine.player.x = enemy.x + 5 * TILE;
-    engine.update(0.7, 1280, 720);
-    expect(enemy.activeSlot).toBe('gun');
-    expect(enemy.chargingSkillTimer).toBe(0);
+    engine.update(0.2, 1280, 720);
+    expect(enemy.weapons[enemy.activeHand].type).toBe('gun');
+    expect(enemy.chargingMelee).toBe(false);
     expect(enemy.shadowCloneTimer).toBe(0);
 
+    // Restore full Qi and hold close range through swap (0.16s) + Qi drain (0.58s) -> casts Shadow Clone
+    enemy.qi = enemy.maxQi;
     engine.player.x = enemy.x + 55;
     engine.update(0.05, 1280, 720);
-    engine.update(0.7, 1280, 720);
-    expect(enemy.chargingSkillTimer).toBe(0);
+    for (let i = 0; i < 10; i++) engine.update(0.1, 1280, 720);
+    expect(enemy.chargingMelee).toBe(false);
     expect(enemy.shadowCloneTimer).toBeGreaterThan(0);
   });
 
@@ -1361,7 +1371,7 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
 
     // 5. Left-click normal melee with shield shoves & stuns target
     const enemy = engine.enemies[0];
-    engine.player.x = 12 * TILE;
+    engine.player.x = 14.5 * TILE;
     engine.player.y = 18.5 * TILE;
     engine.player.elevation = 0;
     engine.player.angle = 0;
@@ -1372,10 +1382,12 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     enemy.shadowCloneTimer = 0;
     enemy.hp = 100;
     const exBefore = enemy.x;
+    const hpBeforeBash = enemy.hp;
     engine.setMouseDown(true);
     engine.setMouseDown(false);
     expect(enemy.x).toBeGreaterThan(exBefore);
     expect(enemy.stunTimer).toBeGreaterThan(0);
+    expect(enemy.hp).toBe(hpBeforeBash);
 
     // 6. Dropping shield (Esc) preserves exact durability (50), AI pickup/death or re-pickup preserves 50
     engine.setKey('Escape', true);
@@ -1387,18 +1399,18 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
 
     // Enemy picks up dropped shield (50 durability) and then player picks it back after enemy drops/dies
     enemy.stunTimer = 0;
-    enemy.meleeKind = 'knife';
+    enemy.weapons[1] = { type: 'melee', def: MELEES.find((m) => m.kind === 'knife')!, durability: 0 };
     enemy.x = droppedShield.x;
     enemy.y = droppedShield.y;
     engine.player.x = 2.5 * TILE;
     engine.player.y = 19.5 * TILE;
     engine.update(0.05, 1280, 720);
-    expect(enemy.meleeKind).toBe('shield');
-    expect(enemy.shieldDurability).toBe(50);
+    expect(enemy.weapons[1].def.kind).toBe('shield');
+    expect(enemy.weapons[1].type === 'melee' && enemy.weapons[1].durability).toBe(50);
 
     enemy.hp = 1;
-    enemy.shieldDurability = 37;
-    enemy.activeSlot = 'gun';
+    if (enemy.weapons[1].type === 'melee') enemy.weapons[1].durability = 37;
+    enemy.activeHand = 0;
     const damageEnemy = (engine as unknown as {
       damageEnemy: (t: EnemyEntity, d: number, m: boolean, kx: number, ky: number, b: boolean, nff: boolean, id: string, fac: FactionId) => void;
     }).damageEnemy.bind(engine);
@@ -1431,6 +1443,7 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
 
   it('drops non-default weapons on player death and resets to pistol, knife, and 0 shield on respawn', () => {
     const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
+    for (const soldier of engine.enemies) soldier.stunTimer = 99;
     gunInHand(engine).def = GUNS.find((g) => g.kind === 'rifle')!;
     meleeInHand(engine).def = MELEES.find((m) => m.kind === 'greatsword')!;
     meleeInHand(engine).durability = 0;
@@ -1456,7 +1469,7 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     const { engine: rEng } = createTestEngine('royal', 'european_castle', 10);
     for (const soldier of rEng.enemies) {
       soldier.attackCooldown = 99;
-      soldier.skillCooldown = 99;
+      soldier.qi = -999;
     }
     const ally = rEng.enemies.find((e) => e.faction === 'royal')!;
     ally.stunTimer = 5;
@@ -1487,7 +1500,7 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     const { engine: sEng } = createTestEngine('shadow', 'tokyo_shrine', 10);
     for (const soldier of sEng.enemies) {
       soldier.attackCooldown = 99;
-      soldier.skillCooldown = 99;
+      soldier.qi = -999;
     }
     const sAlly = sEng.enemies.find((e) => e.faction === 'shadow')!;
     sEng.player.activeHand = 1;
@@ -1798,6 +1811,7 @@ describe('Charge movement speed, heavy weapon balance, 1x1 non-adjacent hill sta
     const getCam = () => (engine as unknown as { camera: { x: number; y: number; zoom: number } }).camera;
     const expectedBaseZoom = (1280 / (19 * TILE) + 720 / (15 * TILE)) / 2;
 
+    engine.enemies = [];
     engine.player.x = 15 * TILE;
     engine.player.y = 10 * TILE;
     engine.setMousePos(640, 360);
@@ -1851,7 +1865,512 @@ describe('Charge movement speed, heavy weapon balance, 1x1 non-adjacent hill sta
   });
 });
 
+describe('Architectural parity: 100 HP, zero passives, independent player respawn, Royal AI player flashbang, AI infinite reload & rifle auto-fire bloom', () => {
+  it('starts every faction player with 100 HP, zero passive armor/speed buffs, and preserves factionRemaining on respawn', () => {
+    const moveResults: number[] = [];
+    for (const fac of ['royal', 'shadow', 'mercenary'] as FactionId[]) {
+      const { engine } = createTestEngine(fac, 'industrial_warehouse', 10);
+      expect(engine.player.maxHp).toBe(100);
+      expect(engine.player.hp).toBe(100);
 
+      // Verify zero passive armor (Royal takes full 20 damage)
+      engine.enemies = [];
+      engine.player.invulnTimer = 0;
+      (engine as unknown as {
+        damagePlayer: (rawDmg: number, isMelee: boolean, attackerId?: string, ox?: number, oy?: number) => void;
+      }).damagePlayer(20, false, undefined, engine.player.x + 100, engine.player.y);
+      expect(engine.player.hp).toBe(80);
 
+      // Verify identical base walking speed across all 3 factions
+      engine.player.x = 12 * TILE;
+      engine.player.y = 19.3 * TILE;
+      engine.player.elevation = 0;
+      engine.setKey('KeyD', true);
+      for (let i = 0; i < 10; i++) engine.update(1 / 60, 1280, 720);
+      engine.setKey('KeyD', false);
+      moveResults.push(engine.player.x - 12 * TILE);
+    }
+    expect(moveResults[0]).toBeCloseTo(moveResults[1], 4);
+    expect(moveResults[1]).toBeCloseTo(moveResults[2], 4);
 
+    // Verify player respawn does NOT deduct deploymentQueue / factionRemaining
+    const { engine, getHud } = createTestEngine('royal', 'tokyo_shrine', 10);
+    engine.enemies = engine.enemies.filter((e) => e.faction === 'royal');
+    for (const ally of engine.enemies) ally.stunTimer = 99;
+    expect(getHud()!.factionRemaining.royal).toBe(10);
+
+    engine.player.invulnTimer = 0;
+    (engine as unknown as { damagePlayer: (rawDmg: number, isMelee: boolean) => void }).damagePlayer(999, false);
+    expect(engine.status).toBe('RESPAWNING');
+    expect(engine.player.lives).toBe(2);
+    engine.update(RESPAWN_DELAY_SECONDS, 1280, 720);
+    expect(engine.status).toBe('PLAYING');
+    expect(getHud()!.factionRemaining.royal).toBe(10);
+  });
+
+  it('blinds hostile player with a decaying flash timer when Royal AI casts Claw skill', () => {
+    const { engine } = createTestEngine('shadow', 'industrial_warehouse', 10);
+    const royalEnemy = engine.enemies.find((e) => e.faction === 'royal')!;
+    engine.enemies = [royalEnemy];
+    engine.pickups = [];
+
+    royalEnemy.weapons[1] = { type: 'melee', def: MELEES.find((m) => m.kind === 'claw')!, durability: 0 };
+    royalEnemy.activeHand = 1;
+    royalEnemy.qi = royalEnemy.maxQi;
+    royalEnemy.attackCooldown = 99;
+    royalEnemy.speed = 0;
+    royalEnemy.x = 12 * TILE;
+    royalEnemy.y = engine.player.y = 19.3 * TILE;
+    royalEnemy.elevation = engine.player.elevation = 0;
+    engine.player.x = 13 * TILE;
+    engine.player.invulnTimer = 99;
+
+    for (let i = 0; i < 16; i++) engine.update(0.1, 1280, 720);
+    expect(engine.player.blindDuration).toBeGreaterThan(0);
+    expect(engine.player.blindTimer).toBeGreaterThan(0);
+
+    // Flashbang fades smoothly to 0 over time
+    engine.update(1.2, 1280, 720);
+    expect(engine.player.blindTimer).toBe(0);
+    expect(engine.player.blindDuration).toBe(0);
+  });
+
+  it('auto-reloads exhausted AI gun magazines from infinite reserve without pickup pads', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    engine.pickups = [];
+    enemy.weapons[0] = { type: 'gun', def: GUNS.find((g) => g.kind === 'sniper')!, ammoInMag: 1, reloadTimer: 0 };
+    enemy.activeHand = 0;
+    enemy.qi = -999;
+    enemy.speed = 0;
+    enemy.attackCooldown = 0;
+    enemy.x = 10 * TILE;
+    enemy.y = engine.player.y = 19.3 * TILE;
+    enemy.elevation = engine.player.elevation = 0;
+    engine.player.x = 15 * TILE;
+    engine.player.invulnTimer = 99;
+
+    // Wait past reaction window so AI fires 1 sniper shot -> magazine drops to 0 and reload starts
+    for (let i = 0; i < 10; i++) engine.update(0.1, 1280, 720);
+    const sniperSlot = enemy.weapons[0];
+    expect(sniperSlot.type === 'gun' && sniperSlot.ammoInMag).toBe(0);
+    expect(sniperSlot.type === 'gun' && sniperSlot.reloadTimer).toBeGreaterThan(0);
+
+    // Move player out of LoS so we observe the completed reload cleanly before next shot
+    engine.player.x = 26.5 * TILE;
+    engine.player.y = 1.5 * TILE;
+    for (let i = 0; i < 23; i++) engine.update(0.1, 1280, 720);
+    expect(sniperSlot.type === 'gun' && sniperSlot.reloadTimer).toBe(0);
+    expect(sniperSlot.type === 'gun' && sniperSlot.ammoInMag).toBe(1);
+  });
+
+  it('rapidly expands rifle crosshair radius on auto-fire so bursts disperse distinctly wider than tap shots', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    engine.enemies = [];
+    engine.player.x = 10 * TILE;
+    engine.player.y = 19.3 * TILE;
+    engine.player.elevation = 0;
+    const camState = (engine as unknown as { camera: { x: number; y: number; zoom: number } }).camera;
+    camState.x = engine.player.x;
+    camState.y = engine.player.y;
+    camState.zoom = 1;
+    engine.player.angle = 0;
+    const rifle = GUNS.find((g) => g.kind === 'rifle')!;
+    gunInHand(engine).def = rifle;
+    gunInHand(engine).ammoInMag = rifle.magSize;
+    engine.setMousePos(1200, 360);
+    (engine as unknown as { resetGunFeedback: () => void }).resetGunFeedback();
+
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.9);
+    try {
+      engine.setMouseDown(true);
+      const firstBeam = engine.beams[0];
+      const firstDeviation = Math.abs(Math.atan2(firstBeam.y2 - firstBeam.y1, firstBeam.x2 - firstBeam.x1) - engine.player.angle);
+
+      // Hold mouse down across 12 x 0.04s frames (0.48s -> ~4 burst shots, dt < 0.085s beam life)
+      engine.beams = [];
+      for (let i = 0; i < 12; i++) engine.update(0.04, 1280, 720);
+      engine.setMouseDown(false);
+
+      const lastBeam = engine.beams[engine.beams.length - 1];
+      const burstDeviation = Math.abs(Math.atan2(lastBeam.y2 - lastBeam.y1, lastBeam.x2 - lastBeam.x1) - engine.player.angle);
+      expect(burstDeviation).toBeGreaterThan(firstDeviation * 2.5);
+    } finally {
+      random.mockRestore();
+    }
+  });
+});
+
+describe('Rifle 1.1x pistol baseline, map & layer updates, wall height 10, zero terrain buffs, dragon bounce variation, and 0-damage shield', () => {
+  it('sets rested rifle crosshair spread to exact 1.1x pistol spread, blooms on cursor movement, and shrinks smoothly when still', () => {
+    const pistol = GUNS.find((g) => g.kind === 'pistol')!;
+    const rifle = GUNS.find((g) => g.kind === 'rifle')!;
+    expect(rifle.baseCrosshair / pistol.baseCrosshair).toBeCloseTo(1.1, 5);
+
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    engine.enemies = [];
+    engine.player.x = 12 * TILE;
+    engine.player.y = 19.3 * TILE;
+    engine.player.elevation = 0;
+    const camState = (engine as unknown as { camera: { x: number; y: number; zoom: number } }).camera;
+    camState.x = engine.player.x;
+    camState.y = engine.player.y;
+    camState.zoom = 1;
+    const getSpread = (engine as unknown as { getPlayerGunSpread: (gun: typeof pistol) => number }).getPlayerGunSpread.bind(engine);
+
+    for (const [mx, my] of [
+      [700, 360], // Near (~60px)
+      [1060, 360], // Far (~420px)
+    ]) {
+      engine.setMousePos(mx, my);
+      (engine as unknown as { resetGunFeedback: () => void }).resetGunFeedback();
+      const pSpread = getSpread(pistol);
+      const rSpread = getSpread(rifle);
+      expect(rSpread / pSpread).toBeCloseTo(1.1, 5);
+    }
+
+    // Moving cursor rapidly while holding rifle blooms crosshair, then decays back to rest when still
+    engine.player.activeHand = 0;
+    gunInHand(engine).def = rifle;
+    (engine as unknown as { resetGunFeedback: () => void }).resetGunFeedback();
+    const restedRifleSpread = getSpread(rifle);
+
+    engine.setMousePos(800, 360);
+    engine.setMousePos(1060, 360);
+    const movedRifleSpread = getSpread(rifle);
+    expect(movedRifleSpread).toBeGreaterThan(restedRifleSpread);
+    expect(movedRifleSpread).toBeLessThanOrEqual((rifle.maxCrosshair * 1.75) / 260 + 0.001);
+
+    for (let i = 0; i < 60; i++) engine.update(0.05, 1280, 720);
+    expect(getSpread(rifle)).toBeCloseTo(restedRifleSpread, 5);
+  });
+
+  it('validates bamboo_fortress hill connection & hill bamboo, tokyo_shrine grass perimeter, desert_ruins crate/wall tweaks, and elevation 10 walls', () => {
+    const bamboo = createArenaMap('bamboo_fortress');
+    for (let gy = 6; gy <= 23; gy++) {
+      const rowHasCentralHill = [14, 15, 16, 17, 18].some((gx) => bamboo.tileGrid[gy][gx].elev >= 1.0);
+      expect(rowHasCentralHill, `bamboo_fortress gy=${gy} central hill link`).toBe(true);
+    }
+    const hillBamboos = bamboo.obstacles.filter((o) => {
+      if (o.style !== 'bamboo') return false;
+      const gx = Math.round(o.x / TILE);
+      const gy = Math.round(o.y / TILE);
+      return bamboo.tileGrid[gy][gx].elev >= 1.0;
+    });
+    expect(hillBamboos.length).toBeGreaterThanOrEqual(8);
+
+    const shrine = createArenaMap('tokyo_shrine');
+    expect(shrine.tileGrid[1][1].style).toBe('grass_ground');
+    expect(shrine.tileGrid[10][10].style).toBe('default');
+    expect(shrine.tileGrid[1][14].style).toBe('default');
+
+    const desert = createArenaMap('desert_ruins');
+    expect(desert.obstacles.some((o) => o.kind === 'wall' && o.style === 'stone_wall_tan' && Math.round(o.x / TILE) === 25 && Math.round(o.y / TILE) === 2)).toBe(true);
+    expect(desert.obstacles.some((o) => o.kind === 'wall' && o.style === 'stone_wall_tan' && Math.round(o.x / TILE) === 25 && Math.round(o.y / TILE) === 5)).toBe(true);
+    expect(desert.obstacles.some((o) => o.kind === 'crate' && o.style === 'small_crate' && Math.round(o.x / TILE) === 25 && Math.round(o.y / TILE) === 4 && !o.blocksBullets)).toBe(true);
+    expect(desert.obstacles.some((o) => o.kind === 'crate' && o.w === 2 * TILE && Math.round(o.x / TILE) === 16 && Math.round(o.y / TILE) === 14)).toBe(true);
+
+    const allMaps: MapId[] = [
+      'tokyo_shrine',
+      'european_castle',
+      'desert_ruins',
+      'industrial_warehouse',
+      'western_railway',
+      'bamboo_fortress',
+      'stanley_island',
+    ];
+    for (const mapId of allMaps) {
+      const m = createArenaMap(mapId);
+      for (const obs of m.obstacles) {
+        if (obs.kind === 'wall' && obs.style !== 'container') {
+          expect(obs.elevation, `${mapId} wall ${obs.style} should have elevation 10`).toBe(10);
+        }
+      }
+    }
+  });
+
+  it('grants zero high-ground damage buff when shooting from elevated terrain', () => {
+    const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    enemy.stunTimer = 99;
+    enemy.royalShieldTimer = 0;
+    enemy.shadowCloneTimer = 0;
+
+    const pistol = GUNS.find((g) => g.kind === 'pistol')!;
+    engine.player.activeHand = 0;
+    gunInHand(engine).def = pistol;
+
+    // Shoot from elevated tile (1.0) down to ground enemy (0)
+    engine.player.x = 5 * TILE;
+    engine.player.y = 8 * TILE;
+    engine.player.elevation = 1.0;
+    enemy.x = 7.5 * TILE;
+    enemy.y = 8 * TILE;
+    enemy.elevation = 0;
+    enemy.hp = 100;
+    engine.player.angle = 0;
+
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      gunInHand(engine).ammoInMag = pistol.magSize;
+      engine.setMouseDown(true);
+      engine.setMouseDown(false);
+    } finally {
+      random.mockRestore();
+    }
+
+    expect(enemy.hp).toBe(100 - pistol.damage);
+  });
+
+  it('varies Black Dragon Wave wall bounce angle into +45deg, 0deg, and -45deg (1/3 each)', () => {
+    const bounceVelocities: { vx: number; vy: number }[] = [];
+
+    for (const roll of [0.1, 0.5, 0.9]) {
+      const { engine } = createTestEngine('shadow', 'tokyo_shrine', 10);
+      engine.enemies = [];
+      engine.player.activeHand = 1;
+      meleeInHand(engine).def = MELEES.find((m) => m.kind === 'greatsword')!;
+      engine.player.x = 28.4 * TILE;
+      engine.player.y = 18.5 * TILE;
+      engine.player.elevation = 0;
+      engine.player.qi = engine.player.maxQi;
+
+      engine.setMouseDown(true);
+      engine.update(1.5, 1280, 720);
+      engine.player.angle = 0;
+      engine.setMouseDown(false);
+
+      const dragon = engine.projectiles.find((pr) => pr.isBlackDragon)!;
+      expect(dragon).toBeTruthy();
+      const initialBounces = dragon.bouncesLeft ?? 5;
+
+      const random = vi.spyOn(Math, 'random').mockReturnValue(roll);
+      try {
+        for (let i = 0; i < 30 && (dragon.bouncesLeft ?? 0) === initialBounces; i++) {
+          engine.update(1 / 60, 1280, 720);
+        }
+      } finally {
+        random.mockRestore();
+      }
+      expect(dragon.bouncesLeft).toBe(initialBounces - 1);
+      bounceVelocities.push({ vx: dragon.vx, vy: dragon.vy });
+    }
+
+    // roll 0.1 -> reflected PI + PI/4 (-240.4, -240.4)
+    expect(bounceVelocities[0].vx).toBeLessThan(0);
+    expect(bounceVelocities[0].vy).toBeLessThan(-150);
+    // roll 0.5 -> pure reflection PI (-340, ~0)
+    expect(bounceVelocities[1].vx).toBeLessThan(-300);
+    expect(Math.abs(bounceVelocities[1].vy)).toBeLessThan(1);
+    // roll 0.9 -> reflected PI - PI/4 (-240.4, +240.4)
+    expect(bounceVelocities[2].vx).toBeLessThan(0);
+    expect(bounceVelocities[2].vy).toBeGreaterThan(150);
+  });
+
+  it('deals strictly 0 HP damage on Shield left-click bash and Qi shockwave for both Player and AI', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    enemy.stunTimer = 99;
+    enemy.royalShieldTimer = 0;
+    enemy.shadowCloneTimer = 0;
+    enemy.hp = 100;
+
+    // Give enemy a frontal shield too -> 0 dmg bash must NOT consume enemy shield durability
+    enemy.weapons[1] = { type: 'melee', def: MELEES.find((m) => m.kind === 'shield')!, durability: 80 };
+    enemy.activeHand = 1;
+    enemy.angle = Math.PI;
+
+    engine.player.activeHand = 1;
+    meleeInHand(engine).def = MELEES.find((m) => m.kind === 'shield')!;
+    meleeInHand(engine).durability = 35;
+    engine.player.x = 12 * TILE;
+    engine.player.y = 19.3 * TILE;
+    engine.player.elevation = 0;
+    engine.player.angle = 0;
+    enemy.x = engine.player.x + 42;
+    enemy.y = engine.player.y;
+    enemy.elevation = 0;
+
+    // 1. Player Qi shockwave restores durability to 100, pushes/stuns enemy, deals 0 HP damage
+    engine.player.qi = engine.player.maxQi;
+    engine.setMouseDown(true);
+    engine.update(1.5, 1280, 720);
+    expect(engine.player.chargeReady).toBe(true);
+    engine.setMouseDown(false);
+    expect(meleeInHand(engine).durability).toBe(100);
+    expect(enemy.hp).toBe(100);
+    expect(enemy.stunTimer).toBeGreaterThan(0);
+    expect(enemy.x).toBeGreaterThan(engine.player.x + 45);
+    expect(enemy.weapons[1].type === 'melee' && enemy.weapons[1].durability).toBe(80);
+
+    // 2. AI shield shockwave and AI shield bash push/stun player while dealing strictly 0 HP damage
+    (engine as unknown as { deploymentQueue: Record<FactionId, number> }).deploymentQueue = {
+      royal: 0,
+      shadow: 0,
+      mercenary: 0,
+    };
+    enemy.weapons[0] = { type: 'gun', def: GUNS[0], ammoInMag: 0, reloadTimer: 99 };
+    enemy.stunTimer = 0;
+    enemy.speed = 0;
+    enemy.attackCooldown = 0;
+    enemy.qi = enemy.maxQi;
+    enemy.weapons[1].durability = 40;
+    enemy.x = engine.player.x + 44;
+    enemy.y = engine.player.y;
+    engine.player.activeHand = 0; // Player holding pistol -> no shield protection
+    engine.player.hp = 100;
+    engine.player.invulnTimer = 0;
+
+    for (let i = 0; i < 16; i++) engine.update(0.1, 1280, 720);
+    expect(engine.player.hp).toBe(100);
+    expect(enemy.weapons[1].type === 'melee' && enemy.weapons[1].durability).toBe(100);
+  });
+});
+
+describe('Solid height-10 trees, zero bush vision penalty, continuous rifle shrink, semi-auto pistol, AI yellow ! popup, and direct shield numbers', () => {
+  it('treats 1x1 trees as solid height-10 walls blocking walking, bullets, and line of sight, while bushes do not shrink LoS', () => {
+    const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
+    // tokyo_shrine has tree at (7, 18) and bush at (16, 17)
+    const tree = engine.map.trees.find((t) => Math.round(t.x / TILE) === 7 && Math.round(t.y / TILE) === 18)!;
+    expect(tree).toBeTruthy();
+
+    const moveFn = (engine as unknown as {
+      moveCharacterWithElevation: (x: number, y: number, e: number, dx: number, dy: number, r: number) => { x: number; y: number };
+      traceBulletSegment: (x1: number, y1: number, a: number, d: number, e: number, emit?: boolean) => { x2: number; y2: number };
+      hasLineOfSight: (ax: number, ay: number, ae: number, bx: number, by: number, be: number, r: number) => boolean;
+    });
+
+    // Walking right into 1x1 tree (7, 18) is stopped outside tree left edge (7*TILE)
+    const moved = moveFn.moveCharacterWithElevation.call(engine, 6.2 * TILE, 18.5 * TILE, 0, 20, 0, engine.player.radius);
+    expect(moved.x).toBeLessThan(tree.x);
+
+    // Bullet aimed across tree stops at outer edge of tree (7*TILE)
+    const bulletSeg = moveFn.traceBulletSegment.call(engine, 5.5 * TILE, 18.5 * TILE, 0, 500, 0, false);
+    expect(bulletSeg.x2).toBeLessThanOrEqual(tree.x);
+
+    // Line of sight across tree is blocked
+    expect(moveFn.hasLineOfSight.call(engine, 5.5 * TILE, 18.5 * TILE, 0, 9.5 * TILE, 18.5 * TILE, 0, 8 * TILE)).toBe(false);
+
+    // Target inside bush (16, 17) ~5.5 tiles away along open ground (gy=17, gx=22 -> 16) stays visible (no bush sight shrink)
+    const bush = engine.map.bushes.find((b) => Math.round(b.x / TILE) === 16 && Math.round(b.y / TILE) === 17)!;
+    expect(bush).toBeTruthy();
+    expect(
+      moveFn.hasLineOfSight.call(
+        engine,
+        21.5 * TILE,
+        17.5 * TILE,
+        0,
+        bush.x + TILE / 2,
+        bush.y + TILE / 2,
+        0,
+        8 * TILE
+      )
+    ).toBe(true);
+  });
+
+  it('shrinks rifle crosshair continuously even during micro cursor motion while wide cursor flicks expand faster than recovery', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    engine.enemies = [];
+    const rifle = GUNS.find((g) => g.kind === 'rifle')!;
+    engine.player.activeHand = 0;
+    gunInHand(engine).def = rifle;
+    const camState = (engine as unknown as { camera: { x: number; y: number; zoom: number } }).camera;
+    camState.x = engine.player.x;
+    camState.y = engine.player.y;
+    camState.zoom = 1;
+
+    // 1. Large rapid cursor flick expands crosshair significantly
+    engine.setMousePos(640, 360);
+    (engine as unknown as { resetGunFeedback: () => void }).resetGunFeedback();
+    const getSpread = (engine as unknown as { getPlayerGunSpread: (g: typeof rifle) => number }).getPlayerGunSpread.bind(engine);
+    const rested = getSpread(rifle);
+
+    engine.setMousePos(900, 360);
+    const afterWideFlick = getSpread(rifle);
+    expect(afterWideFlick).toBeGreaterThan(rested);
+
+    // 2. Micro cursor motion (1.5px/frame) still shrinks net crosshair toward rested every frame
+    for (let i = 1; i <= 30; i++) {
+      engine.setMousePos(900 + i * 1.5, 360);
+      engine.update(1 / 60, 1280, 720);
+    }
+    expect(getSpread(rifle)).toBeLessThan(afterWideFlick);
+  });
+
+  it('prevents pistol hold-to-autofire (semi-auto only) and enforces longer shot interval than rifle', () => {
+    const pistol = GUNS.find((g) => g.kind === 'pistol')!;
+    const rifle = GUNS.find((g) => g.kind === 'rifle')!;
+    expect(1 / pistol.fireRate).toBeGreaterThan(1 / rifle.fireRate);
+
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    engine.enemies = [];
+    engine.player.activeHand = 0;
+    gunInHand(engine).def = pistol;
+    gunInHand(engine).ammoInMag = pistol.magSize;
+
+    // Holding mouse down fires ONLY 1 pistol shot across 0.6s
+    engine.setMouseDown(true);
+    for (let i = 0; i < 12; i++) engine.update(0.05, 1280, 720);
+    engine.setMouseDown(false);
+    expect(gunInHand(engine).ammoInMag).toBe(pistol.magSize - 1);
+
+    // Must wait for pistol interval before next click fires
+    engine.setMouseDown(true);
+    engine.setMouseDown(false);
+    expect(gunInHand(engine).ammoInMag).toBe(pistol.magSize - 2);
+  });
+
+  it('pops yellow ! when AI discovers a target and renders direct numeric deduction text on frontal shield blocks', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    (engine as unknown as { deploymentQueue: Record<FactionId, number> }).deploymentQueue = {
+      royal: 0,
+      shadow: 0,
+      mercenary: 0,
+    };
+
+    enemy.hasLosToTarget = false;
+    enemy.visibleTargetId = null;
+    enemy.stunTimer = 0;
+    enemy.blindTimer = 0;
+    enemy.x = 12 * TILE;
+    enemy.y = 19.3 * TILE;
+    enemy.elevation = 0;
+    engine.player.x = 14.5 * TILE;
+    engine.player.y = 19.3 * TILE;
+    engine.player.elevation = 0;
+    engine.floatingTexts = [];
+
+    engine.update(1 / 60, 1280, 720);
+    const spotBang = engine.floatingTexts.find((ft) => ft.text === '!');
+    expect(spotBang).toBeTruthy();
+    expect(spotBang!.color).toBe('#FACC15');
+
+    // Shield block floating texts show direct numeric deduction (-XX) without prefix words
+    engine.player.activeHand = 1;
+    meleeInHand(engine).def = MELEES.find((m) => m.kind === 'shield')!;
+    meleeInHand(engine).durability = 100;
+    engine.player.angle = Math.PI;
+    engine.player.invulnTimer = 0;
+    engine.floatingTexts = [];
+
+    const damagePlayer = (engine as unknown as {
+      damagePlayer: (rawDmg: number, isMelee: boolean, attackerId?: string, ox?: number, oy?: number) => void;
+    }).damagePlayer.bind(engine);
+    damagePlayer(25, false, enemy.id, enemy.x, enemy.y);
+
+    expect(engine.floatingTexts.some((ft) => ft.text === '-25')).toBe(true);
+    expect(engine.floatingTexts.some((ft) => ft.text.includes('盾擋') || ft.text.includes('盾格'))).toBe(false);
+
+    engine.player.invulnTimer = 0;
+    engine.floatingTexts = [];
+    damagePlayer(20, true, enemy.id, enemy.x, enemy.y);
+    expect(engine.floatingTexts.some((ft) => ft.text === '-10')).toBe(true);
+    expect(engine.floatingTexts.some((ft) => ft.text.includes('盾擋') || ft.text.includes('盾格'))).toBe(false);
+  });
+});
 

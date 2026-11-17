@@ -17,6 +17,7 @@ const MELEE_KEYS: { kind: MeleeKind; label: string }[] = [
   { kind: 'knife', label: '戰術小刀' },
   { kind: 'claw', label: '疾風鐵爪' },
   { kind: 'greatsword', label: '重型大刀' },
+  { kind: 'shield', label: '戰術防彈盾' },
 ];
 
 function pickRandomMapId(): MapId {
@@ -128,34 +129,34 @@ export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
           </section>
 
           {/* Compact Melee Skills Introduction */}
-          <section className="flex-1 min-h-0 bg-[#121926] border border-slate-800 rounded-2xl p-4 flex flex-col justify-between">
-            <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-800 shrink-0">
+          <section className="flex-1 min-h-0 bg-[#121926] border border-slate-800 rounded-2xl p-3.5 flex flex-col justify-between overflow-hidden">
+            <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800 shrink-0">
               <div className="flex items-center gap-2 text-sm font-bold text-white">
                 <Swords className="w-4 h-4 text-amber-400 shrink-0" />
                 <span>陣營近戰集氣技能</span>
               </div>
-              <span className="text-[11px] text-slate-400">長按左鍵釋放 · 持盾可修滿至 100</span>
+              <span className="text-[11px] text-slate-400">長按左鍵集氣至 0 釋放</span>
             </div>
 
             <div className="flex-1 min-h-0 flex flex-col justify-evenly divide-y divide-slate-800/80">
               {MELEE_KEYS.map(({ kind, label }) => {
                 const sk = facInfo.meleeSkills[kind];
                 return (
-                  <div key={kind} className="py-2.5 first:pt-2 last:pb-1 flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-center shrink-0">
-                      <WeaponIconSvg kind={kind} color={facInfo.accentHex} className="w-8 h-8" />
+                  <div key={kind} className="py-1.5 first:pt-1.5 last:pb-0.5 flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-center shrink-0">
+                      <WeaponIconSvg kind={kind} color={facInfo.accentHex} className="w-7 h-7" />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline gap-2 mb-0.5">
+                      <div className="flex items-baseline gap-2">
                         <span
-                          className={`text-sm font-bold ${faction === 'shadow' ? '' : facInfo.color}`}
+                          className={`text-xs font-bold ${faction === 'shadow' ? '' : facInfo.color}`}
                           style={faction === 'shadow' ? { color: '#C026D3' } : undefined}
                         >
                           {sk.name}
                         </span>
                         <span className="text-[11px] text-slate-400">{label}</span>
                       </div>
-                      <p className="text-xs text-slate-300 leading-snug line-clamp-2">{sk.desc}</p>
+                      <p className="text-[11px] text-slate-300 leading-snug line-clamp-2">{sk.desc}</p>
                     </div>
                   </div>
                 );

@@ -52,7 +52,7 @@ export const FACTIONS: Record<FactionId, FactionInfo> = {
       },
       shield: {
         name: '護盾修復',
-        desc: '手持防彈盾集氣釋放後，將盾牌耐久回復滿至 100 並震退前方敵軍。',
+        desc: '手持防彈盾集氣釋放後，將盾牌耐久回復滿至 100 並無傷震退前方敵軍。',
       },
     },
   },
@@ -80,7 +80,7 @@ export const FACTIONS: Record<FactionId, FactionInfo> = {
       },
       shield: {
         name: '護盾修復',
-        desc: '手持防彈盾集氣釋放後，將盾牌耐久回復滿至 100 並震退前方敵軍。',
+        desc: '手持防彈盾集氣釋放後，將盾牌耐久回復滿至 100 並無傷震退前方敵軍。',
       },
     },
   },
@@ -108,7 +108,7 @@ export const FACTIONS: Record<FactionId, FactionInfo> = {
       },
       shield: {
         name: '護盾修復',
-        desc: '手持防彈盾集氣釋放後，將盾牌耐久回復滿至 100 並震退前方敵軍。',
+        desc: '手持防彈盾集氣釋放後，將盾牌耐久回復滿至 100 並無傷震退前方敵軍。',
       },
     },
   },
@@ -340,8 +340,8 @@ export const MAP_CATALOG: MapMeta[] = [
     region: '日本',
     environment: '野外',
     era: '江戶時代',
-    description: '中央神社由一格格江戶杉木板塀圍繞，僅保留南北兩側階梯進出；左右座落不對稱的兩層翠綠小山（0→0.5→1→1.5→2），搭配茂密楓杉林海與無箱子的純淨地形。',
-    highlight: '一格格江戶木牆 · 雙側不對稱二層小山 · 14 棵樹冠林海',
+    description: '中央神社由一格格江戶杉木板塀圍繞，僅保留南北兩側階梯進出；外圍林間鋪設翠綠草坪，左右座落不對稱的兩層小山（0→0.5→1→1.5→2），搭配茂密楓杉林海與無箱子的純淨地形。',
+    highlight: '林間綠草地 · 一格格江戶木牆 · 雙側不對稱二層小山',
     accentColor: '#EF4444',
   },
   {
@@ -390,8 +390,8 @@ export const MAP_CATALOG: MapMeta[] = [
     region: '京都山區',
     environment: '野外',
     era: '幕府末期',
-    description: '無箱子、無河道的純粹地形戰場！外圍由不規則連綿山丘環抱，中央呈現凹凸高低交錯的多層山坡與山脊通道，並佈滿每格三株且阻斷視線的翠竹實牆。',
-    highlight: '外圍環山與中央凹凸起伏地形 · 無箱無水純玩地形 · 三株竹牆阻視野',
+    description: '無箱子、無河道的純粹地形戰場！外圍由不規則連綿山丘環抱，中央山脊向南延伸直接銜接下方山丘，形成高低交錯的多層坡道；翠竹成牆遍佈平地與山丘上且阻斷視線。',
+    highlight: '中央山丘連通南麓 · 地上與山地皆有竹牆 · 純玩地形',
     accentColor: '#22C55E',
   },
   {
@@ -406,15 +406,14 @@ export const MAP_CATALOG: MapMeta[] = [
   },
 ];
 
-// 準心大小排序：步槍 > 散彈 > 小槍 > 狙擊槍
-// 槍械子彈碰人即止，不可穿透多人
+// 槍械基礎準心搭配 tuning.ts 距離曲線計算實際散布；子彈碰人即止，不可穿透多人
 export const GUNS: GunDef[] = [
   {
     id: 'pistol',
     kind: 'pistol',
     name: '制式小槍',
     damage: 25,
-    fireRate: 3.6,
+    fireRate: 2.4,
     magSize: 6,
     reloadTime: 0.95,
     moveSpeedMult: 0.94,
@@ -422,9 +421,8 @@ export const GUNS: GunDef[] = [
     maxCrosshair: 24,
     bloomPerShot: 5.5,
     pellets: 1,
-    range: 9999,
     color: '#93C5FD',
-    description: '預設 6 發彈匣、最高中心傷害 25，近距穩定、遠距散布較大，單發不穿透。',
+    description: '半自動單發、攻擊之間帶有清晰間隔（不支援按住連發），預設 6 發彈匣、最高中心傷害 25。',
   },
   {
     id: 'rifle',
@@ -435,13 +433,12 @@ export const GUNS: GunDef[] = [
     magSize: 15,
     reloadTime: 1.2,
     moveSpeedMult: 0.84,
-    baseCrosshair: 22,
-    maxCrosshair: 46,
-    bloomPerShot: 7.5,
+    baseCrosshair: 12.1,
+    maxCrosshair: 70,
+    bloomPerShot: 14,
     pellets: 1,
-    range: 9999,
     color: '#38BDF8',
-    description: '15 發連發步槍、攻速極快、最高傷 20，全圖無限射程。連發準心最大，點發縮細。',
+    description: '15 發連發步槍、攻速極快、最高傷 20，全圖無限射程。準心持續定速縮小（最小為小槍 1.1 倍），開火連發或大幅移動游標時擴散速度才大於回縮速度。',
   },
   {
     id: 'shotgun',
@@ -456,7 +453,6 @@ export const GUNS: GunDef[] = [
     maxCrosshair: 34,
     bloomPerShot: 9.0,
     pellets: 5,
-    range: 9999,
     color: '#FBBF24',
     description: '一次齊射 5 發、消耗整個 5/5 彈匣（5/5→0/5），近距集中、遠距散布明顯，打光後按 R 或再按左鍵裝彈。',
   },
@@ -473,7 +469,6 @@ export const GUNS: GunDef[] = [
     maxCrosshair: 18,
     bloomPerShot: 9.0,
     pellets: 1,
-    range: 9999,
     color: '#A78BFA',
     description: '1 發彈匣，射擊後按 R 或再按左鍵裝彈。遠距精準，命中正中心最高 100 傷害，移動與裝彈較慢。',
   },
@@ -517,7 +512,7 @@ export const MELEES: MeleeDef[] = [
     id: 'shield',
     kind: 'shield',
     name: '戰術防彈盾',
-    damage: 8,
+    damage: 0,
     swingRate: 2.2,
     moveSpeedMult: 0.73,
     reach: 60,
@@ -558,8 +553,12 @@ export const ORIGIN_RESEARCH = {
       detail: '視窗縮放聚焦至上下約 15 格、左右約 19 格，所有敵我士兵皆為 100 血、具備 8 格真實視線追擊、直線槍線攻擊與各自陣營技能！',
     },
     {
-      title: '三大陣營 × 三把近武 九大專屬技能',
-      detail: '長按左鍵將左上藍色氣條集氣至 0 後出現陣營氣場即可釋放：皇家護盾/閃光瞬移/5光彈、天影鷹眼/影分身/黑龍波、第三吸血/變細/變大！',
+      title: '自由雙手武裝與戰術防彈盾',
+      detail: '玩家擁有第一／第二手共兩組自由武器欄（1 / 2 / Q 隨時切換，Esc 放下非預設武器，陣亡時掉落非預設武器）；地面可拾取 100 耐久防彈盾，手持正面可擋彈與減半近傷。',
+    },
+    {
+      title: '三大陣營 × 四大近戰 專屬集氣技能',
+      detail: '長按左鍵將左上藍色氣條集氣至 0 後釋放：皇家（護盾 / 閃光瞬移 / 5 光彈）、天影（鷹眼游標前移 / 影分身殘影 / 八向黑龍波）、第三（吸血 / 縮小化 / 巨人化）；持盾集氣一律發動護盾修復。',
     },
     {
       title: '各陣營 10 兵編制與同陣營上限 2 人混戰',

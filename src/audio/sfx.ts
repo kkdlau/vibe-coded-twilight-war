@@ -269,19 +269,6 @@ class SoundEngine {
     this.playTone(112, 58, 0.12, 'sine', 0.075 * volume);
   }
 
-  skill(kind: 'blink' | 'shield' | 'heal' | 'bloodlust') {
-    if (kind === 'blink') {
-      this.playTone(920, 240, 0.14, 'sine', 0.14);
-    } else if (kind === 'shield') {
-      this.playTone(260, 520, 0.2, 'sine', 0.14);
-    } else if (kind === 'heal') {
-      this.playTone(440, 660, 0.14, 'sine', 0.12);
-      this.playTone(554, 880, 0.18, 'sine', 0.12, 0.08);
-    } else {
-      this.playTone(180, 420, 0.22, 'sawtooth', 0.14);
-    }
-  }
-
   levelUp() {
     this.playTone(440, 440, 0.1, 'triangle', 0.12, 0);
     this.playTone(554, 554, 0.1, 'triangle', 0.12, 0.09);

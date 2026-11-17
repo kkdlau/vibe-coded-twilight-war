@@ -11,8 +11,6 @@ export type MapId =
   | 'bamboo_fortress'
   | 'stanley_island';
 
-export type WeaponSlot = 'gun' | 'melee';
-
 export type GunKind = 'pistol' | 'rifle' | 'shotgun' | 'sniper';
 export type MeleeKind = 'knife' | 'claw' | 'greatsword' | 'shield';
 
@@ -25,11 +23,10 @@ export interface GunDef {
   magSize: number;
   reloadTime: number; // seconds
   moveSpeedMult: number;
-  baseCrosshair: number; // px radius (rifle > shotgun > pistol > sniper)
+  baseCrosshair: number; // px base radius before distance-scaled spread curve (see tuning.ts)
   maxCrosshair: number;
   bloomPerShot: number;
   pellets: number;
-  range: number;
   color: string;
   description: string;
 }
@@ -122,11 +119,6 @@ export type PlatformStyle =
   | 'grass_ground'
   | 'rail_track';
 
-export interface Platform extends Rect {
-  elevation: number; // 1.0 / 2.0 / 3.0
-  style?: PlatformStyle;
-}
-
 export interface StairRect extends Rect {
   elevation: number; // 0.5 / 1.5 / 2.5
   direction: 'north' | 'south' | 'east' | 'west';
@@ -148,7 +140,7 @@ export type ObstacleStyle =
 
 export interface Obstacle extends Rect {
   blocksBullets: boolean;
-  elevation: number; // 1.0 small crate, 1.5 big crate, 2.0 shipping container, 3.0 solid wall/house
+  elevation: number; // 1.0 small crate, 1.5 big crate, 2.0 shipping container / train car, 10 solid wall / house / bamboo / pillar
   kind: 'crate' | 'wall';
   style?: ObstacleStyle;
   colorVariant?: string;
@@ -209,7 +201,7 @@ export interface PlayerState {
   angle: number;
   walkPhase: number;
   moveIntensity: number;
-  elevation: number; // 0, 0.5, 1.0, or 1.5
+  elevation: number; // 0, 0.5, 1.0, 1.5, 2.0, 2.5, or 3.0
   hp: number;
   maxHp: number;
   maxShield: number;
@@ -250,14 +242,9 @@ export interface PlayerState {
   vampireTimer: number;
   shrinkTimer: number;
   giantTimer: number;
+  blindTimer: number;
+  blindDuration: number;
   invulnTimer: number;
-  onHighGround: boolean;
-  dmgMultiplier: number;
-  critChance: number;
-  speedBonus: number;
-  lifesteal: number;
-  armor: number;
-  qiRegenBonus: number;
   delayCancelBonus: number;
 }
 
@@ -269,9 +256,10 @@ export interface EnemyEntity {
   archetype: EnemyArchetype;
   faction: FactionId;
   isAlly: boolean;
-  activeSlot: WeaponSlot;
-  gunKind: GunKind;
-  meleeKind: MeleeKind;
+  activeHand: WeaponHand;
+  weapons: [EquippedWeapon, EquippedWeapon];
+  swapTimer: number;
+  swapDuration: number;
   x: number;
   y: number;
   vx: number;
@@ -285,11 +273,12 @@ export interface EnemyEntity {
   elevation: number;
   hp: number;
   maxHp: number; // Always 100
+  qi: number;
+  maxQi: number;
+  chargingMelee: boolean;
+  chargeReady: boolean;
   speed: number;
-  damage: number;
   attackCooldown: number;
-  skillCooldown: number;
-  chargingSkillTimer: number; // >0 when enemy is gathering Qi lines before skill release
   aiTimer: number;
   lastSeenTargetPos: { x: number; y: number } | null;
   alertTimer: number;
@@ -317,8 +306,6 @@ export interface EnemyEntity {
   attackAnimTimer: number;
   attackAnimDuration: number;
   attackAnimKind: MeleeKind | null;
-  shieldDurability: number;
-  onHighGround: boolean;
   color: string;
   characterSkin: CharacterSkin;
 }
@@ -403,7 +390,7 @@ export interface FloatingText {
   scale: number;
 }
 
-export type PickupKind = 'ammo' | 'gun' | 'melee' | 'shield';
+export type PickupKind = 'ammo' | 'gun' | 'melee';
 
 export interface PickupItem {
   id: string;
@@ -418,7 +405,6 @@ export interface PickupItem {
   durability?: number;
   bobPhase: number;
   ammoSpawnIndex?: number;
-  shieldSpawnIndex?: number;
 }
 
 export interface TimedSkillHudItem {
@@ -472,10 +458,6 @@ export interface HudSnapshot {
     activeSkillName: string | null;
     activeBuffText: string | null;
     activeTimedSkills: TimedSkillHudItem[];
-    dmgMultiplier: number;
-    critChance: number;
-    armor: number;
-    lifesteal: number;
   };
   nearbyPickup: string | null;
   factionScores: Record<FactionId, number>;

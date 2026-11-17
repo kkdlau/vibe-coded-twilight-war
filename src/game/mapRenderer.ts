@@ -1407,15 +1407,16 @@ export function renderMapBaseLayer(
     }
   }
 
-  // 6a. 統一預繪地面投影（先於所有障礙物繪製，避免牆體之間互相疊出奇怪內陰影）
+  // 6a. 統一預繪地面投影（先於所有障礙物繪製，避免牆體之間互相疊出奇怪內陰影；竹林改以圓柱細陰影透出底層地形）
   const sortedObs = [...map.obstacles].sort((a, b) => a.elevation - b.elevation);
   for (const obs of sortedObs) {
+    if (obs.style === 'bamboo') continue;
     const shOff = obs.elevation >= 2.0 ? 9 : obs.elevation >= 1.5 ? 7 : 4;
     ctx.fillStyle = obs.elevation >= 2.0 ? 'rgba(0,0,0,0.42)' : 'rgba(0,0,0,0.34)';
     ctx.fillRect(obs.x + shOff * 0.65, obs.y + shOff, obs.w, obs.h);
   }
 
-  // 6b. 障礙物與箱體本體（依高度由低到高繪製：1.0小箱 -> 1.5大箱 -> 2.0貨櫃 -> 3.0牆柱／房屋）
+  // 6b. 障礙物與箱體本體（依高度由低到高繪製：1.0小箱 -> 1.5大箱 -> 2.0貨櫃/車廂 -> 10牆柱／房屋／竹林）
   for (const obs of sortedObs) {
     if (obs.kind === 'crate') {
       if (obs.style === 'container') {
@@ -1655,3 +1656,253 @@ export function renderMapCanopies(
     ctx.restore();
   }
 }
+
+export type HelpCatalogVisualId =
+  | 'terrain_flat'
+  | 'terrain_grass'
+  | 'terrain_river'
+  | 'terrain_hill'
+  | 'terrain_hill_stair'
+  | 'terrain_platform'
+  | 'terrain_platform_stair'
+  | 'object_bridge'
+  | 'object_rail'
+  | 'object_stair_crate'
+  | 'object_small_crate'
+  | 'object_big_crate'
+  | 'object_container'
+  | 'object_train_car'
+  | 'object_stone_wall'
+  | 'object_shrine_wall'
+  | 'object_castle_pillar'
+  | 'object_house'
+  | 'object_bamboo'
+  | 'object_bush'
+  | 'object_tree';
+
+function createMiniArenaMap(
+  cols: number,
+  rows: number,
+  biome: ArenaMap['biome']
+): ArenaMap {
+  const tileGrid = Array.from({ length: rows }, () =>
+    Array.from({ length: cols }, () => ({ elev: 0, style: 'default' as PlatformStyle }))
+  );
+  return {
+    id: 'tokyo_shrine',
+    cols,
+    rows,
+    width: cols * TILE,
+    height: rows * TILE,
+    biome,
+    name: 'preview',
+    tileGrid,
+    stairs: [],
+    waterTiles: [],
+    waterTileKeys: new Set<string>(),
+    bridges: [],
+    obstacles: [],
+    bushes: [],
+    trees: [],
+    weaponSpawns: [],
+    ammoSpawns: [],
+    shieldSpawns: [],
+    factionSpawns: { royal: [], shadow: [], mercenary: [] },
+  };
+}
+
+/**
+ * 供 Help 百科「地形／物件 Debug 圖鑑」使用的實戰同源 Canvas 預覽繪製器：
+ * 直接呼叫主渲染管線（地板層 -> 高台層 -> 物件層 -> 樹冠層），確保圖鑑與實戰畫面完全一致。
+ */
+export function renderHelpPreview(
+  ctx: CanvasRenderingContext2D,
+  visualId: HelpCatalogVisualId,
+  width: number,
+  height: number
+) {
+  let map: ArenaMap;
+  let drawCanopy = false;
+
+  switch (visualId) {
+    case 'terrain_flat': {
+      map = createMiniArenaMap(3, 2, 'desert_outdoor');
+      break;
+    }
+    case 'terrain_grass': {
+      map = createMiniArenaMap(3, 2, 'shrine_outdoor');
+      for (let gy = 0; gy < 2; gy++) {
+        for (let gx = 0; gx < 3; gx++) map.tileGrid[gy][gx] = { elev: 0, style: 'grass_ground' };
+      }
+      break;
+    }
+    case 'terrain_river': {
+      map = createMiniArenaMap(4, 3, 'desert_outdoor');
+      for (let gy = 0; gy < 3; gy++) {
+        for (let gx = 1; gx <= 2; gx++) {
+          map.waterTiles.push({ gx, gy });
+          map.waterTileKeys.add(`${gx},${gy}`);
+        }
+      }
+      break;
+    }
+    case 'terrain_hill': {
+      map = createMiniArenaMap(4, 3, 'bamboo_outdoor');
+      for (let gy = 0; gy < 3; gy++) {
+        for (let gx = 1; gx <= 3; gx++) map.tileGrid[gy][gx] = { elev: 1.0, style: 'hill' };
+      }
+      map.tileGrid[1][2] = { elev: 2.0, style: 'hill' };
+      break;
+    }
+    case 'terrain_hill_stair': {
+      map = createMiniArenaMap(4, 2, 'bamboo_outdoor');
+      for (let gy = 0; gy < 2; gy++) {
+        for (let gx = 2; gx <= 3; gx++) map.tileGrid[gy][gx] = { elev: 1.0, style: 'hill' };
+      }
+      map.stairs.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, elevation: 0.5, direction: 'east', style: 'hill' });
+      break;
+    }
+    case 'terrain_platform': {
+      map = createMiniArenaMap(4, 3, 'desert_outdoor');
+      for (let gy = 0; gy < 3; gy++) {
+        for (let gx = 1; gx <= 3; gx++) map.tileGrid[gy][gx] = { elev: 1.0, style: 'pyramid' };
+      }
+      map.tileGrid[1][2] = { elev: 2.0, style: 'pyramid' };
+      map.tileGrid[1][3] = { elev: 2.0, style: 'pyramid' };
+      break;
+    }
+    case 'terrain_platform_stair': {
+      map = createMiniArenaMap(4, 2, 'desert_outdoor');
+      for (let gy = 0; gy < 2; gy++) {
+        for (let gx = 2; gx <= 3; gx++) map.tileGrid[gy][gx] = { elev: 1.0, style: 'pyramid' };
+      }
+      map.stairs.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, elevation: 0.5, direction: 'east', style: 'pyramid' });
+      break;
+    }
+    case 'object_bridge': {
+      map = createMiniArenaMap(5, 3, 'desert_outdoor');
+      for (let gy = 0; gy < 3; gy++) {
+        for (let gx = 1; gx <= 3; gx++) {
+          map.waterTiles.push({ gx, gy });
+          map.waterTileKeys.add(`${gx},${gy}`);
+        }
+      }
+      map.bridges.push({ x: 1 * TILE, y: 1 * TILE, w: 3 * TILE, h: 1 * TILE, orientation: 'horizontal' });
+      break;
+    }
+    case 'object_rail': {
+      map = createMiniArenaMap(4, 2, 'desert_outdoor');
+      for (let gy = 0; gy < 2; gy++) {
+        for (let gx = 0; gx < 4; gx++) map.tileGrid[gy][gx] = { elev: 0, style: 'rail_track' };
+      }
+      break;
+    }
+    case 'object_stair_crate': {
+      map = createMiniArenaMap(3, 2, 'warehouse_indoor');
+      map.stairs.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, elevation: 0.5, direction: 'east' });
+      break;
+    }
+    case 'object_small_crate': {
+      map = createMiniArenaMap(3, 2, 'warehouse_indoor');
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' });
+      break;
+    }
+    case 'object_big_crate': {
+      map = createMiniArenaMap(4, 3, 'warehouse_indoor');
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 2 * TILE, h: 2 * TILE, blocksBullets: true, elevation: 1.5, kind: 'crate', style: 'default' });
+      break;
+    }
+    case 'object_container': {
+      map = createMiniArenaMap(6, 3, 'warehouse_indoor');
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 4 * TILE, h: 2 * TILE, blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#0284C7' });
+      break;
+    }
+    case 'object_train_car': {
+      map = createMiniArenaMap(6, 3, 'desert_outdoor');
+      for (let gx = 0; gx < 6; gx++) {
+        map.tileGrid[0][gx] = { elev: 0, style: 'rail_track' };
+        map.tileGrid[1][gx] = { elev: 0, style: 'rail_track' };
+      }
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 4 * TILE, h: 2 * TILE, blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'train_car', colorVariant: 'loco' });
+      break;
+    }
+    case 'object_stone_wall': {
+      map = createMiniArenaMap(4, 3, 'desert_outdoor');
+      map.obstacles.push(
+        { x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'stone_wall_tan' },
+        { x: 2 * TILE, y: 0.5 * TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'stone_wall_tan' },
+        { x: TILE, y: 1.5 * TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'stone_wall_tan' }
+      );
+      break;
+    }
+    case 'object_shrine_wall': {
+      map = createMiniArenaMap(3, 2, 'shrine_outdoor');
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'shrine_wall' });
+      break;
+    }
+    case 'object_castle_pillar': {
+      map = createMiniArenaMap(3, 2, 'castle_indoor');
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'castle_pillar' });
+      break;
+    }
+    case 'object_house': {
+      map = createMiniArenaMap(5, 3, 'desert_outdoor');
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 3 * TILE, h: 2 * TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'house' });
+      break;
+    }
+    case 'object_bamboo': {
+      // 同時展示竹林物件套用在「草坪平地」與「土丘高地」上時透明處清晰呈現底層地形
+      map = createMiniArenaMap(4, 3, 'bamboo_outdoor');
+      for (let gy = 0; gy < 3; gy++) {
+        map.tileGrid[gy][0] = { elev: 0, style: 'grass_ground' };
+        map.tileGrid[gy][1] = { elev: 0, style: 'grass_ground' };
+        map.tileGrid[gy][2] = { elev: 1.0, style: 'hill' };
+        map.tileGrid[gy][3] = { elev: 1.0, style: 'hill' };
+      }
+      map.obstacles.push(
+        { x: 0.5 * TILE, y: TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'bamboo' },
+        { x: 2.5 * TILE, y: TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'bamboo' }
+      );
+      break;
+    }
+    case 'object_bush': {
+      map = createMiniArenaMap(3, 2, 'shrine_outdoor');
+      map.bushes.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE });
+      break;
+    }
+    case 'object_tree': {
+      map = createMiniArenaMap(3, 3, 'shrine_outdoor');
+      for (let gy = 0; gy < 3; gy++) {
+        for (let gx = 0; gx < 3; gx++) map.tileGrid[gy][gx] = { elev: 0, style: 'grass_ground' };
+      }
+      map.trees.push({
+        x: TILE,
+        y: TILE,
+        w: TILE,
+        h: TILE,
+        canopyRadius: 42,
+        foliagePalette: ['#14532D', '#166534', '#15803D', '#4ADE80'],
+      });
+      drawCanopy = true;
+      break;
+    }
+  }
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = '#090D16';
+  ctx.fillRect(0, 0, width, height);
+
+  const scale = Math.min(width / map.width, height / map.height);
+  const offsetX = (width - map.width * scale) / 2;
+  const offsetY = (height - map.height * scale) / 2;
+
+  ctx.save();
+  ctx.translate(offsetX, offsetY);
+  ctx.scale(scale, scale);
+  renderMapBaseLayer(ctx, map, false, 0.8);
+  if (drawCanopy) {
+    renderMapCanopies(ctx, map);
+  }
+  ctx.restore();
+}
+

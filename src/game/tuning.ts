@@ -7,15 +7,15 @@ export const PLAYER_MOVEMENT = {
 
 export const GUN_AIM = {
   nearDistance: 32,
-  bloomRecovery: 24,
+  bloomRecovery: 20,
   spreadScale: 260,
   minSpread: 0.004,
   maxSpread: 0.33,
 };
 
 const AIM_BY_GUN = {
-  pistol: { near: 0.35, far: 2.65, farDistance: 400, pelletRadius: 0 },
-  rifle: { near: 0.35, far: 1.20, farDistance: 400, pelletRadius: 0 },
+  pistol: { near: 0.35, far: 1.75, farDistance: 400, pelletRadius: 0 },
+  rifle: { near: 0.35, far: 1.75, farDistance: 400, pelletRadius: 0 },
   shotgun: { near: 0.32, far: 4.20, farDistance: 290, pelletRadius: 10 },
   sniper: { near: 0.35, far: 1.15, farDistance: 400, pelletRadius: 0 },
 } satisfies Record<GunKind, { near: number; far: number; farDistance: number; pelletRadius: number }>;

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { HelpCircle, MapPin, Shield, Trophy, X } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { HelpCircle, Layers, MapPin, Package, Shield, Trophy, X } from 'lucide-react';
 import {
   FACTIONS,
   FACTION_CHARACTERS,
@@ -9,6 +9,7 @@ import {
   getReputationQiMultiplier,
   getWeaponSwapDuration,
 } from '../game/data';
+import { HelpCatalogVisualId, renderHelpPreview } from '../game/mapRenderer';
 import { FactionId, MapId, RunRecord } from '../game/types';
 import { MiniMapPreview } from './MiniMapPreview';
 import { CharacterAvatarSvg, FactionLogoSvg, WeaponIconSvg } from './WeaponArt';
@@ -30,74 +31,248 @@ const HELP_TABS: { id: HelpTab; label: string }[] = [
   { id: 'gameplay', label: '玩法' },
 ];
 
-const TERRAIN_GUIDE = [
+interface HelpGuideEntry {
+  visualId: HelpCatalogVisualId;
+  name: string;
+  elev: string;
+  footprint: string;
+  blocksBullets: string;
+  blocksLoS: string;
+  widePreview?: boolean;
+  desc: string;
+}
+
+const TERRAIN_GUIDE_ITEMS: HelpGuideEntry[] = [
   {
-    name: '碎石砂地地板紋理',
-    elev: '0.0 格',
-    desc: '無格線棋盤感的一致微粒地磚，全角色暢通移動；平地與高台銜接處皆以此紋理為基準。',
-    swatch: 'bg-[#A98456] border-[#785B38]',
+    visualId: 'terrain_flat',
+    name: '一般平地（沙地／石板／地磚）',
+    elev: '0.0',
+    footprint: '1×1 格',
+    blocksBullets: '否',
+    blocksLoS: '否',
+    desc: '基礎通行平地，各角色皆可暢通移動，地形本身不帶任何戰鬥屬性加成；所有高台與階梯皆以 0.0 為基準計算。',
   },
   {
+    visualId: 'terrain_grass',
+    name: '青綠草坪平地',
+    elev: '0.0',
+    footprint: '1×1 格',
+    blocksBullets: '否',
+    blocksLoS: '否',
+    desc: '分布於海島內陸與江戶神社外圍林地的草皮地面，與平地同為高度 0.0，僅切換踏步聲與視覺紋理。',
+  },
+  {
+    visualId: 'terrain_river',
     name: '河道與泥岸',
-    elev: '水阻（不可跨）',
-    desc: '一格一格鋪設的青藍水域與有機泥岸邊緣，角色不可涉水跨越，必須繞行木橋或石橋搶渡。',
-    swatch: 'bg-[#467794] border-[#5E4029]',
+    elev: '0.0',
+    footprint: '1×1 格',
+    blocksBullets: '否',
+    blocksLoS: '否',
+    desc: '逐格鋪設的青藍水域與八向泥岸邊緣，人員不可涉水進入；直線子彈與視線皆可跨水穿透射擊。',
   },
   {
-    name: '小箱子／有階梯的小箱子',
-    elev: '1.0 格／0.5 格木梯',
-    desc: '1×1 橡木小箱提供掩體；搭配 1×1 深色木條階梯可從平地攀上 1.0 格高處或再銜接高箱。',
-    swatch: 'bg-[#C48236] border-[#71451B]',
+    visualId: 'terrain_hill',
+    name: '土丘高地（可疊加）',
+    elev: '每層 +1.0',
+    footprint: '逐格連通',
+    blocksBullets: '高差 ≥ 2.0 擋',
+    blocksLoS: '高 > 對方+1 擋',
+    widePreview: true,
+    desc: '自然山丘地形，支援多層疊加（1.0、2.0…），上方可配置竹林等物件；須透過對應的土坡階梯上下，本身不提供任何戰鬥加成。',
   },
   {
-    name: '大箱子（斜撐木箱）',
-    elev: '1.5 格',
-    desc: '需先站上 1.0 格高台或箱體才可跨上頂端；由平地射向 1.5 格大箱時，子彈會深入外緣約 0.5 格，站太外側仍會中彈。',
-    swatch: 'bg-[#B7772C] border-[#593616]',
+    visualId: 'terrain_hill_stair',
+    name: '土坡階梯（土丘對應階梯）',
+    elev: '0.5 / 1.5',
+    footprint: '1×1 格',
+    blocksBullets: '否',
+    blocksLoS: '否',
+    widePreview: true,
+    desc: '專為土丘高地設計的 1×1 自然土坡，高度取兩層中間值（0.5 銜接平地與 1.0；1.5 銜接 1.0 與 2.0），符合 |Δh| ≤ 0.5 攀爬規則。',
   },
   {
-    name: '高台石階與木板斜台',
-    elev: '1.0 / 2.0 / 3.0 格',
-    desc: '切石高台與傾斜木板平台；站在高地對低處射擊可享 +15% 傷害與開闊視線，高差 ≥ 2.0 格時子彈於外緣即止。',
-    swatch: 'bg-[#948874] border-[#4A4337]',
+    visualId: 'terrain_platform',
+    name: '切石高台（可疊加）',
+    elev: '每層 +1.0',
+    footprint: '逐格高台',
+    blocksBullets: '依高度差',
+    blocksLoS: '高 > 對方+1 擋',
+    widePreview: true,
+    desc: '神廟、金字塔與古堡大廳的切石平台，支援逐層疊加（1.0、2.0、3.0）；平地無法射穿高差 ≥ 2.0 邊緣，須由對應切石石階攀登。',
   },
   {
-    name: '土丘平台',
-    elev: '1.0 / 2.0 格',
-    desc: '帶立體泥岩斜坡的野外高地，僅保留開口階梯進出，適合卡位防守或狙擊伏擊。',
-    swatch: 'bg-[#7A593C] border-[#4E3622]',
-  },
-  {
-    name: '樹木（樹幹與葉冠）',
-    elev: '樹幹實心遮蔽',
-    desc: '樹幹阻擋移動與直線子彈；濃密葉冠為高 z-index 圖層可遮蔽身形，玩家靠近時葉冠自動轉為半透明。',
-    swatch: 'bg-[#2E7D32] border-[#1B5E20]',
-  },
-  {
-    name: '石牆（1×N／2×2）與房屋',
-    elev: '2.0–3.0 格',
-    desc: '米褐與青苔磚砌實牆以及斜頂磚石房屋（兩側藍窗）；高度差 ≥ 2.0 格，所有子彈碰外緣立即阻斷。',
-    swatch: 'bg-[#5A5346] border-[#2C2822]',
-  },
-  {
-    name: '竹林實牆（每格 3 株翠竹）',
-    elev: '3.0 格（阻擋視線）',
-    desc: '一格內生長三株翠綠竹柱的實牆掩體，視同牆壁阻擋移動、子彈與敵人視野，適合竹林繞後伏擊。',
-    swatch: 'bg-[#166534] border-[#4ADE80]',
-  },
-  {
-    name: '鐵道路軌與火車車廂',
-    elev: '0.0 路軌 / 2.0 車廂',
-    desc: '道碴枕木鋼軌供高速穿行，靜止火車車廂高 2.0 格（邊緣直接擋彈），可沿西側階梯貨箱鏈登頂奪取制高點。',
-    swatch: 'bg-[#7F1D1D] border-[#94A3B8]',
-  },
-  {
-    name: '戰術防彈盾（地面近戰拾取）',
-    elev: '100 耐久（手持）',
-    desc: '於地面拾取並裝備於當前手上。手持面向前方才可擋住正面子彈或近戰減半，左鍵推動震退敵人，丟棄或轉手皆保留剩餘耐久。',
-    swatch: 'bg-[#1E293B] border-[#38BDF8]',
+    visualId: 'terrain_platform_stair',
+    name: '切石石階（切石對應階梯）',
+    elev: '0.5 / 1.5 / 2.5',
+    footprint: '1×1／連貫石階',
+    blocksBullets: '否',
+    blocksLoS: '否',
+    widePreview: true,
+    desc: '專為切石高台設計的石砌階梯，提供每層 +0.5 的平滑落差緩衝，讓步兵順利上下 1.0、2.0 乃至 3.0 層切石建築高台。',
   },
 ];
+
+const OBJECT_GUIDE_ITEMS: HelpGuideEntry[] = [
+  {
+    visualId: 'object_bridge',
+    name: '跨河木橋',
+    elev: '0.0',
+    footprint: '多格橋段',
+    blocksBullets: '否',
+    blocksLoS: '否',
+    widePreview: true,
+    desc: '架設於河道上方的木構橋樑物件，覆蓋水域阻擋判定讓雙岸兵力得以搶渡或架槍交火。',
+  },
+  {
+    visualId: 'object_rail',
+    name: '鐵道路軌',
+    elev: '0.0',
+    footprint: '1×1 格',
+    blocksBullets: '否',
+    blocksLoS: '否',
+    widePreview: true,
+    desc: '鋪設於地面的碎石道碴與木枕雙鋼軌物件，角色可自由跨越或沿軌奔跑，可與火車車廂物件搭配配置。',
+  },
+  {
+    visualId: 'object_stair_crate',
+    name: '木條階梯踏台（有階梯的小箱子）',
+    elev: '0.5',
+    footprint: '1×1 格',
+    blocksBullets: '否',
+    blocksLoS: '否',
+    desc: '專門銜接平地（0.0）與小木箱或高台（1.0）的 1×1 踏板物件，解決 |Δh| = 1.0 無法直接跨上的問題。',
+  },
+  {
+    visualId: 'object_small_crate',
+    name: '小木箱',
+    elev: '1.0',
+    footprint: '1×1 格',
+    blocksBullets: '平地不擋',
+    blocksLoS: '否',
+    desc: '1 格橡木低矮箱體，可供站立上頂（須由 0.5 階梯或 1.0 高台銜接），並能踏上 1.5 格大箱或貼靠牆壁當射擊掩口。',
+  },
+  {
+    visualId: 'object_big_crate',
+    name: '大木箱（斜撐木箱）',
+    elev: '1.5',
+    footprint: '2×2 格',
+    blocksBullets: '深入 0.5 格阻斷',
+    blocksLoS: '高 > 對方+1 擋',
+    desc: '2×2 斜撐大型木箱；須先踩上 1.0 格小箱或高台才可登頂。平地子彈擊中大箱時會深入外緣約 0.5 格才消失，緊貼箱緣仍有中彈風險。',
+  },
+  {
+    visualId: 'object_container',
+    name: '彩色鋼製貨櫃',
+    elev: '2.0',
+    footprint: '4×2 / 2×4 格',
+    blocksBullets: '邊緣即止',
+    blocksLoS: '阻擋低處視線',
+    widePreview: true,
+    desc: '港區機庫大型鋼櫃，平地射擊於外緣立即阻斷（0 穿透）；可沿「0.5 階梯 → 1.0 小箱 → 1.5 大箱 → 2.0 貨櫃」逐級攀登頂端。',
+  },
+  {
+    visualId: 'object_train_car',
+    name: '靜止火車頭／貨運車廂',
+    elev: '2.0',
+    footprint: '4×2 格',
+    blocksBullets: '邊緣即止',
+    blocksLoS: '阻擋低處視線',
+    widePreview: true,
+    desc: '停泊於鐵道路軌上的獨立車廂物件，高度 2.0 格且邊緣直接擋彈，保留平交道缺口供穿行。',
+  },
+  {
+    visualId: 'object_stone_wall',
+    name: '石砌實牆（棕褐／苔綠）',
+    elev: '10',
+    footprint: '1×1／連貫牆',
+    blocksBullets: '全阻斷',
+    blocksLoS: '是',
+    widePreview: true,
+    desc: '實心不可跨越建築牆體，支援 8 向轉角拼接與鄰接木箱側反光打燈；完全阻斷角色移動、直線子彈、黑龍波（觸發反彈）與視野。',
+  },
+  {
+    visualId: 'object_shrine_wall',
+    name: '江戶杉木板塀',
+    elev: '10',
+    footprint: '1×1 格',
+    blocksBullets: '全阻斷',
+    blocksLoS: '是',
+    desc: '一格一格鋪設的木構實牆，高度與實心阻擋規則皆比照牆壁（10），隔開中央古社內外通道。',
+  },
+  {
+    visualId: 'object_castle_pillar',
+    name: '聖殿雕紋石柱',
+    elev: '10',
+    footprint: '1×1 格',
+    blocksBullets: '全阻斷',
+    blocksLoS: '是',
+    desc: '歐洲古堡大廳的金飾大理石方柱，單格 1×1 佔位，作為大廳繞柱掩體與視線斷點。',
+  },
+  {
+    visualId: 'object_house',
+    name: '斜頂磚石房屋（完整 3×2）',
+    elev: '10',
+    footprint: '3×2 格',
+    blocksBullets: '全阻斷',
+    blocksLoS: '是',
+    widePreview: true,
+    desc: '少數多格大型建築物件（雙坡屋頂＋兩側藍窗），高度 10、不可進入或翻越，完全阻擋子彈與敵我視線。',
+  },
+  {
+    visualId: 'object_bamboo',
+    name: '竹林實牆（平地／山地通用）',
+    elev: '10',
+    footprint: '1×1 格（3 株）',
+    blocksBullets: '全阻斷',
+    blocksLoS: '是',
+    widePreview: true,
+    desc: '一格內長出三株翠竹的物件層實牆（可覆蓋在平地或土丘高地上），竹群透明空隙如實透出底下草地或土坡紋理，性質同高度 10 實牆。',
+  },
+  {
+    visualId: 'object_bush',
+    name: '野生灌木草叢',
+    elev: '0.0',
+    footprint: '1×1 格',
+    blocksBullets: '否',
+    blocksLoS: '否',
+    desc: '高度 0.0 的低矮灌木地表植被，角色可自由穿梭通過，不會縮減任何視野或阻擋射擊。',
+  },
+  {
+    visualId: 'object_tree',
+    name: '林間樹木（實心樹幹＋樹冠）',
+    elev: '10',
+    footprint: '1×1 格',
+    blocksBullets: '全阻斷',
+    blocksLoS: '是',
+    desc: '高度視為 10 的實心障礙樹體，完全阻擋角色走位、子彈彈道與敵我視線；當角色靠近樹下時，高層樹冠會轉為半透明以避免遮擋視角。',
+  },
+];
+
+const TerrainObjectCanvasPreview: React.FC<{ visualId: HelpCatalogVisualId; wide?: boolean }> = ({
+  visualId,
+  wide = false,
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const canvasW = wide ? 240 : 144;
+  const canvasH = wide ? 120 : 108;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    renderHelpPreview(ctx, visualId, canvasW, canvasH);
+  }, [visualId, canvasW, canvasH]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={canvasW}
+      height={canvasH}
+      className="w-full h-full object-contain block"
+    />
+  );
+};
 
 export const PortalView: React.FC<PortalViewProps> = ({
   records,
@@ -257,22 +432,94 @@ export const PortalView: React.FC<PortalViewProps> = ({
             {/* Modal Scrollable Content */}
             <div className="p-6 overflow-y-auto space-y-6">
               {helpTab === 'terrain' && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {TERRAIN_GUIDE.map((item) => (
-                    <div
-                      key={item.name}
-                      className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 flex items-start gap-3.5"
-                    >
-                      <div className={`w-11 h-11 rounded-lg border-2 shrink-0 ${item.swatch}`} />
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-sm font-bold text-white">{item.name}</span>
-                          <span className="text-[11px] font-mono-num text-amber-300">{item.elev}</span>
-                        </div>
-                        <p className="text-xs text-slate-300 leading-relaxed">{item.desc}</p>
-                      </div>
+                <div className="space-y-6">
+                  <div className="bg-slate-900/60 border border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-300 flex flex-wrap items-center justify-between gap-2">
+                    <span>
+                      實戰圖層與判定規則 Debug 手冊：先繪製<strong className="text-sky-300">地板地形層</strong>，再疊加<strong className="text-emerald-300">物件層</strong>（物件透明處如實透出底層地形）；地形本身無任何傷害／防禦加成，所有實心牆體高度統一為 <strong className="text-amber-300 font-mono-num">10</strong>。
+                    </span>
+                  </div>
+
+                  {/* Category 1: 地形（Floor / Terrain Layer） */}
+                  <section className="space-y-3">
+                    <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
+                      <Layers className="w-4 h-4 text-sky-400" />
+                      <h3 className="text-sm font-bold text-sky-300">一、地形（地板與高低台階層）</h3>
+                      <span className="text-[11px] text-slate-400">決定行走高度、水阻與攀爬斜坡</span>
                     </div>
-                  ))}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {TERRAIN_GUIDE_ITEMS.map((item) => (
+                        <div
+                          key={item.visualId}
+                          className={`bg-slate-900/85 border border-slate-800 rounded-xl p-3.5 flex ${
+                            item.widePreview ? 'flex-col gap-3' : 'items-start gap-3.5'
+                          }`}
+                        >
+                          <div
+                            className={`rounded-lg border border-slate-700/80 overflow-hidden bg-[#090D16] shrink-0 ${
+                              item.widePreview ? 'w-full h-28' : 'w-28 h-24'
+                            }`}
+                          >
+                            <TerrainObjectCanvasPreview visualId={item.visualId} wide={item.widePreview} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between gap-2 mb-1">
+                              <span className="text-sm font-bold text-white">{item.name}</span>
+                              <span className="text-[11px] font-mono-num text-amber-300 shrink-0">
+                                高度 {item.elev}
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] font-mono-num text-slate-400 mb-1.5">
+                              <span>佔位：{item.footprint}</span>
+                              <span>擋彈：{item.blocksBullets}</span>
+                              <span>擋視線：{item.blocksLoS}</span>
+                            </div>
+                            <p className="text-xs text-slate-300 leading-relaxed">{item.desc}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  {/* Category 2: 物件（Object Layer） */}
+                  <section className="space-y-3">
+                    <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
+                      <Package className="w-4 h-4 text-emerald-400" />
+                      <h3 className="text-sm font-bold text-emerald-300">二、物件（障礙掩體、建築與植被層）</h3>
+                      <span className="text-[11px] text-slate-400">可疊加於合適地板上，含箱體、車廂、牆壁與自然植被</span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {OBJECT_GUIDE_ITEMS.map((item) => (
+                        <div
+                          key={item.visualId}
+                          className={`bg-slate-900/85 border border-slate-800 rounded-xl p-3.5 flex ${
+                            item.widePreview ? 'flex-col gap-3' : 'items-start gap-3.5'
+                          }`}
+                        >
+                          <div
+                            className={`rounded-lg border border-slate-700/80 overflow-hidden bg-[#090D16] shrink-0 ${
+                              item.widePreview ? 'w-full h-32' : 'w-28 h-24'
+                            }`}
+                          >
+                            <TerrainObjectCanvasPreview visualId={item.visualId} wide={item.widePreview} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between gap-2 mb-1">
+                              <span className="text-sm font-bold text-white">{item.name}</span>
+                              <span className="text-[11px] font-mono-num text-amber-300 shrink-0">
+                                高度 {item.elev}
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] font-mono-num text-slate-400 mb-1.5">
+                              <span>佔位：{item.footprint}</span>
+                              <span>擋彈：{item.blocksBullets}</span>
+                              <span>擋視線：{item.blocksLoS}</span>
+                            </div>
+                            <p className="text-xs text-slate-300 leading-relaxed">{item.desc}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
                 </div>
               )}
 
@@ -499,22 +746,22 @@ export const PortalView: React.FC<PortalViewProps> = ({
                     </div>
 
                     <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 space-y-1.5">
-                      <div className="text-sm font-bold text-amber-400">彈道貫穿、死亡掉落與 AI 生態</div>
+                      <div className="text-sm font-bold text-amber-400">彈道貫穿、死亡掉落與對等戰鬥規則</div>
                       <p className="text-slate-300">
                         • 射向 1.5 格高大箱子時，子彈會穿透至外緣內 0.5 格處（站太靠箱緣仍會受傷）；≥ 2.0 格石牆/貨櫃則於邊緣即止。
                       </p>
                       <p className="text-slate-300">
-                        • 玩家死亡會將身上的非預設武器掉回地面，復活後重置為制式小槍與戰術小刀（三命制）。
+                        • 玩家與電腦同為 <strong>100 血</strong>且無陣營被動能力；玩家死亡掉落非預設武器並於出生點以制式小槍／小刀復活（三命制，不消耗後備兵力）。
                       </p>
                       <p className="text-slate-300">
-                        • 皇家 5 發黃色光彈可穿透敵人但會誤傷友軍；天影黑龍波為深紫藍長龍，龍頭傷 20、龍身傷 15、碰牆反彈且絕不傷隊友。
+                        • 皇家 5 發黃色光彈可穿透敵人但會誤傷友軍、閃光瞬移可使敵對目標（含玩家）畫面閃白致盲；天影黑龍波傷 20/15 且絕不傷隊友。
                       </p>
                     </div>
 
                     <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 space-y-1.5">
                       <div className="text-sm font-bold text-emerald-400">三方 10 兵編制與獨立聲望</div>
                       <p className="text-slate-300">
-                        • 皇家、天影、第三勢力各 10 名士兵（場上同陣營最多 2 人），所有士兵均 100 血並從陣營角色池選取外觀與名稱。
+                        • 皇家、天影、第三勢力各 10 名士兵（場上同陣營最多 2 人）；AI 固定以 <strong>100 聲望（1.5× 集氣）</strong>與<strong>無限備彈</strong>共用雙手與技能冷卻機制。
                       </p>
                       <p className="text-slate-300">
                         • 皇家擊殺天影：皇家 +1、天影 -1（天影殺皇家亦同）；擊殺第三勢力只加己方聲望不扣第三聲望；第三勢力擊殺皇家/天影會扣該陣營聲望。
