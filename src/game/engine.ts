@@ -1,7 +1,17 @@
-import { sfx } from '../audio/sfx';
+import { sfx, type FootstepSurface } from '../audio/sfx';
 import { FACTIONS, FACTION_CHARACTERS, GUNS, MELEES, getReputationQiMultiplier, getWeaponSwapDuration } from './data';
 import { renderMapBaseLayer, renderMapCanopies } from './mapRenderer';
 import { ArenaMap, TILE, createArenaMap } from './maps';
+import {
+  AI_COMBAT,
+  AI_PATROL,
+  GUN_AIM,
+  GUNFIRE_ANIMATION_SECONDS,
+  PLAYER_MOVEMENT,
+  RESPAWN_DELAY_SECONDS,
+  RELOAD_CUES,
+  getGunSpread,
+} from './tuning';
 import {
   BeamTracer,
   CharacterSkin,
@@ -181,7 +191,10 @@ export class TwilightEngine {
   private mouseScreen = { x: 640, y: 360 };
   private mouseDown = false;
   private chargeSessionAllowed = false;
-  private crosshairRadius = 11;
+  private crosshairBloom = 0;
+  private viewport = { width: 1280, height: 720 };
+  private respawnTimer = 0;
+  private distanceSinceStep = 0;
   private camera = { x: 0, y: 0, shake: 0, zoom: 1.3 };
   private time = 0;
   private hudEmitTimer = 0;
@@ -249,6 +262,7 @@ export class TwilightEngine {
       maxReserveAmmo: 45,
       swapTimer: 0,
       swapDuration: 0,
+      gunfireTimer: 0,
       attackAnimTimer: 0,
       attackAnimDuration: 0,
       attackAnimKind: null,
@@ -276,7 +290,6 @@ export class TwilightEngine {
     };
     this.player.elevation = this.getWalkableElevation(this.player.x, this.player.y);
     this.player.onHighGround = this.player.elevation >= 1.0;
-    this.crosshairRadius = startGun.baseCrosshair;
 
     const initCam = this.clampCameraToMap(this.player.x, this.player.y, 1280, 720);
     this.camera.x = initCam.x;
@@ -471,7 +484,7 @@ export class TwilightEngine {
   }
 
   private getActiveFactionCount(fac: FactionId): number {
-    let count = this.player.faction === fac && this.player.lives > 0 ? 1 : 0;
+    let count = this.player.faction === fac && this.player.hp > 0 ? 1 : 0;
     for (const e of this.enemies) {
       if (e.faction === fac) count += 1;
     }
@@ -481,7 +494,7 @@ export class TwilightEngine {
   private pickBestDispersedSpawn(fac: FactionId): { x: number; y: number } {
     const spawns = this.map.factionSpawns[fac];
     const activePositions: { x: number; y: number }[] = [];
-    if (this.player.lives > 0) {
+    if (this.player.hp > 0) {
       activePositions.push({ x: this.player.x, y: this.player.y });
     }
     for (const e of this.enemies) {
@@ -509,7 +522,8 @@ export class TwilightEngine {
   private refillFieldUpToCap() {
     const factions: FactionId[] = ['royal', 'shadow', 'mercenary'];
     for (const fac of factions) {
-      while (this.deploymentQueue[fac] > 0 && this.getActiveFactionCount(fac) < 2) {
+      const reservedSlot = this.status === 'RESPAWNING' && this.player.faction === fac ? 1 : 0;
+      while (this.deploymentQueue[fac] > 0 && this.getActiveFactionCount(fac) + reservedSlot < 2) {
         this.deploymentQueue[fac] -= 1;
         const sp = this.pickBestDispersedSpawn(fac);
         const isAlly = fac !== 'mercenary' && fac === this.player.faction;
@@ -1008,6 +1022,7 @@ export class TwilightEngine {
     this.player.chargingMelee = false;
     this.player.chargeReady = false;
     this.chargeSessionAllowed = false;
+    sfx.setMeleeCharge(null);
   }
 
   public setMousePos(x: number, y: number) {
@@ -1018,9 +1033,9 @@ export class TwilightEngine {
     const weapon = this.player.weapons[this.player.activeHand];
     if (this.status === 'PLAYING' && weapon.type === 'gun') {
       const gun = weapon.def;
-      const mult = this.player.eagleEyeTimer > 0 ? 0.45 : 1;
-      const maxR = gun.maxCrosshair * mult;
-      this.crosshairRadius = Math.min(maxR, this.crosshairRadius + Math.min(8, moveDist * 0.22));
+      this.crosshairBloom = Math.min(gun.maxCrosshair - gun.baseCrosshair, this.crosshairBloom + Math.min(8, moveDist * 0.22));
+      const { x, y } = this.getWorldPointer();
+      this.player.angle = Math.atan2(y - this.player.y, x - this.player.x);
     }
   }
 
@@ -1036,6 +1051,7 @@ export class TwilightEngine {
         this.player.chargingMelee = true;
         this.chargeSessionAllowed = this.player.qi >= this.player.maxQi - 0.5;
         this.player.chargeReady = false;
+        if (this.chargeSessionAllowed) sfx.setMeleeCharge(0);
       } else {
         if (this.player.swapTimer <= 0 && weapon.ammoInMag <= 0 && weapon.reloadTimer === 0) {
           this.startReload();
@@ -1119,23 +1135,41 @@ export class TwilightEngine {
     this.cancelMeleeCharge();
     p.swapDuration = getWeaponSwapDuration(fallback.def.kind);
     p.swapTimer = p.swapDuration;
-    if (fallback.type === 'gun') this.resetCrosshair(fallback.def);
+    this.resetGunFeedback();
     sfx.switchWeapon(false);
     this.spawnText(p.x, p.y - 38, `放下 ${weapon.def.name} · 換回${fallback.def.name}`, '#FBBF24', 1.05);
     this.emitHud();
   }
 
-  private resetCrosshair(gun: GunDef) {
-    this.crosshairRadius = gun.baseCrosshair * (this.player.eagleEyeTimer > 0 ? 0.45 : 1);
+  private resetGunFeedback() {
+    this.crosshairBloom = 0;
+    this.player.gunfireTimer = 0;
+  }
+
+  private getWorldPointer() {
+    return {
+      x: (this.mouseScreen.x - this.viewport.width / 2) / this.camera.zoom + this.camera.x,
+      y: (this.mouseScreen.y - this.viewport.height / 2) / this.camera.zoom + this.camera.y,
+    };
+  }
+
+  private getPlayerGunSpread(gun: GunDef) {
+    const p = this.player;
+    const pointer = this.getWorldPointer();
+    return getGunSpread(
+      gun.kind,
+      gun.baseCrosshair + this.crosshairBloom,
+      dist(p.x, p.y, pointer.x, pointer.y),
+      p.eagleEyeTimer > 0 ? 0.45 : 1
+    );
   }
 
   public switchWeapon() {
     const p = this.player;
     this.cancelMeleeCharge();
     p.activeHand = p.activeHand === 0 ? 1 : 0;
+    this.resetGunFeedback();
     const weapon = p.weapons[p.activeHand];
-    if (weapon.type === 'gun') this.resetCrosshair(weapon.def);
-
     const baseSwapDur = getWeaponSwapDuration(weapon.def.kind);
     const sinceAttack = this.time - p.lastAttackAt;
     if (p.delayCancelReady && sinceAttack <= 0.34 && sinceAttack >= 0.02) {
@@ -1169,7 +1203,7 @@ export class TwilightEngine {
       return;
     }
     weapon.reloadTimer = weapon.def.reloadTime;
-    sfx.reload();
+    sfx.reload(weapon.def.kind, 'start');
     this.spawnText(p.x, p.y - 36, '裝填彈藥中...', '#FBBF24', 0.95);
     this.emitHud();
   }
@@ -1228,7 +1262,7 @@ export class TwilightEngine {
       this.dropWeapon(p.weapons[p.activeHand], item.x, item.y);
       p.weapons[p.activeHand] = weapon;
       this.cancelMeleeCharge();
-      if (weapon.type === 'gun') this.resetCrosshair(weapon.def);
+      this.resetGunFeedback();
       const label = weapon.type === 'melee' && weapon.def.kind === 'shield'
         ? `${weapon.def.name} (${Math.round(weapon.durability)}/100)`
         : weapon.def.name;
@@ -1272,6 +1306,7 @@ export class TwilightEngine {
       const pelletsToFire = gun.kind === 'shotgun' ? Math.max(1, Math.min(gun.pellets, weapon.ammoInMag)) : gun.pellets;
       const ammoCost = gun.kind === 'shotgun' ? pelletsToFire : 1;
       p.attackCooldown = 1 / gun.fireRate;
+      p.gunfireTimer = GUNFIRE_ANIMATION_SECONDS;
       p.lastAttackAt = this.time;
       p.delayCancelReady = true;
       weapon.ammoInMag = Math.max(0, weapon.ammoInMag - ammoCost);
@@ -1282,12 +1317,11 @@ export class TwilightEngine {
 
       const muzzleX = p.x + Math.cos(p.angle) * (p.radius + 4);
       const muzzleY = p.y + Math.sin(p.angle) * (p.radius + 4);
-      const spreadRad = clamp(this.crosshairRadius / 260, 0.004, 0.24);
+      const spreadRad = this.getPlayerGunSpread(gun);
       const infiniteRange = Math.hypot(this.map.width, this.map.height) + TILE * 2;
 
       for (let i = 0; i < pelletsToFire; i++) {
-        const pelletExtra = gun.kind === 'shotgun' ? 0.14 : 0;
-        const spreadOffset = (Math.random() - 0.5) * (spreadRad + pelletExtra);
+        const spreadOffset = (Math.random() - 0.5) * spreadRad;
         const a = p.angle + spreadOffset;
         const seg = this.traceBulletSegment(muzzleX, muzzleY, a, infiniteRange, p.elevation);
 
@@ -1342,8 +1376,7 @@ export class TwilightEngine {
         });
       }
 
-      const mult = p.eagleEyeTimer > 0 ? 0.45 : 1;
-      this.crosshairRadius = Math.min(gun.maxCrosshair * mult, this.crosshairRadius + gun.bloomPerShot * mult);
+      this.crosshairBloom = Math.min(gun.maxCrosshair - gun.baseCrosshair, this.crosshairBloom + gun.bloomPerShot);
 
       this.camera.shake = Math.min(8, this.camera.shake + (gun.kind === 'shotgun' || gun.kind === 'sniper' ? 4.5 : 1.4));
       sfx.gunshot(gun.kind);
@@ -1787,7 +1820,7 @@ export class TwilightEngine {
     enemy.elevation = pushed.elevation;
 
     const attackerEntity = isPlayerAttacker ? null : this.enemies.find((ae) => ae.id === attackerId);
-    const attackerPos = isPlayerAttacker
+    const attackerPos = isPlayerAttacker && p.hp > 0
       ? { x: p.x, y: p.y }
       : attackerEntity
         ? { x: attackerEntity.x, y: attackerEntity.y }
@@ -1813,7 +1846,7 @@ export class TwilightEngine {
       p.totalDamage += finalDmg;
       p.score += finalDmg;
 
-      if (p.vampireTimer > 0 && finalDmg > 0) {
+      if (p.hp > 0 && p.vampireTimer > 0 && finalDmg > 0) {
         const healRatio = isMelee ? 0.5 : 1 / 3;
         const heal = Math.max(1, Math.round(finalDmg * healRatio));
         p.hp = Math.min(p.maxHp, p.hp + heal);
@@ -1847,10 +1880,10 @@ export class TwilightEngine {
     this.enemies.splice(idx, 1);
     this.enemyMagState.delete(enemy.id);
     this.spawnBurst(enemy.x, enemy.y, enemy.color, 14);
+    sfx.soldierDown(this.nearbySoundVolume(enemy.x, enemy.y) * 0.75);
 
     if (killedByPlayer) {
       const p = this.player;
-      sfx.kill();
       p.kills += 1;
       p.comboCount += 1;
       p.comboTimer = 4.0;
@@ -1925,7 +1958,7 @@ export class TwilightEngine {
     hitOriginY?: number
   ) {
     const p = this.player;
-    if (p.invulnTimer > 0) return;
+    if (p.hp <= 0 || p.invulnTimer > 0) return;
 
     if (p.royalShieldTimer > 0 && !isMeleeAttack) {
       this.spawnText(p.x, p.y - 38, '護盾免疫!', '#38BDF8', 1.0);
@@ -2011,65 +2044,85 @@ export class TwilightEngine {
 
     p.invulnTimer = finalDmg > 0 ? 0.2 : 0.08;
     this.camera.shake = Math.min(12, this.camera.shake + (finalDmg > 0 ? 5.5 : 2.0));
-    sfx.playerHurt();
-
     if (p.hp <= 0) {
-      // 玩家死亡時掉落兩手的非預設武器
-      const droppedFirst = this.dropWeapon(p.weapons[0], p.x, p.y);
-      const secondX = droppedFirst ? clamp(p.x + 18, TILE * 0.5, this.map.width - TILE * 0.5) : p.x;
-      this.dropWeapon(p.weapons[1], secondX, p.y);
-
-      p.lives -= 1;
-      if (p.lives > 0) {
-        if (this.deploymentQueue[p.faction] > 0) {
-          this.deploymentQueue[p.faction] -= 1;
-        }
-        this.spawnBurst(p.x, p.y, FACTIONS[p.faction].accentHex, 16);
-        const spawnPt = this.map.factionSpawns[p.faction][0];
-        p.x = spawnPt.x;
-        p.y = spawnPt.y;
-        p.vx = 0;
-        p.vy = 0;
-        p.elevation = this.getWalkableElevation(p.x, p.y);
-        p.onHighGround = p.elevation >= 1.0;
-        this.cancelMeleeCharge();
-        p.weapons = [defaultWeaponForHand(0), defaultWeaponForHand(1)];
-        p.activeHand = 0;
-        p.swapTimer = 0;
-        p.swapDuration = 0;
-        p.attackAnimTimer = 0;
-        p.attackAnimDuration = 0;
-        p.attackAnimKind = null;
-        p.attackCooldown = 0;
-        p.royalShieldTimer = 0;
-        p.eagleEyeTimer = 0;
-        p.shadowCloneTimer = 0;
-        p.vampireTimer = 0;
-        p.shrinkTimer = 0;
-        p.giantTimer = 0;
-        p.sizeScale = 1;
-        p.radius = p.baseRadius;
-        p.hp = p.maxHp;
-        p.qi = p.maxQi;
-        p.reserveAmmo = 30;
-        this.crosshairRadius = DEFAULT_PISTOL.baseCrosshair;
-        p.invulnTimer = 2.4;
-
-        const respawnCam = this.clampCameraToMap(p.x, p.y, 1280, 720);
-        this.camera.x = respawnCam.x;
-        this.camera.y = respawnCam.y;
-        this.spawnBurst(p.x, p.y, '#FFFFFF', 14);
-        this.showBanner(`出身點復活！變回小槍／小刀 · 剩餘生命：${p.lives} 條`, 2.5);
-        this.emitHud();
-      } else {
-        p.hp = 0;
-        this.status = 'GAME_OVER';
-        this.clearInputs();
-        this.emitHud();
-      }
+      this.handlePlayerDeath();
     } else {
+      sfx.playerHurt();
       this.emitHud();
     }
+  }
+
+  private handlePlayerDeath() {
+    const p = this.player;
+    p.hp = 0;
+    p.lives -= 1;
+    this.clearInputs();
+    sfx.playerDown();
+
+    const droppedFirst = this.dropWeapon(p.weapons[0], p.x, p.y);
+    const secondX = droppedFirst ? clamp(p.x + 18, TILE * 0.5, this.map.width - TILE * 0.5) : p.x;
+    this.dropWeapon(p.weapons[1], secondX, p.y);
+
+    if (p.lives > 0) {
+      this.status = 'RESPAWNING';
+      this.respawnTimer = RESPAWN_DELAY_SECONDS;
+      this.spawnBurst(p.x, p.y, FACTIONS[p.faction].accentHex, 16);
+    } else {
+      this.status = 'GAME_OVER';
+    }
+    this.emitHud();
+  }
+
+  private respawnPlayer() {
+    const p = this.player;
+    this.status = 'PLAYING';
+    this.clearInputs();
+    sfx.playerRespawn();
+    if (this.deploymentQueue[p.faction] > 0) this.deploymentQueue[p.faction] -= 1;
+    for (const enemy of this.enemies) {
+      if (enemy.visibleTargetId !== 'player') continue;
+      enemy.visibleTargetId = null;
+      enemy.chargingSkillTimer = 0;
+    }
+    const spawnPt = this.map.factionSpawns[p.faction][0];
+    p.x = spawnPt.x;
+    p.y = spawnPt.y;
+    p.vx = 0;
+    p.vy = 0;
+    p.elevation = this.getWalkableElevation(p.x, p.y);
+    p.onHighGround = p.elevation >= 1.0;
+    p.weapons = [defaultWeaponForHand(0), defaultWeaponForHand(1)];
+    p.activeHand = 0;
+    p.swapTimer = 0;
+    p.swapDuration = 0;
+    p.attackAnimTimer = 0;
+    p.attackAnimDuration = 0;
+    p.attackAnimKind = null;
+    p.attackCooldown = 0;
+    p.royalShieldTimer = 0;
+    p.eagleEyeTimer = 0;
+    p.shadowCloneTimer = 0;
+    p.vampireTimer = 0;
+    p.shrinkTimer = 0;
+    p.giantTimer = 0;
+    p.sizeScale = 1;
+    p.radius = p.baseRadius;
+    p.hp = p.maxHp;
+    p.qi = p.maxQi;
+    p.reserveAmmo = 30;
+    this.resetGunFeedback();
+    this.distanceSinceStep = 0;
+    p.moveIntensity = 0;
+    p.delayCancelReady = false;
+    p.comboEmpowerTimer = 0;
+    p.invulnTimer = 2.4;
+
+    const respawnCam = this.clampCameraToMap(p.x, p.y, this.viewport.width, this.viewport.height);
+    this.camera.x = respawnCam.x;
+    this.camera.y = respawnCam.y;
+    this.spawnBurst(p.x, p.y, '#FFFFFF', 14);
+    this.showBanner(`出生點復活！變回小槍／小刀 · 剩餘生命：${p.lives} 條`, 2.5);
+    this.emitHud();
   }
 
   private pickRandomArchetype(): EnemyArchetype {
@@ -2154,12 +2207,15 @@ export class TwilightEngine {
       lastSeenTargetPos: null,
       alertTimer: 0,
       hasLosToTarget: false,
+      visibleTargetId: null,
+      reactionTimer: 0,
       focusedTargetId: null,
       aggroLockTimer: 0,
       pathTiles: [],
       pathTimer: 0,
       patrolAnchor: { x, y },
-      patrolTarget: { x, y },
+      patrolTarget: null,
+      patrolTimer: 0,
       royalShieldTimer: 0,
       eagleEyeTimer: 0,
       shadowCloneTimer: 0,
@@ -2169,6 +2225,7 @@ export class TwilightEngine {
       blindTimer: 0,
       stunTimer: 0,
       hitFlash: 0,
+      gunfireTimer: 0,
       attackAnimTimer: 0,
       attackAnimDuration: 0,
       attackAnimKind: null,
@@ -2299,16 +2356,36 @@ export class TwilightEngine {
     });
   }
 
-  public update(dt: number, canvasWidth: number, canvasHeight: number) {
-    if (this.status !== 'PLAYING') return;
+  private isBattleActive() {
+    return this.status === 'PLAYING' || this.status === 'RESPAWNING';
+  }
 
-    this.time += dt;
-    if (this.bannerTimer > 0) this.bannerTimer = Math.max(0, this.bannerTimer - dt);
-    if (this.activeSkillBannerTimer > 0) this.activeSkillBannerTimer = Math.max(0, this.activeSkillBannerTimer - dt);
-    if (this.camera.shake > 0) this.camera.shake = Math.max(0, this.camera.shake - dt * 26);
+  private updateReloads(dt: number) {
+    const p = this.player;
+    for (const weapon of p.weapons) {
+      if (weapon.type !== 'gun' || weapon.reloadTimer <= 0) continue;
+      const previousProgress = 1 - weapon.reloadTimer / weapon.def.reloadTime;
+      weapon.reloadTimer = Math.max(0, weapon.reloadTimer - dt);
+      const progress = 1 - weapon.reloadTimer / weapon.def.reloadTime;
+      for (const cue of RELOAD_CUES) {
+        if (previousProgress < cue.progress && progress >= cue.progress) {
+          sfx.reload(weapon.def.kind, cue.phase);
+        }
+      }
+      if (weapon.reloadTimer > 0) continue;
 
+      const needed = Math.min(weapon.def.magSize - weapon.ammoInMag, p.reserveAmmo);
+      weapon.ammoInMag += needed;
+      p.reserveAmmo -= needed;
+      sfx.reload(weapon.def.kind, 'ready');
+      this.emitHud();
+    }
+  }
+
+  private updatePlayer(dt: number) {
     const p = this.player;
     p.attackCooldown = Math.max(0, p.attackCooldown - dt);
+    p.gunfireTimer = Math.max(0, p.gunfireTimer - dt);
     p.swapTimer = Math.max(0, p.swapTimer - dt);
     p.attackAnimTimer = Math.max(0, p.attackAnimTimer - dt);
     if (p.attackAnimTimer === 0) p.attackAnimKind = null;
@@ -2329,7 +2406,7 @@ export class TwilightEngine {
     p.radius = p.baseRadius * p.sizeScale;
 
     // 視窗縮放：固定維持上下約 15 格、左右約 19 格（鷹眼不縮小視野，改以鏡頭隨游標前移偵察）
-    const baseZoom = (canvasWidth / (19 * TILE) + canvasHeight / (15 * TILE)) / 2;
+    const baseZoom = (this.viewport.width / (19 * TILE) + this.viewport.height / (15 * TILE)) / 2;
     const targetZoom = baseZoom;
     this.camera.zoom += (targetZoom - this.camera.zoom) * Math.min(1, dt * 6);
 
@@ -2340,9 +2417,12 @@ export class TwilightEngine {
     if (p.chargingMelee && this.chargeSessionAllowed) {
       if (p.qi > 0) {
         p.qi = Math.max(0, p.qi - 115 * repSpeedMult * dt);
-        if (p.qi === 0 && !p.chargeReady) {
+        if (p.qi === 0) {
           p.chargeReady = true;
-          sfx.switchWeapon(true);
+          sfx.setMeleeCharge(null);
+          sfx.meleeReady();
+        } else {
+          sfx.setMeleeCharge(1 - p.qi / p.maxQi);
         }
       } else {
         p.chargeReady = true;
@@ -2352,31 +2432,13 @@ export class TwilightEngine {
     }
 
     const weapon = p.weapons[p.activeHand];
-    if (weapon.type === 'gun') {
-      const mult = p.eagleEyeTimer > 0 ? 0.45 : 1;
-      const targetBase = weapon.def.baseCrosshair * mult;
-      this.crosshairRadius = Math.max(targetBase, this.crosshairRadius - 24 * dt);
-    }
+    this.crosshairBloom = Math.max(0, this.crosshairBloom - GUN_AIM.bloomRecovery * dt);
 
-    for (const equipped of p.weapons) {
-      if (equipped.type !== 'gun' || equipped.reloadTimer <= 0) continue;
-      equipped.reloadTimer -= dt;
-      if (equipped.reloadTimer <= 0) {
-        equipped.reloadTimer = 0;
-        const needed = Math.min(equipped.def.magSize - equipped.ammoInMag, p.reserveAmmo);
-        equipped.ammoInMag += needed;
-        p.reserveAmmo -= needed;
-        this.emitHud();
-      }
-    }
-
-    const worldMouseX = (this.mouseScreen.x - canvasWidth / 2) / this.camera.zoom + this.camera.x;
-    const worldMouseY = (this.mouseScreen.y - canvasHeight / 2) / this.camera.zoom + this.camera.y;
-    p.angle = Math.atan2(worldMouseY - p.y, worldMouseX - p.x);
+    this.updateReloads(dt);
 
     const mv = this.getMoveVector();
     const weaponSpeedMult = weapon.def.moveSpeedMult;
-    const baseSpeed = 245 * (1 + p.speedBonus) * weaponSpeedMult;
+    const baseSpeed = PLAYER_MOVEMENT.speed * (1 + p.speedBonus) * weaponSpeedMult;
     const prevPlayerX = p.x;
     const prevPlayerY = p.y;
     const moved = this.moveCharacterWithElevation(
@@ -2392,8 +2454,15 @@ export class TwilightEngine {
     p.elevation = moved.elevation;
     p.onHighGround = p.elevation >= 1.0;
 
+    const { x: worldMouseX, y: worldMouseY } = this.getWorldPointer();
+    p.angle = Math.atan2(worldMouseY - p.y, worldMouseX - p.x);
     const playerMovedDist = dist(prevPlayerX, prevPlayerY, p.x, p.y);
     if (playerMovedDist > 0.12) {
+      this.distanceSinceStep += playerMovedDist;
+      if (this.distanceSinceStep >= PLAYER_MOVEMENT.stepDistance) {
+        this.distanceSinceStep %= PLAYER_MOVEMENT.stepDistance;
+        sfx.footstep(this.getFootstepSurface(p.x, p.y));
+      }
       p.walkPhase += playerMovedDist * 0.085;
       p.moveIntensity = Math.min(1, p.moveIntensity + dt * 10);
     } else {
@@ -2403,6 +2472,20 @@ export class TwilightEngine {
     if (this.mouseDown && weapon.type === 'gun' && weapon.ammoInMag > 0) {
       this.tryAttack();
     }
+  }
+
+  public update(dt: number, canvasWidth: number, canvasHeight: number) {
+    this.viewport.width = canvasWidth;
+    this.viewport.height = canvasHeight;
+    if (!this.isBattleActive()) return;
+
+    const respawningAtFrameStart = this.status === 'RESPAWNING';
+    this.time += dt;
+    if (this.bannerTimer > 0) this.bannerTimer = Math.max(0, this.bannerTimer - dt);
+    if (this.activeSkillBannerTimer > 0) this.activeSkillBannerTimer = Math.max(0, this.activeSkillBannerTimer - dt);
+    if (this.camera.shake > 0) this.camera.shake = Math.max(0, this.camera.shake - dt * 26);
+
+    if (!respawningAtFrameStart) this.updatePlayer(dt);
 
     this.map.ammoSpawns.forEach((as, idx) => {
       if (!as.active) {
@@ -2433,7 +2516,9 @@ export class TwilightEngine {
     }
 
     this.updateEnemies(dt);
+    if (!this.isBattleActive()) return;
     this.updateProjectiles(dt);
+    if (!this.isBattleActive()) return;
     this.checkVictoryCondition();
 
     this.beams = this.beams.filter((b) => {
@@ -2462,8 +2547,26 @@ export class TwilightEngine {
       pk.bobPhase += dt * 4;
     }
 
+    if (respawningAtFrameStart) {
+      this.respawnTimer = Math.max(0, this.respawnTimer - dt);
+      if (this.respawnTimer === 0) this.respawnPlayer();
+    } else if (this.status === 'PLAYING') {
+      this.updateCamera(dt);
+    }
+
+    this.hudEmitTimer += dt;
+    if (this.hudEmitTimer >= 0.06) {
+      this.hudEmitTimer = 0;
+      this.emitHud();
+    }
+  }
+
+  private updateCamera(dt: number) {
+    const { width: canvasWidth, height: canvasHeight } = this.viewport;
+    const p = this.player;
     let lookDist = 40;
     if (p.eagleEyeTimer > 0) {
+      const { x: worldMouseX, y: worldMouseY } = this.getWorldPointer();
       const cursorWorldDist = dist(p.x, p.y, worldMouseX, worldMouseY);
       lookDist = clamp(cursorWorldDist * 0.48, 40, 260);
     }
@@ -2480,18 +2583,26 @@ export class TwilightEngine {
     const clampedCam = this.clampCameraToMap(this.camera.x, this.camera.y, canvasWidth, canvasHeight);
     this.camera.x = clampedCam.x;
     this.camera.y = clampedCam.y;
+  }
 
-    this.hudEmitTimer += dt;
-    if (this.hudEmitTimer >= 0.06) {
-      this.hudEmitTimer = 0;
-      this.emitHud();
-    }
+  private nearbySoundVolume(x: number, y: number) {
+    return Math.max(0, 1 - dist(x, y, this.player.x, this.player.y) / 500);
+  }
+
+  private getFootstepSurface(x: number, y: number): FootstepSurface {
+    const tile = this.map.tileGrid[Math.floor(y / TILE)]?.[Math.floor(x / TILE)];
+    if (tile?.style === 'wooden_plank' || this.map.bridges.some((bridge) => pointInRect(x, y, bridge))) return 'wood';
+    if (tile?.style === 'grass_ground' || tile?.style === 'hill') return 'soft';
+    if (tile?.style && tile.style !== 'default') return 'hard';
+    return this.map.biome.endsWith('_outdoor') ? 'soft' : 'hard';
   }
 
   /**
    * 電腦士兵直線槍線射擊（即時顯示直線，碰到第一個角色或地形停止，絕不穿透多人）
    */
   private fireEnemyGunHitscan(e: EnemyEntity, aimAngle: number) {
+    e.gunfireTimer = GUNFIRE_ANIMATION_SECONDS;
+    sfx.gunshot(e.gunKind, this.nearbySoundVolume(e.x, e.y) * 0.45);
     if (e.royalShieldTimer > 0) {
       e.royalShieldTimer = 0; // 自己用遠程攻擊也會破盾！
       this.spawnText(e.x, e.y - 26, '遠程開火破盾', '#38BDF8', 0.9);
@@ -2517,7 +2628,7 @@ export class TwilightEngine {
 
       const candidates: Candidate[] = [];
 
-      if (areHostile(e.faction, e.id, p.faction, 'player') && p.elevation - e.elevation < 2.0) {
+      if (p.hp > 0 && areHostile(e.faction, e.id, p.faction, 'player') && p.elevation - e.elevation < 2.0) {
         const res = segmentCircleHit(seg.x1, seg.y1, seg.x2, seg.y2, p.x, p.y, p.radius);
         if (res.hit) {
           candidates.push({ kind: 'player', ...res });
@@ -2602,7 +2713,7 @@ export class TwilightEngine {
         style: 'sweep',
       });
       const p = this.player;
-      if (areHostile(e.faction, e.id, p.faction, 'player') && dist(e.x, e.y, p.x, p.y) <= 130) {
+      if (p.hp > 0 && areHostile(e.faction, e.id, p.faction, 'player') && dist(e.x, e.y, p.x, p.y) <= 130) {
         const ang = Math.atan2(p.y - e.y, p.x - e.x);
         const pushed = this.moveCharacterWithElevation(p.x, p.y, p.elevation, Math.cos(ang) * 44, Math.sin(ang) * 44, p.radius);
         p.x = pushed.x;
@@ -2629,7 +2740,7 @@ export class TwilightEngine {
         // 瞬移靠近敵人並閃光致盲
         const p = this.player;
         const targets: { x: number; y: number; r: number }[] = [];
-        if (areHostile(e.faction, e.id, p.faction, 'player')) {
+        if (p.hp > 0 && areHostile(e.faction, e.id, p.faction, 'player')) {
           targets.push({ x: p.x, y: p.y, r: p.radius });
         }
         for (const other of this.enemies) {
@@ -2760,9 +2871,55 @@ export class TwilightEngine {
     }
   }
 
+  private choosePatrolTarget(enemy: EnemyEntity): { x: number; y: number } | null {
+    const start = this.findNearestStandableTile(Math.floor(enemy.x / TILE), Math.floor(enemy.y / TILE));
+    if (start === null) return null;
+    const { cols } = this.map;
+    const queue = [{ tile: start, steps: 0 }];
+    const visited = new Set([start]);
+    const candidates: { x: number; y: number }[] = [];
+    for (let i = 0; i < queue.length; i++) {
+      const { tile, steps } = queue[i];
+      const x = (tile % cols + 0.5) * TILE;
+      const y = (Math.floor(tile / cols) + 0.5) * TILE;
+      if (
+        steps > 0 && dist(enemy.x, enemy.y, x, y) >= TILE * 0.75 &&
+        dist(enemy.patrolAnchor.x, enemy.patrolAnchor.y, x, y) <= AI_PATROL.radius
+      ) {
+        candidates.push({ x, y });
+      }
+      if (steps === AI_PATROL.searchSteps) continue;
+      for (const next of this.navAdj.get(tile) ?? []) {
+        if (visited.has(next)) continue;
+        visited.add(next);
+        queue.push({ tile: next, steps: steps + 1 });
+      }
+    }
+    return candidates[Math.floor(Math.random() * candidates.length)] ?? null;
+  }
+
+  private getPatrolGoal(enemy: EnemyEntity, dt: number) {
+    enemy.patrolTimer -= dt;
+    const arrived = enemy.patrolTarget &&
+      dist(enemy.x, enemy.y, enemy.patrolTarget.x, enemy.patrolTarget.y) < AI_PATROL.arrivalDistance;
+    if (enemy.patrolTimer <= 0 || arrived) {
+      if (dist(enemy.x, enemy.y, enemy.patrolAnchor.x, enemy.patrolAnchor.y) > AI_PATROL.radius) {
+        enemy.patrolAnchor = { x: enemy.x, y: enemy.y };
+      }
+      enemy.patrolTarget = this.choosePatrolTarget(enemy);
+      enemy.patrolTimer = enemy.patrolTarget ? AI_PATROL.legSeconds : AI_PATROL.retrySeconds;
+      enemy.pathTimer = 0;
+    }
+    return enemy.patrolTarget;
+  }
+
   private updateEnemies(dt: number) {
     const p = this.player;
     for (const e of [...this.enemies]) {
+      if (!this.isBattleActive()) return;
+      if (e.hp <= 0) continue;
+      const combat = AI_COMBAT[e.archetype];
+      e.gunfireTimer = Math.max(0, e.gunfireTimer - dt);
       e.hitFlash = Math.max(0, e.hitFlash - dt);
       e.attackAnimTimer = Math.max(0, e.attackAnimTimer - dt);
       if (e.attackAnimTimer === 0) e.attackAnimKind = null;
@@ -2794,6 +2951,8 @@ export class TwilightEngine {
 
       if (e.stunTimer > 0) {
         e.stunTimer = Math.max(0, e.stunTimer - dt);
+        e.visibleTargetId = null;
+        e.chargingSkillTimer = 0;
         continue;
       }
 
@@ -2801,6 +2960,8 @@ export class TwilightEngine {
         e.blindTimer = Math.max(0, e.blindTimer - dt);
         e.angle += dt * 7;
         e.hasLosToTarget = false;
+        e.visibleTargetId = null;
+        e.chargingSkillTimer = 0;
         continue;
       }
 
@@ -2810,8 +2971,10 @@ export class TwilightEngine {
       // 確認當前追擊對象是否仍存活且敵對
       if (e.focusedTargetId) {
         if (e.focusedTargetId === 'player') {
-          if (p.lives <= 0 || !areHostile(e.faction, e.id, p.faction, 'player')) {
+          if (p.hp <= 0 || !areHostile(e.faction, e.id, p.faction, 'player')) {
             e.focusedTargetId = null;
+            e.lastSeenTargetPos = null;
+            e.alertTimer = 0;
             e.pathTiles = [];
           }
         } else {
@@ -2834,7 +2997,7 @@ export class TwilightEngine {
       };
       const visibleHostiles: VisibleCandidate[] = [];
 
-      if (areHostile(e.faction, e.id, p.faction, 'player')) {
+      if (p.hp > 0 && areHostile(e.faction, e.id, p.faction, 'player')) {
         if (this.hasLineOfSight(e.x, e.y, e.elevation, p.x, p.y, p.elevation, sightRange)) {
           visibleHostiles.push({
             id: 'player',
@@ -2887,6 +3050,15 @@ export class TwilightEngine {
       const targetEntity = chosenVisible?.entity || null;
 
       e.hasLosToTarget = Boolean(losTargetPos);
+      const visibleTargetId = chosenVisible?.id ?? null;
+      if (e.visibleTargetId !== visibleTargetId) {
+        e.visibleTargetId = visibleTargetId;
+        e.reactionTimer = visibleTargetId ? combat.reactionSeconds : 0;
+        e.chargingSkillTimer = 0;
+      } else {
+        e.reactionTimer = Math.max(0, e.reactionTimer - dt);
+      }
+      const readyToAttack = Boolean(visibleTargetId) && e.reactionTimer === 0;
 
       if (losTargetPos) {
         e.lastSeenTargetPos = { x: losTargetPos.x, y: losTargetPos.y };
@@ -2937,7 +3109,7 @@ export class TwilightEngine {
       if (
         e.activeSlot === 'melee' &&
         e.skillCooldown <= 0 &&
-        ((losTargetPos && bestLosDist <= sightRange) || (e.meleeKind === 'shield' && e.shieldDurability <= 45))
+        (readyToAttack || (!losTargetPos && e.meleeKind === 'shield' && e.shieldDurability <= 45))
       ) {
         e.chargingSkillTimer = 0.65;
         continue;
@@ -2947,6 +3119,12 @@ export class TwilightEngine {
       let desiredY = e.y;
       let moveFactor = 0;
       let astarGoal: { x: number; y: number } | null = null;
+      let patrolling = false;
+      if (!losTargetPos && e.lastSeenTargetPos && dist(e.x, e.y, e.lastSeenTargetPos.x, e.lastSeenTargetPos.y) < 24) {
+        e.patrolAnchor = { x: e.x, y: e.y };
+        e.patrolTimer = 0;
+        e.lastSeenTargetPos = null;
+      }
       const desiredPickup = this.findNearestEligibleWeaponPickup(e);
 
       if (losTargetPos) {
@@ -2959,8 +3137,8 @@ export class TwilightEngine {
             : e.meleeKind === 'claw' || e.meleeKind === 'greatsword'
               ? 135
               : e.gunKind === 'sniper'
-                ? 300
-                : 205;
+                ? AI_COMBAT.sniper.preferredRange
+                : combat.preferredRange;
 
         const hasElevGap = Math.abs(e.elevation - losTargetPos.elev) > 0.5;
         if (!canHitRanged || bestLosDist > desiredRange + 24 || hasElevGap) {
@@ -2979,17 +3157,11 @@ export class TwilightEngine {
           moveFactor = 0.5;
         }
       } else if (e.lastSeenTargetPos && (e.alertTimer > 0 || e.aggroLockTimer > 0)) {
-        const dLast = dist(e.x, e.y, e.lastSeenTargetPos.x, e.lastSeenTargetPos.y);
-        if (dLast > 24) {
-          astarGoal = { x: e.lastSeenTargetPos.x, y: e.lastSeenTargetPos.y };
-          desiredX = e.lastSeenTargetPos.x;
-          desiredY = e.lastSeenTargetPos.y;
-          e.angle = Math.atan2(desiredY - e.y, desiredX - e.x);
-          moveFactor = 1.05;
-        } else {
-          e.angle += dt * 2.2;
-          moveFactor = 0;
-        }
+        astarGoal = e.lastSeenTargetPos;
+        desiredX = astarGoal.x;
+        desiredY = astarGoal.y;
+        e.angle = Math.atan2(desiredY - e.y, desiredX - e.x);
+        moveFactor = 1.05;
       } else if (desiredPickup) {
         // 主動利用 A* 尋路前往地圖武器位置拾取升級裝備
         astarGoal = { x: desiredPickup.x, y: desiredPickup.y };
@@ -2997,34 +3169,21 @@ export class TwilightEngine {
         desiredY = desiredPickup.y;
         e.angle = Math.atan2(desiredY - e.y, desiredX - e.x);
         moveFactor = 0.95;
-      } else if (e.isAlly) {
-        const dP = dist(e.x, e.y, p.x, p.y);
-        if (dP > 130) {
-          astarGoal = { x: p.x, y: p.y };
-          desiredX = p.x;
-          desiredY = p.y;
-          e.angle = Math.atan2(desiredY - e.y, desiredX - e.x);
-          moveFactor = 0.85;
-        }
-      } else {
-        const dPatrol = dist(e.x, e.y, e.patrolTarget.x, e.patrolTarget.y);
-        if (dPatrol < 24 || e.aiTimer % 4.5 < 0.05) {
-          for (let attempt = 0; attempt < 5; attempt++) {
-            const randAng = Math.random() * Math.PI * 2;
-            const randDist = 90 + Math.random() * 160;
-            const tx = clamp(e.patrolAnchor.x + Math.cos(randAng) * randDist, 40, this.map.width - 40);
-            const ty = clamp(e.patrolAnchor.y + Math.sin(randAng) * randDist, 40, this.map.height - 40);
-            if (this.isGroundWalkable(tx, ty)) {
-              e.patrolTarget = { x: tx, y: ty };
-              break;
-            }
-          }
-        }
-        astarGoal = { x: e.patrolTarget.x, y: e.patrolTarget.y };
-        desiredX = e.patrolTarget.x;
-        desiredY = e.patrolTarget.y;
+      } else if (e.isAlly && p.hp > 0 && dist(e.x, e.y, p.x, p.y) > 130) {
+        astarGoal = { x: p.x, y: p.y };
+        desiredX = p.x;
+        desiredY = p.y;
         e.angle = Math.atan2(desiredY - e.y, desiredX - e.x);
-        moveFactor = 0.5;
+        moveFactor = 0.85;
+      } else {
+        const patrolGoal = this.getPatrolGoal(e, dt);
+        if (patrolGoal) {
+          patrolling = true;
+          astarGoal = patrolGoal;
+          desiredX = patrolGoal.x;
+          desiredY = patrolGoal.y;
+          moveFactor = AI_PATROL.speedMultiplier;
+        }
       }
 
       // 使用 A* 路徑導航跨越高低差、階梯與橋樑
@@ -3052,10 +3211,17 @@ export class TwilightEngine {
           const nextWp = e.pathTiles[0];
           desiredX = (nextWp.gx + 0.5) * TILE;
           desiredY = (nextWp.gy + 0.5) * TILE;
-          if (!losTargetPos) {
+          if (!losTargetPos && !patrolling) {
             e.angle = Math.atan2(desiredY - e.y, desiredX - e.x);
           }
         }
+      }
+
+      if (patrolling) {
+        const forward = Math.atan2(desiredY - e.y, desiredX - e.x);
+        const scanAngle = forward + Math.sin(e.aiTimer * 2.6) * 0.42;
+        const turn = AI_PATROL.turnSpeed * dt;
+        e.angle += clamp(angleDiff(e.angle, scanAngle), -turn, turn);
       }
 
       const prevEX = e.x;
@@ -3105,7 +3271,12 @@ export class TwilightEngine {
 
       const enemyMovedDist = dist(prevEX, prevEY, e.x, e.y);
       if (enemyMovedDist > 0.12) {
+        const stepPhase = PLAYER_MOVEMENT.stepDistance * 0.085;
+        const previousStep = Math.floor(e.walkPhase / stepPhase);
         e.walkPhase += enemyMovedDist * 0.085;
+        if (Math.floor(e.walkPhase / stepPhase) > previousStep) {
+          sfx.footstep(this.getFootstepSurface(e.x, e.y), this.nearbySoundVolume(e.x, e.y) * 0.30);
+        }
         e.moveIntensity = Math.min(1, e.moveIntensity + dt * 10);
       } else {
         e.moveIntensity = Math.max(0, e.moveIntensity - dt * 10);
@@ -3114,7 +3285,7 @@ export class TwilightEngine {
       // 路過或抵達地面武器點時自動拾取
       this.enemyTryPickupWeapon(e);
 
-      if (losTargetPos && e.attackCooldown <= 0 && (targetIsPlayer || targetEntity)) {
+      if (readyToAttack && losTargetPos && e.attackCooldown <= 0 && (targetIsPlayer || targetEntity)) {
         const aimAngle = Math.atan2(losTargetPos.y - e.y, losTargetPos.x - e.x);
         const heldMeleeDef = MELEES.find((m) => m.kind === e.meleeKind) || MELEES[0];
         if (e.activeSlot === 'melee' && isCloseMeleeRange) {
@@ -3254,7 +3425,7 @@ export class TwilightEngine {
           }
 
           // 龍頭傷 20、龍身傷 15（絕不傷隊友）
-          if (proj.ownerId !== 'player' && areHostile(proj.ownerFaction, proj.ownerId, p.faction, 'player')) {
+          if (p.hp > 0 && proj.ownerId !== 'player' && areHostile(proj.ownerFaction, proj.ownerId, p.faction, 'player')) {
             if (!cooldowns['player']) {
               let hitDmg = 0;
               let hitOriginX = proj.x;
@@ -3352,7 +3523,7 @@ export class TwilightEngine {
         }
 
         const canHitPlayer =
-          proj.ownerId !== 'player' &&
+          p.hp > 0 && proj.ownerId !== 'player' &&
           !proj.hitIds.has('player') &&
           (!proj.noFriendlyFire || areHostile(proj.ownerFaction, proj.ownerId, p.faction, 'player'));
         if (canHitPlayer && p.elevation - proj.startElevation < 2.0) {
@@ -3510,7 +3681,8 @@ export class TwilightEngine {
         e.moveIntensity,
         0,
         eAtkProg,
-        e.attackAnimKind
+        e.attackAnimKind,
+        e.gunfireTimer
       );
 
       const bw = 40;
@@ -3526,7 +3698,7 @@ export class TwilightEngine {
         : e.blindTimer > 0
           ? ' [致盲]'
           : e.hasLosToTarget
-            ? ' !'
+            ? e.reactionTimer > 0 ? ' [警覺]' : ' !'
             : e.lastSeenTargetPos && e.alertTimer > 0
               ? ' ?'
               : '';
@@ -3558,102 +3730,117 @@ export class TwilightEngine {
     const p = this.player;
     const facHex = p.characterSkin.bodyColor || FACTIONS[p.faction].accentHex;
 
-    if (p.chargingMelee && this.chargeSessionAllowed && !p.chargeReady) {
-      for (let i = 0; i < 8; i++) {
-        const ang = (i / 8) * Math.PI * 2 + this.time * 4;
-        const cycle = (this.time * 3.5 + i * 0.25) % 1;
-        const outerDist = p.radius + 44 * (1 - cycle);
-        const innerDist = Math.max(p.radius * 0.5, outerDist - 16);
+    if (p.hp > 0) {
+      if (p.chargingMelee && this.chargeSessionAllowed && !p.chargeReady) {
+        for (let i = 0; i < 8; i++) {
+          const ang = (i / 8) * Math.PI * 2 + this.time * 4;
+          const cycle = (this.time * 3.5 + i * 0.25) % 1;
+          const outerDist = p.radius + 44 * (1 - cycle);
+          const innerDist = Math.max(p.radius * 0.5, outerDist - 16);
+          ctx.beginPath();
+          ctx.moveTo(p.x + Math.cos(ang) * outerDist, p.y + Math.sin(ang) * outerDist);
+          ctx.lineTo(p.x + Math.cos(ang) * innerDist, p.y + Math.sin(ang) * innerDist);
+          ctx.strokeStyle = FACTIONS[p.faction].accentHex;
+          ctx.lineWidth = 2.6;
+          ctx.stroke();
+        }
+      }
+
+      if (p.chargeReady) {
+        const auraPulse = 1 + Math.sin(this.time * 14) * 0.08;
+        const auraColor = FACTIONS[p.faction].accentHex;
+        ctx.save();
         ctx.beginPath();
-        ctx.moveTo(p.x + Math.cos(ang) * outerDist, p.y + Math.sin(ang) * outerDist);
-        ctx.lineTo(p.x + Math.cos(ang) * innerDist, p.y + Math.sin(ang) * innerDist);
-        ctx.strokeStyle = FACTIONS[p.faction].accentHex;
-        ctx.lineWidth = 2.6;
+        ctx.arc(p.x, p.y, (p.radius + 14) * auraPulse, 0, Math.PI * 2);
+        ctx.fillStyle = `${auraColor}33`;
+        ctx.fill();
+        ctx.lineWidth = 3.5;
+        ctx.strokeStyle = auraColor;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, (p.radius + 22) * auraPulse, 0, Math.PI * 2);
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 6]);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      if (p.royalShieldTimer > 0) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius + 8, 0, Math.PI * 2);
+        ctx.strokeStyle = '#38BDF8';
+        ctx.lineWidth = 3;
+        ctx.fillStyle = 'rgba(56, 189, 248, 0.16)';
+        ctx.fill();
         ctx.stroke();
       }
-    }
 
-    if (p.chargeReady) {
-      const auraPulse = 1 + Math.sin(this.time * 14) * 0.08;
-      const auraColor = FACTIONS[p.faction].accentHex;
+      if (p.vampireTimer > 0) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius + 6, 0, Math.PI * 2);
+        ctx.strokeStyle = '#F43F5E';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
+
+      const weapon = p.weapons[p.activeHand];
+      const isReloading = weapon.type === 'gun' && weapon.reloadTimer > 0;
+      const playerReloadProg = isReloading ? clamp(1 - weapon.reloadTimer / weapon.def.reloadTime, 0, 1) : 0;
+      const playerSwapProg = p.swapTimer > 0 && p.swapDuration > 0 ? clamp(1 - p.swapTimer / p.swapDuration, 0.01, 1) : 0;
+      const playerAtkProg =
+        p.attackAnimTimer > 0 && p.attackAnimDuration > 0
+          ? clamp(1 - p.attackAnimTimer / p.attackAnimDuration, 0, 1)
+          : 0;
+
+      this.drawCharacter(
+        ctx,
+        p.x,
+        p.y,
+        p.radius,
+        p.angle,
+        p.invulnTimer > 0 && Math.floor(this.time * 16) % 2 === 0 ? '#FFFFFF' : facHex,
+        'PLAYER',
+        weapon.type === 'melee',
+        p.shadowCloneTimer > 0,
+        isReloading,
+        playerReloadProg,
+        weapon.def.color,
+        false,
+        weapon.type === 'gun' ? weapon.def.kind : undefined,
+        weapon.type === 'melee' ? weapon.def.kind : undefined,
+        p.characterSkin,
+        p.walkPhase,
+        p.moveIntensity,
+        playerSwapProg,
+        playerAtkProg,
+        p.attackAnimKind,
+        p.gunfireTimer
+      );
+
+      if (isReloading) {
+        const barW = 42;
+        const barX = p.x - barW / 2;
+        const barY = p.y - p.radius - 16;
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+        ctx.fillRect(barX, barY, barW, 5);
+        ctx.fillStyle = '#FBBF24';
+        ctx.fillRect(barX, barY, barW * playerReloadProg, 5);
+        this.drawOutlinedText(ctx, '裝彈中', p.x, barY - 4, '#FBBF24', 11, 'center');
+      }
+    } else {
       ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.angle + Math.PI / 2);
       ctx.beginPath();
-      ctx.arc(p.x, p.y, (p.radius + 14) * auraPulse, 0, Math.PI * 2);
-      ctx.fillStyle = `${auraColor}33`;
+      ctx.ellipse(0, 0, p.radius * 1.25, p.radius * 0.54, 0, 0, Math.PI * 2);
+      ctx.fillStyle = '#020617';
       ctx.fill();
-      ctx.lineWidth = 3.5;
-      ctx.strokeStyle = auraColor;
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, (p.radius + 22) * auraPulse, 0, Math.PI * 2);
-      ctx.strokeStyle = '#FFFFFF';
+      ctx.strokeStyle = facHex;
       ctx.lineWidth = 1.5;
-      ctx.setLineDash([6, 6]);
       ctx.stroke();
       ctx.restore();
-    }
-
-    if (p.royalShieldTimer > 0) {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.radius + 8, 0, Math.PI * 2);
-      ctx.strokeStyle = '#38BDF8';
-      ctx.lineWidth = 3;
-      ctx.fillStyle = 'rgba(56, 189, 248, 0.16)';
-      ctx.fill();
-      ctx.stroke();
-    }
-
-    if (p.vampireTimer > 0) {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.radius + 6, 0, Math.PI * 2);
-      ctx.strokeStyle = '#F43F5E';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-    }
-
-    const weapon = p.weapons[p.activeHand];
-    const isReloading = weapon.type === 'gun' && weapon.reloadTimer > 0;
-    const playerReloadProg = isReloading ? clamp(1 - weapon.reloadTimer / weapon.def.reloadTime, 0, 1) : 0;
-    const playerSwapProg = p.swapTimer > 0 && p.swapDuration > 0 ? clamp(1 - p.swapTimer / p.swapDuration, 0.01, 1) : 0;
-    const playerAtkProg =
-      p.attackAnimTimer > 0 && p.attackAnimDuration > 0
-        ? clamp(1 - p.attackAnimTimer / p.attackAnimDuration, 0, 1)
-        : 0;
-
-    this.drawCharacter(
-      ctx,
-      p.x,
-      p.y,
-      p.radius,
-      p.angle,
-      p.invulnTimer > 0 && Math.floor(this.time * 16) % 2 === 0 ? '#FFFFFF' : facHex,
-      'PLAYER',
-      weapon.type === 'melee',
-      p.shadowCloneTimer > 0,
-      isReloading,
-      playerReloadProg,
-      weapon.def.color,
-      false,
-      weapon.type === 'gun' ? weapon.def.kind : undefined,
-      weapon.type === 'melee' ? weapon.def.kind : undefined,
-      p.characterSkin,
-      p.walkPhase,
-      p.moveIntensity,
-      playerSwapProg,
-      playerAtkProg,
-      p.attackAnimKind
-    );
-
-    if (isReloading) {
-      const barW = 42;
-      const barX = p.x - barW / 2;
-      const barY = p.y - p.radius - 16;
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-      ctx.fillRect(barX, barY, barW, 5);
-      ctx.fillStyle = '#FBBF24';
-      ctx.fillRect(barX, barY, barW * playerReloadProg, 5);
-      this.drawOutlinedText(ctx, '裝彈中', p.x, barY - 4, '#FBBF24', 11, 'center');
     }
 
     // 12. 敵我共用極速線狀子彈
@@ -3810,7 +3997,7 @@ export class TwilightEngine {
 
     ctx.restore();
 
-    this.drawCrosshair(ctx);
+    if (this.status === 'PLAYING') this.drawCrosshair(ctx);
   }
 
   private drawSlashEffect(ctx: CanvasRenderingContext2D, s: SlashEffect) {
@@ -4172,6 +4359,7 @@ export class TwilightEngine {
     swapProgress = 0,
     attackAnimProgress = 0,
     attackAnimKind: MeleeKind | null = null,
+    gunfireTimer = 0,
     isPhantomClone = false
   ) {
     if (shadowActive && !isPhantomClone) {
@@ -4212,6 +4400,7 @@ export class TwilightEngine {
           swapProgress,
           attackAnimProgress,
           attackAnimKind,
+          gunfireTimer,
           true
         );
         ctx.restore();
@@ -4652,6 +4841,10 @@ export class TwilightEngine {
         this.drawHand(ctx, lx, ly, handR, handColor);
       }
     } else {
+      const recoil = (gunfireTimer / GUNFIRE_ANIMATION_SECONDS) ** 2;
+      const flash = Math.max(0, (gunfireTimer - 0.072) / (GUNFIRE_ANIMATION_SECONDS - 0.072));
+      ctx.save();
+      ctx.translate(-recoil * (gunKind === 'pistol' ? 6 : 8), 0);
       if (gunKind === 'pistol') {
         // 小槍：深黑軍用半自動手槍正前指
         const rx = bodyR * 0.74 + armSwing * 0.2;
@@ -4669,6 +4862,7 @@ export class TwilightEngine {
 
         this.drawHand(ctx, rx, ry, handR, handColor);
         this.drawHand(ctx, lx, ly, handR, handColor);
+        this.drawMuzzleFlash(ctx, rx + 13, ry, flash);
       } else {
         // 步槍（黑 M4）、狙擊槍（木托藍鋼鏡）、散彈槍（木托木護木）
         const baseGunX = bodyR * 0.56;
@@ -4713,7 +4907,9 @@ export class TwilightEngine {
 
         this.drawHand(ctx, rx, ry, handR, handColor);
         this.drawHand(ctx, lx, ly, handR, handColor);
+        this.drawMuzzleFlash(ctx, baseGunX + (gunKind === 'sniper' ? 31 : 23), 0, flash);
       }
+      ctx.restore();
     }
 
     // 4. 單一圓形身體（無肩膀橢圓！）
@@ -4923,12 +5119,34 @@ export class TwilightEngine {
     ctx.restore();
   }
 
+  private drawMuzzleFlash(ctx: CanvasRenderingContext2D, x: number, y: number, intensity: number) {
+    if (intensity <= 0) return;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.globalAlpha *= intensity;
+    ctx.fillStyle = '#F59E0B';
+    ctx.beginPath();
+    ctx.moveTo(-2, 0);
+    ctx.lineTo(4, -6);
+    ctx.lineTo(9, -2);
+    ctx.lineTo(20, 0);
+    ctx.lineTo(9, 2);
+    ctx.lineTo(4, 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#FFF0B3';
+    ctx.beginPath();
+    ctx.ellipse(5, 0, 8, 2.4, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   private drawCrosshair(ctx: CanvasRenderingContext2D) {
     const mx = this.mouseScreen.x;
     const my = this.mouseScreen.y;
     const p = this.player;
     const weapon = p.weapons[p.activeHand];
-    const r = weapon.type === 'gun' ? this.crosshairRadius : 12;
+    const r = weapon.type === 'gun' ? this.getPlayerGunSpread(weapon.def) * GUN_AIM.spreadScale : 12;
 
     ctx.save();
     ctx.translate(mx, my);
@@ -5069,6 +5287,7 @@ export class TwilightEngine {
       mapId: this.mapId,
       mapName: this.map.name,
       status: this.status,
+      respawnSeconds: Math.ceil(this.respawnTimer),
       enemiesRemaining: hostiles.length + (p.faction === 'mercenary'
         ? this.deploymentQueue.royal + this.deploymentQueue.shadow + this.deploymentQueue.mercenary
         : (['royal', 'shadow', 'mercenary'] as FactionId[])

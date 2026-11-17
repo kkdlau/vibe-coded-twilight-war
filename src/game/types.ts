@@ -233,6 +233,7 @@ export interface PlayerState {
   maxReserveAmmo: number;
   swapTimer: number;
   swapDuration: number;
+  gunfireTimer: number;
   attackAnimTimer: number;
   attackAnimDuration: number;
   attackAnimKind: MeleeKind | null;
@@ -293,12 +294,15 @@ export interface EnemyEntity {
   lastSeenTargetPos: { x: number; y: number } | null;
   alertTimer: number;
   hasLosToTarget: boolean;
+  visibleTargetId: string | null;
+  reactionTimer: number;
   focusedTargetId: string | null;
   aggroLockTimer: number;
   pathTiles: GridTile[];
   pathTimer: number;
   patrolAnchor: { x: number; y: number };
-  patrolTarget: { x: number; y: number };
+  patrolTarget: { x: number; y: number } | null;
+  patrolTimer: number;
   // AI Active Faction × Melee Skill Buffs
   royalShieldTimer: number;
   eagleEyeTimer: number;
@@ -309,6 +313,7 @@ export interface EnemyEntity {
   blindTimer: number;
   stunTimer: number;
   hitFlash: number;
+  gunfireTimer: number;
   attackAnimTimer: number;
   attackAnimDuration: number;
   attackAnimKind: MeleeKind | null;
@@ -428,7 +433,8 @@ export interface HudSnapshot {
   mode: GameMode;
   mapId: MapId;
   mapName: string;
-  status: 'PLAYING' | 'PAUSED' | 'GAME_OVER' | 'VICTORY';
+  status: 'PLAYING' | 'PAUSED' | 'RESPAWNING' | 'GAME_OVER' | 'VICTORY';
+  respawnSeconds: number;
   enemiesRemaining: number;
   totalSoldiersRemaining: number;
   factionRemaining: Record<FactionId, number>;
