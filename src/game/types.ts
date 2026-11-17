@@ -46,6 +46,12 @@ export interface MeleeDef {
   color: string;
 }
 
+export type WeaponHand = 0 | 1;
+
+export type EquippedWeapon =
+  | { type: 'gun'; def: GunDef; ammoInMag: number; reloadTimer: number }
+  | { type: 'melee'; def: MeleeDef; durability: number };
+
 export type CharacterStyle =
   | 'standard_visor'
   | 'spiky_crest'
@@ -206,7 +212,6 @@ export interface PlayerState {
   elevation: number; // 0, 0.5, 1.0, or 1.5
   hp: number;
   maxHp: number;
-  shield: number;
   maxShield: number;
   qi: number; // 0 to 100. Full = 100. Drains to 0 while charging melee!
   maxQi: number;
@@ -222,13 +227,10 @@ export interface PlayerState {
   comboTimer: number;
   faction: FactionId;
   characterSkin: CharacterSkin;
-  activeSlot: WeaponSlot;
-  gun: GunDef;
-  melee: MeleeDef;
-  ammoInMag: number;
+  activeHand: WeaponHand;
+  weapons: [EquippedWeapon, EquippedWeapon];
   reserveAmmo: number; // Default 30, max 45
   maxReserveAmmo: number;
-  reloadTimer: number;
   swapTimer: number;
   swapDuration: number;
   attackAnimTimer: number;
@@ -452,10 +454,8 @@ export interface HudSnapshot {
     maxCombo: number;
     faction: FactionId;
     characterSkin: CharacterSkin;
-    activeSlot: WeaponSlot;
-    gun: GunDef;
-    melee: MeleeDef;
-    ammoInMag: number;
+    weapon: EquippedWeapon;
+    offHandWeapon: EquippedWeapon;
     reserveAmmo: number;
     maxReserveAmmo: number;
     reloadProgress: number;
@@ -463,7 +463,7 @@ export interface HudSnapshot {
     chargingMelee: boolean;
     chargeReady: boolean;
     comboEmpower: boolean;
-    activeSkillName: string;
+    activeSkillName: string | null;
     activeBuffText: string | null;
     activeTimedSkills: TimedSkillHudItem[];
     dmgMultiplier: number;

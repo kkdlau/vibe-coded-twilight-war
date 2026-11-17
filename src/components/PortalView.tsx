@@ -94,7 +94,7 @@ const TERRAIN_GUIDE = [
   {
     name: '戰術防彈盾（地面近戰拾取）',
     elev: '100 耐久（手持）',
-    desc: '於地面拾取並裝備於第二手近武槽 [2]。手持面向前方才可擋住正面子彈或近戰減半，左鍵推動震退敵人，丟棄或轉手皆保留剩餘耐久。',
+    desc: '於地面拾取並裝備於當前手上。手持面向前方才可擋住正面子彈或近戰減半，左鍵推動震退敵人，丟棄或轉手皆保留剩餘耐久。',
     swatch: 'bg-[#1E293B] border-[#38BDF8]',
   },
 ];
@@ -475,10 +475,10 @@ export const PortalView: React.FC<PortalViewProps> = ({
                         • <strong>WASD / 方向鍵</strong>：移動；滑鼠左鍵射擊或揮砍；<strong>R</strong> 鍵或空彈匣再點一次左鍵裝彈（打空不會自動裝彈）。
                       </p>
                       <p className="text-slate-300">
-                        • <strong>1 / 2 / Q</strong>：切換第一手槍械與第二手近武（切換時觸發搓手動作，重武器更慢；攻擊後 0.34s 內按 Q 取消硬直並觸發連攜增傷）。
+                        • <strong>1 / 2 / Q</strong>：切換第一手與第二手（切換時觸發搓手動作，重武器更慢；攻擊後 0.34s 內按 Q 取消硬直並觸發連攜增傷）。
                       </p>
                       <p className="text-slate-300">
-                        • <strong>Esc</strong>：放下當前非預設武器並換回小槍/小刀；<strong>Space</strong>：拾取地面武器、彈藥箱或戰術護盾；<strong>Tab</strong>：查看戰況進展；<strong>P</strong>：暫停。
+                        • <strong>Esc</strong>：放下當前非預設武器並換回小槍/小刀；<strong>Space</strong>：拾取彈藥箱，或以地面武器替換當前手持武器；<strong>Tab</strong>：查看戰況進展；<strong>P</strong>：暫停。
                       </p>
                     </div>
 
@@ -488,7 +488,7 @@ export const PortalView: React.FC<PortalViewProps> = ({
                         <span>手持戰術防彈盾（100 耐久）</span>
                       </div>
                       <p className="text-slate-300">
-                        • <strong>手持與正面格擋</strong>：於地圖拾取後裝備在第二手 [2]，僅有目前持盾且朝向攻擊來源的<strong>正面扇形</strong>才能擋下子彈與減半近戰傷害，側面與背面無法格擋。
+                        • <strong>手持與正面格擋</strong>：於地圖拾取後裝備在當前手上，僅有目前持盾且朝向攻擊來源的<strong>正面扇形</strong>才能擋下子彈與減半近戰傷害，側面與背面無法格擋。
                       </p>
                       <p className="text-slate-300">
                         • <strong>左鍵推擊與耐久繼承</strong>：左鍵揮盾可強力推開並短暫震暈敵人；按 Esc 放下或陣亡掉落時會完整保留剩餘耐久度，耐力歸零即碎裂並換回小刀。

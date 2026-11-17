@@ -346,7 +346,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
             </div>
           )}
           <div className="text-[11px] text-slate-200 bg-slate-950/78 px-3 py-1.5 rounded-lg border border-slate-800/90">
-            [1] 第一手槍械 · [2] 第二手近武 · [Q] 切換 · [Esc] 放下武器 · [R] 裝彈 · [Space] 拾取 · [Tab] 遊戲進展 · [P] 暫停
+            [1] 第一手 · [2] 第二手 · [Q] 切換 · [Esc] 放下武器 · [R] 裝彈 · [Space] 拾取 · [Tab] 遊戲進展 · [P] 暫停
           </div>
         </div>
       )}
@@ -357,35 +357,27 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
           <div className="relative w-24 h-20">
             {/* Off-hand weapon: upper-right, lower z-index, smaller/thinner */}
             <div className="absolute top-0 right-0 z-0 opacity-65 scale-90">
-              {p.activeSlot === 'gun' ? (
-                <WeaponIconSvg kind={p.melee.kind} color={p.melee.color} className="w-9 h-9" />
-              ) : (
-                <WeaponIconSvg kind={p.gun.kind} color={p.gun.color} className="w-9 h-9" />
-              )}
+              <WeaponIconSvg kind={p.offHandWeapon.def.kind} color={p.offHandWeapon.def.color} className="w-9 h-9" />
             </div>
 
             {/* Active hand weapon: lower-left, higher z-index, larger */}
             <div className="absolute bottom-0 left-0 z-10 drop-shadow-[0_3px_6px_rgba(0,0,0,0.95)]">
-              {p.activeSlot === 'gun' ? (
-                <WeaponIconSvg kind={p.gun.kind} color={p.gun.color} className="w-16 h-16" />
-              ) : (
-                <WeaponIconSvg kind={p.melee.kind} color={p.melee.color} className="w-16 h-16" />
-              )}
+              <WeaponIconSvg kind={p.weapon.def.kind} color={p.weapon.def.color} className="w-16 h-16" />
             </div>
           </div>
 
           {/* Ammo / Shield Durability shown ONLY directly beneath the active weapon icon */}
-          {p.activeSlot === 'gun' ? (
+          {p.weapon.type === 'gun' ? (
             <div
               className="mt-0.5 flex items-center justify-center gap-2 font-mono-num text-sm font-black tracking-tight"
               style={{ textShadow: '0 2px 4px rgba(0,0,0,0.95)' }}
             >
               <span className="text-white">
-                {p.ammoInMag}/{p.gun.magSize}
+                {p.weapon.ammoInMag}/{p.weapon.def.magSize}
               </span>
               <span className="text-amber-400">{p.reserveAmmo}</span>
             </div>
-          ) : p.melee.kind === 'shield' ? (
+          ) : p.weapon.def.kind === 'shield' ? (
             <div
               className="mt-0.5 flex items-center justify-center font-mono-num text-sm font-black tracking-tight"
               style={{ textShadow: '0 2px 4px rgba(0,0,0,0.95)' }}
