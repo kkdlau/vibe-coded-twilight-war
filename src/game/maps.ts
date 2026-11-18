@@ -3,11 +3,13 @@ import {
   BridgeRect,
   BushProp,
   FactionId,
+  FloorStyle,
   GridTile,
   MapId,
   Obstacle,
   ObstacleStyle,
   PlatformStyle,
+  RailTrackCell,
   StairRect,
   TerrainTileCell,
   TreeProp,
@@ -85,7 +87,6 @@ function createTileWallLine(
     for (let gx = gxStart; gx <= gxEnd; gx++) {
       result.push({
         ...tRect(gx, gy, 1, 1),
-        blocksBullets: true,
         elevation: 10,
         kind: 'wall',
         style,
@@ -97,19 +98,42 @@ function createTileWallLine(
 
 export type MapBiome = 'shrine_outdoor' | 'castle_indoor' | 'desert_outdoor' | 'warehouse_indoor' | 'bamboo_outdoor';
 
+export function biomeToDefaultFloor(biome: MapBiome): FloorStyle {
+  switch (biome) {
+    case 'castle_indoor':
+      return 'castle_stone';
+    case 'desert_outdoor':
+      return 'desert_sand';
+    case 'warehouse_indoor':
+      return 'warehouse_steel';
+    case 'bamboo_outdoor':
+      return 'bamboo_moss';
+    case 'shrine_outdoor':
+    default:
+      return 'shrine_dirt';
+  }
+}
+
+export function createFloorGrid(cols: number, rows: number, baseFloor: FloorStyle): FloorStyle[][] {
+  return Array.from({ length: rows }, () => Array.from({ length: cols }, () => baseFloor));
+}
+
 export interface ArenaMap {
-  id: MapId;
+  id: string;
   cols: number;
   rows: number;
   width: number;
   height: number;
   biome: MapBiome;
   name: string;
+  floorGrid?: FloorStyle[][];
   tileGrid: TerrainTileCell[][];
   stairs: StairRect[];
   waterTiles: GridTile[];
   waterTileKeys: Set<string>;
   bridges: BridgeRect[];
+  stoneRoads: GridTile[];
+  railTracks: RailTrackCell[];
   obstacles: Obstacle[];
   bushes: BushProp[];
   trees: TreeProp[];
@@ -248,6 +272,11 @@ function createTokyoShrineMap(): ArenaMap {
     waterTiles: [],
     waterTileKeys: new Set<string>(),
     bridges: [],
+    stoneRoads: Array.from({ length: rows }, (_, gy) => [
+      { gx: 14, gy },
+      { gx: 15, gy },
+    ]).flat(),
+    railTracks: [],
     obstacles: shrineWalls,
     bushes: [
       { ...tRect(9, 5, 1, 1) },
@@ -389,11 +418,13 @@ function createEuropeanCastleMap(): ArenaMap {
     waterTiles: [],
     waterTileKeys: new Set<string>(),
     bridges: [],
+    stoneRoads: [],
+    railTracks: [],
     obstacles: [
-      { ...tRect(12, 5, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate' },
-      { ...tRect(16, 13, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate' },
-      { ...tRect(4, 14, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate' },
-      { ...tRect(24, 4, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate' },
+      { ...tRect(12, 5, 2, 2), elevation: 1.5, kind: 'crate' },
+      { ...tRect(16, 13, 2, 2), elevation: 1.5, kind: 'crate' },
+      { ...tRect(4, 14, 2, 2), elevation: 1.5, kind: 'crate' },
+      { ...tRect(24, 4, 2, 2), elevation: 1.5, kind: 'crate' },
       ...pillars,
     ],
     bushes: [
@@ -532,12 +563,14 @@ function createDesertRuinsMap(): ArenaMap {
       { ...tRect(18, 4, 6, 2), orientation: 'horizontal' },
       { ...tRect(19, 15, 6, 2), orientation: 'horizontal' },
     ],
+    stoneRoads: [],
+    railTracks: [],
     obstacles: [
-      { ...tRect(4, 19, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate' },
-      { ...tRect(16, 14, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate' },
-      { ...tRect(28, 9, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate' },
-      { ...tRect(25, 4, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
-      { ...tRect(26, 17, 3, 2), blocksBullets: true, elevation: 10, kind: 'wall', style: 'house' },
+      { ...tRect(4, 19, 2, 2), elevation: 1.5, kind: 'crate' },
+      { ...tRect(16, 14, 2, 2), elevation: 1.5, kind: 'crate' },
+      { ...tRect(28, 9, 2, 2), elevation: 1.5, kind: 'crate' },
+      { ...tRect(25, 4, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
+      { ...tRect(26, 17, 3, 2), elevation: 10, kind: 'wall', style: 'house' },
       ...obeliskWalls,
     ],
     bushes: [
@@ -605,37 +638,39 @@ function createIndustrialWarehouseMap(): ArenaMap {
     waterTiles: [],
     waterTileKeys: new Set<string>(),
     bridges: [],
+    stoneRoads: [],
+    railTracks: [],
     obstacles: [
       // 攀爬鏈 A（1×1 階梯 -> 1×1 小箱 -> 2×2 大箱 -> 2.0 貨櫃）
-      { ...tRect(5, 4, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
-      { ...tRect(6, 4, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate', style: 'default' },
-      { ...tRect(8, 3, 4, 2), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#0284C7' },
-      { ...tRect(12, 2, 4, 2), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#D97706' },
+      { ...tRect(5, 4, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
+      { ...tRect(6, 4, 2, 2), elevation: 1.5, kind: 'crate', style: 'default' },
+      { ...tRect(8, 3, 4, 2), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#0284C7' },
+      { ...tRect(12, 2, 4, 2), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#D97706' },
 
       // 攀爬鏈 B（1×1 階梯 -> 1×1 小箱 -> 2×2 大箱 -> 2.0 貨櫃）
-      { ...tRect(12, 15, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
-      { ...tRect(10, 14, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate', style: 'default' },
-      { ...tRect(8, 12, 2, 4), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#B91C1C' },
-      { ...tRect(9, 10, 4, 2), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#047857' },
+      { ...tRect(12, 15, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
+      { ...tRect(10, 14, 2, 2), elevation: 1.5, kind: 'crate', style: 'default' },
+      { ...tRect(8, 12, 2, 4), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#B91C1C' },
+      { ...tRect(9, 10, 4, 2), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#047857' },
 
       // 攀爬鏈 C（1×1 階梯 -> 1×1 小箱 -> 2×2 大箱 -> 2.0 貨櫃）
-      { ...tRect(21, 13, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
-      { ...tRect(20, 11, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate', style: 'default' },
-      { ...tRect(19, 7, 2, 4), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#0284C7' },
-      { ...tRect(21, 7, 4, 2), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#B91C1C' },
+      { ...tRect(21, 13, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
+      { ...tRect(20, 11, 2, 2), elevation: 1.5, kind: 'crate', style: 'default' },
+      { ...tRect(19, 7, 2, 4), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#0284C7' },
+      { ...tRect(21, 7, 4, 2), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#B91C1C' },
 
       // 額外港區 2 格高貨櫃（形成窄巷）
-      { ...tRect(3, 1, 4, 2), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#475569' },
-      { ...tRect(2, 11, 2, 4), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#D97706' },
-      { ...tRect(15, 6, 2, 4), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#475569' },
-      { ...tRect(19, 2, 4, 2), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#047857' },
-      { ...tRect(24, 12, 2, 4), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#0284C7' },
-      { ...tRect(3, 17, 4, 2), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#B91C1C' },
+      { ...tRect(3, 1, 4, 2), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#475569' },
+      { ...tRect(2, 11, 2, 4), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#D97706' },
+      { ...tRect(15, 6, 2, 4), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#475569' },
+      { ...tRect(19, 2, 4, 2), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#047857' },
+      { ...tRect(24, 12, 2, 4), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#0284C7' },
+      { ...tRect(3, 17, 4, 2), elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#B91C1C' },
 
       // 散落 1×1 小箱體與大箱掩體
-      { ...tRect(5, 8, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
-      { ...tRect(16, 16, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate', style: 'default' },
-      { ...tRect(24, 4, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
+      { ...tRect(5, 8, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
+      { ...tRect(16, 16, 2, 2), elevation: 1.5, kind: 'crate', style: 'default' },
+      { ...tRect(24, 4, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
 
       ...createTileWallLine(14, 12, 14, 12, 'stone_wall_green'),
       ...createTileWallLine(25, 10, 25, 10, 'stone_wall_green'),
@@ -682,15 +717,19 @@ function createWesternRailwayMap(): ArenaMap {
   const desertScrub: [string, string, string, string] = ['#3F6212', '#4D7C0F', '#65A30D', '#A3E635'];
 
   const tileGrid = createTerrainGrid(cols, rows);
-  // 橫貫西部沙鎮的鐵道路軌帶 (gy = 10..11, elev = 0)
-  paintTerrainRect(tileGrid, 0, 10, cols, 2, 0, 'rail_track');
+  const railTracks: RailTrackCell[] = [];
+  for (let gy = 10; gy <= 11; gy++) {
+    for (let gx = 0; gx < cols; gx++) {
+      railTracks.push({ gx, gy, orientation: 'horizontal' });
+    }
+  }
 
   const obstacles: Obstacle[] = [
     // 靜止列車車廂與蒸汽火車頭 (2.0) — 留有平交道通行缺口
-    { ...tRect(3, 10, 4, 2), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'train_car', colorVariant: '#991B1B' },
-    { ...tRect(8, 10, 4, 2), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'train_car', colorVariant: '#92400E' },
-    { ...tRect(18, 10, 4, 2), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'train_car', colorVariant: 'loco' },
-    { ...tRect(23, 10, 4, 2), blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'train_car', colorVariant: '#3F6212' },
+    { ...tRect(3, 10, 4, 2), elevation: 2.0, kind: 'crate', style: 'train_car', colorVariant: '#991B1B' },
+    { ...tRect(8, 10, 4, 2), elevation: 2.0, kind: 'crate', style: 'train_car', colorVariant: '#92400E' },
+    { ...tRect(18, 10, 4, 2), elevation: 2.0, kind: 'crate', style: 'train_car', colorVariant: 'loco' },
+    { ...tRect(23, 10, 4, 2), elevation: 2.0, kind: 'crate', style: 'train_car', colorVariant: '#3F6212' },
 
     // 西北「兩房單位」石牆站房（雙室隔間＋出入口門道＋面向鐵道小箱射擊窗）
     ...createTileWallLine(4, 3, 4, 7, 'stone_wall_tan'),   // 西外牆
@@ -700,41 +739,41 @@ function createWesternRailwayMap(): ArenaMap {
     ...createTileWallLine(8, 6, 8, 7, 'stone_wall_tan'),   // 兩房中隔牆南段
     ...createTileWallLine(7, 7, 7, 7, 'stone_wall_tan'),   // 南面牆體（5,7 與 11,7 為南門道）
     ...createTileWallLine(9, 7, 9, 7, 'stone_wall_tan'),
-    { ...tRect(6, 7, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
-    { ...tRect(10, 7, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
+    { ...tRect(6, 7, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
+    { ...tRect(10, 7, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
 
     // 北中三邊Ｕ形碉堡（內嵌 1×1 小箱貼合北牆，牆對小箱面自動自然打燈）
     ...createTileWallLine(15, 3, 19, 3, 'stone_wall_tan'),
     ...createTileWallLine(15, 4, 15, 5, 'stone_wall_tan'),
     ...createTileWallLine(19, 4, 19, 5, 'stone_wall_tan'),
-    { ...tRect(17, 4, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
+    { ...tRect(17, 4, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
 
     // 東北Ｌ形石牆（其中一側牆改為小箱＋旁邊站長小屋）
     ...createTileWallLine(21, 4, 23, 4, 'stone_wall_tan'),
     ...createTileWallLine(21, 5, 21, 5, 'stone_wall_tan'),
-    { ...tRect(21, 6, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
-    { ...tRect(26, 3, 3, 2), blocksBullets: true, elevation: 10, kind: 'wall', style: 'house' },
+    { ...tRect(21, 6, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
+    { ...tRect(26, 3, 3, 2), elevation: 10, kind: 'wall', style: 'house' },
 
     // 西南Ｌ形石牆（東端改為一格小箱掩體，牆對箱子面明亮）
     ...createTileWallLine(5, 15, 5, 18, 'stone_wall_tan'),
     ...createTileWallLine(6, 18, 6, 18, 'stone_wall_tan'),
-    { ...tRect(7, 18, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
+    { ...tRect(7, 18, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
 
     // 南中複合石牆掩體陣（兩段短Ｌ牆以一格小箱銜接成射擊口）
     ...createTileWallLine(13, 16, 13, 18, 'stone_wall_tan'),
     ...createTileWallLine(14, 18, 14, 18, 'stone_wall_tan'),
-    { ...tRect(15, 18, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
+    { ...tRect(15, 18, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
     ...createTileWallLine(16, 18, 17, 18, 'stone_wall_tan'),
     ...createTileWallLine(17, 16, 17, 17, 'stone_wall_tan'),
 
     // 東南Ｔ／Ｌ組合石牆（南翼改小箱）
     ...createTileWallLine(23, 15, 26, 15, 'stone_wall_tan'),
     ...createTileWallLine(25, 16, 25, 16, 'stone_wall_tan'),
-    { ...tRect(25, 17, 1, 1), blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' },
+    { ...tRect(25, 17, 1, 1), elevation: 1.0, kind: 'crate', style: 'small_crate' },
 
     // 站場大貨箱掩體 (1.5)
-    { ...tRect(10, 14, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate', style: 'default' },
-    { ...tRect(20, 14, 2, 2), blocksBullets: true, elevation: 1.5, kind: 'crate', style: 'default' },
+    { ...tRect(10, 14, 2, 2), elevation: 1.5, kind: 'crate', style: 'default' },
+    { ...tRect(20, 14, 2, 2), elevation: 1.5, kind: 'crate', style: 'default' },
   ];
 
   return {
@@ -750,6 +789,8 @@ function createWesternRailwayMap(): ArenaMap {
     waterTiles: [],
     waterTileKeys: new Set<string>(),
     bridges: [],
+    stoneRoads: [],
+    railTracks,
     obstacles,
     bushes: [
       { ...tRect(3, 8, 1, 1) },
@@ -1067,6 +1108,8 @@ function createBambooFortressMap(): ArenaMap {
     waterTiles: [],
     waterTileKeys: new Set<string>(),
     bridges: [],
+    stoneRoads: [],
+    railTracks: [],
     obstacles: [...bambooWalls],
     bushes: [
       { ...tRect(8, 3, 1, 1) },
@@ -1338,7 +1381,7 @@ function createStanleyIslandMap(): ArenaMap {
 
   const obstacles: Obstacle[] = [
     // 東岸石砌海岸防哨小屋 (3.0) — 全地圖零木箱！
-    { ...tRect(24, 26, 3, 2), blocksBullets: true, elevation: 10, kind: 'wall', style: 'house' },
+    { ...tRect(24, 26, 3, 2), elevation: 10, kind: 'wall', style: 'house' },
 
     // 北岸面湖Ｌ形與短石牆掩體
     ...createTileWallLine(16, 12, 19, 12, 'stone_wall_tan'),
@@ -1389,6 +1432,8 @@ function createStanleyIslandMap(): ArenaMap {
       // 橋樑 2：跨越大島南側曲流缺口，連通東西兩岸
       { ...tRect(14, 34, 6, 2), orientation: 'horizontal' },
     ],
+    stoneRoads: [],
+    railTracks: [],
     obstacles,
     bushes: [
       { ...tRect(16, 22, 1, 1) },
@@ -1445,22 +1490,44 @@ function createStanleyIslandMap(): ArenaMap {
   };
 }
 
-export function createArenaMap(mapId: MapId): ArenaMap {
+function attachFloorGrid(map: ArenaMap): ArenaMap {
+  const baseFloor = biomeToDefaultFloor(map.biome);
+  const floorGrid = createFloorGrid(map.cols, map.rows, baseFloor);
+  for (let gy = 0; gy < map.rows; gy++) {
+    for (let gx = 0; gx < map.cols; gx++) {
+      if (map.tileGrid[gy]?.[gx]?.style === 'grass_ground') {
+        floorGrid[gy][gx] = 'grass_ground';
+      }
+    }
+  }
+  return { ...map, floorGrid };
+}
+
+export function createArenaMap(mapId: MapId | string): ArenaMap {
+  let raw: ArenaMap;
   switch (mapId) {
     case 'european_castle':
-      return createEuropeanCastleMap();
+      raw = createEuropeanCastleMap();
+      break;
     case 'desert_ruins':
-      return createDesertRuinsMap();
+      raw = createDesertRuinsMap();
+      break;
     case 'industrial_warehouse':
-      return createIndustrialWarehouseMap();
+      raw = createIndustrialWarehouseMap();
+      break;
     case 'western_railway':
-      return createWesternRailwayMap();
+      raw = createWesternRailwayMap();
+      break;
     case 'bamboo_fortress':
-      return createBambooFortressMap();
+      raw = createBambooFortressMap();
+      break;
     case 'stanley_island':
-      return createStanleyIslandMap();
+      raw = createStanleyIslandMap();
+      break;
     case 'tokyo_shrine':
     default:
-      return createTokyoShrineMap();
+      raw = createTokyoShrineMap();
+      break;
   }
+  return attachFloorGrid(raw);
 }

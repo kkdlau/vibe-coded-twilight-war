@@ -37,6 +37,7 @@ import {
   RELOAD_CUES,
   getGunSpread,
 } from './tuning';
+import { CustomMapData, buildArenaMapFromCustom } from './customMaps';
 import {
   BeamTracer,
   CharacterSkin,
@@ -48,7 +49,6 @@ import {
   GridTile,
   GunDef,
   HudSnapshot,
-  MapId,
   MeleeKind,
   Particle,
   PickupItem,
@@ -64,8 +64,13 @@ const DEFAULT_PISTOL = GUNS.find((gun) => gun.kind === 'pistol') || GUNS[0];
 const DEFAULT_KNIFE = MELEES.find((melee) => melee.kind === 'knife') || MELEES[0];
 const AI_FIXED_REPUTATION = 100;
 
-function equipGun(def: GunDef): Extract<EquippedWeapon, { type: 'gun' }> {
-  return { type: 'gun', def, ammoInMag: def.magSize, reloadTimer: 0 };
+function equipGun(def: GunDef, ammoInMag = def.magSize): Extract<EquippedWeapon, { type: 'gun' }> {
+  return {
+    type: 'gun',
+    def,
+    ammoInMag: clamp(Math.round(ammoInMag), 0, def.magSize),
+    reloadTimer: 0,
+  };
 }
 
 function defaultWeaponForHand(hand: WeaponHand): EquippedWeapon {
@@ -128,7 +133,7 @@ function evaluateBlackDragonHit(
 
 export class TwilightEngine {
   public mode = 'frontier' as const;
-  public mapId: MapId;
+  public mapId: string;
   public status: HudSnapshot['status'] = 'PLAYING';
   public map: ArenaMap;
   public player: PlayerState;
@@ -169,20 +174,21 @@ export class TwilightEngine {
   constructor(
     faction: FactionId,
     characterSkin: CharacterSkin,
-    mapId: MapId,
+    mapId: string,
     initialReputations: Record<FactionId, number>,
     onHudUpdate: (snap: HudSnapshot) => void,
-    onReputationChange?: (reps: Record<FactionId, number>) => void
+    onReputationChange?: (reps: Record<FactionId, number>) => void,
+    customMap?: CustomMapData
   ) {
     this.mapId = mapId;
     this.onHudUpdate = onHudUpdate;
     this.onReputationChange = onReputationChange;
 
-    this.map = createArenaMap(mapId);
+    this.map = customMap ? buildArenaMapFromCustom(customMap) : createArenaMap(mapId);
     const fac = FACTIONS[faction];
     const startGun = GUNS.find((g) => g.id === fac.startGunId) || GUNS[0];
     const startMelee = MELEES.find((m) => m.id === fac.startMeleeId) || MELEES[0];
-    const spawnPt = this.map.factionSpawns[faction][0];
+    const spawnPt = this.map.factionSpawns[faction][0] || { x: this.map.width / 2, y: this.map.height / 2 };
 
     const normalizedReps: Record<FactionId, number> = {
       royal: Math.floor(Number.isFinite(initialReputations.royal) ? initialReputations.royal : 0),
@@ -448,6 +454,9 @@ export class TwilightEngine {
 
   private pickBestDispersedSpawn(fac: FactionId): { x: number; y: number } {
     const spawns = this.map.factionSpawns[fac];
+    if (!spawns || spawns.length === 0) {
+      return { x: this.map.width / 2, y: this.map.height / 2 };
+    }
     const activePositions: { x: number; y: number }[] = [];
     if (this.player.hp > 0) {
       activePositions.push({ x: this.player.x, y: this.player.y });
@@ -586,11 +595,15 @@ export class TwilightEngine {
     isWall: boolean;
     isCrate: boolean;
   } {
+    const gx = clamp(Math.floor(x / TILE), 0, this.map.cols - 1);
+    const gy = clamp(Math.floor(y / TILE), 0, this.map.rows - 1);
+    const tileElev = this.map.tileGrid[gy][gx].elev;
+
     for (const obs of this.map.obstacles) {
       if (pointInRect(x, y, obs)) {
         return {
           totalHeight: obs.elevation,
-          terrainHeight: obs.kind === 'crate' ? 0 : obs.elevation,
+          terrainHeight: obs.kind === 'crate' ? tileElev : obs.elevation,
           isWall: obs.kind === 'wall',
           isCrate: obs.kind === 'crate',
         };
@@ -598,9 +611,10 @@ export class TwilightEngine {
     }
     for (const tree of this.map.trees) {
       if (pointInRect(x, y, tree)) {
+        const treeHeight = Math.max(10, Math.round((tileElev + 10) * 10) / 10);
         return {
-          totalHeight: 10,
-          terrainHeight: 10,
+          totalHeight: treeHeight,
+          terrainHeight: treeHeight,
           isWall: true,
           isCrate: false,
         };
@@ -899,6 +913,7 @@ export class TwilightEngine {
             label: gunDef.name,
             color: gunDef.color,
             gunDef,
+            ammoInMag: gunDef.magSize,
             bobPhase: Math.random() * 6,
           });
         }
@@ -1079,7 +1094,7 @@ export class TwilightEngine {
       label: weapon.def.name,
       color: weapon.def.color,
       ...(weapon.type === 'gun'
-        ? { gunDef: weapon.def }
+        ? { gunDef: weapon.def, ammoInMag: weapon.ammoInMag }
         : { meleeDef: weapon.def, durability: weapon.def.kind === 'shield' ? Math.round(weapon.durability) : undefined }),
       bobPhase: 0,
     });
@@ -1132,6 +1147,10 @@ export class TwilightEngine {
   public switchWeapon() {
     const p = this.player;
     this.cancelMeleeCharge();
+    const prevWeapon = p.weapons[p.activeHand];
+    if (prevWeapon.type === 'gun') {
+      prevWeapon.reloadTimer = 0;
+    }
     p.activeHand = p.activeHand === 0 ? 1 : 0;
     this.resetGunFeedback();
     const weapon = p.weapons[p.activeHand];
@@ -1156,8 +1175,7 @@ export class TwilightEngine {
 
   public startReload() {
     const p = this.player;
-    const active = p.weapons[p.activeHand];
-    const weapon = active.type === 'gun' ? active : p.weapons[p.activeHand === 0 ? 1 : 0];
+    const weapon = p.weapons[p.activeHand];
     if (weapon.type !== 'gun' || weapon.reloadTimer > 0) return;
     if (weapon.ammoInMag >= weapon.def.magSize) {
       this.spawnText(p.x, p.y - 36, '彈匣已滿', '#94A3B8', 0.9);
@@ -1213,7 +1231,7 @@ export class TwilightEngine {
     } else {
       let weapon: EquippedWeapon;
       if (item.kind === 'gun' && item.gunDef) {
-        weapon = equipGun(item.gunDef);
+        weapon = equipGun(item.gunDef, item.ammoInMag ?? item.gunDef.magSize);
       } else if (item.kind === 'melee' && item.meleeDef) {
         weapon = {
           type: 'melee',
@@ -1228,9 +1246,12 @@ export class TwilightEngine {
       p.weapons[p.activeHand] = weapon;
       this.cancelMeleeCharge();
       this.resetGunFeedback();
-      const label = weapon.type === 'melee' && weapon.def.kind === 'shield'
-        ? `${weapon.def.name} (${Math.round(weapon.durability)}/100)`
-        : weapon.def.name;
+      const label =
+        weapon.type === 'gun'
+          ? `${weapon.def.name} (${weapon.ammoInMag}/${weapon.def.magSize})`
+          : weapon.def.kind === 'shield'
+            ? `${weapon.def.name} (${Math.round(weapon.durability)}/100)`
+            : weapon.def.name;
       this.spawnText(p.x, p.y - 38, `拾取 ${label}`, weapon.def.color, 1.15);
     }
     this.emitHud();
@@ -2154,6 +2175,10 @@ export class TwilightEngine {
 
   private switchEnemyHand(e: EnemyEntity, targetHand: WeaponHand) {
     if (e.activeHand === targetHand) return;
+    const prevWeapon = e.weapons[e.activeHand];
+    if (prevWeapon.type === 'gun') {
+      prevWeapon.reloadTimer = 0;
+    }
     e.activeHand = targetHand;
     e.chargingMelee = false;
     e.chargeReady = false;
@@ -2198,7 +2223,7 @@ export class TwilightEngine {
           const targetHand: WeaponHand =
             e.weapons[0].def.kind === 'pistol' ? 0 : e.weapons[1].def.kind === 'pistol' ? 1 : 0;
           this.dropWeapon(e.weapons[targetHand], pk.x, pk.y);
-          e.weapons[targetHand] = equipGun(pk.gunDef);
+          e.weapons[targetHand] = equipGun(pk.gunDef, pk.ammoInMag ?? pk.gunDef.magSize);
           if (e.activeHand === targetHand) {
             e.chargingMelee = false;
             e.chargeReady = false;
@@ -2256,24 +2281,24 @@ export class TwilightEngine {
 
   private updateReloads(dt: number) {
     const p = this.player;
-    for (const weapon of p.weapons) {
-      if (weapon.type !== 'gun' || weapon.reloadTimer <= 0) continue;
-      const previousProgress = 1 - weapon.reloadTimer / weapon.def.reloadTime;
-      weapon.reloadTimer = Math.max(0, weapon.reloadTimer - dt);
-      const progress = 1 - weapon.reloadTimer / weapon.def.reloadTime;
-      for (const cue of RELOAD_CUES) {
-        if (previousProgress < cue.progress && progress >= cue.progress) {
-          sfx.reload(weapon.def.kind, cue.phase);
-        }
-      }
-      if (weapon.reloadTimer > 0) continue;
+    const weapon = p.weapons[p.activeHand];
+    if (weapon.type !== 'gun' || weapon.reloadTimer <= 0) return;
 
-      const needed = Math.min(weapon.def.magSize - weapon.ammoInMag, p.reserveAmmo);
-      weapon.ammoInMag += needed;
-      p.reserveAmmo -= needed;
-      sfx.reload(weapon.def.kind, 'ready');
-      this.emitHud();
+    const previousProgress = 1 - weapon.reloadTimer / weapon.def.reloadTime;
+    weapon.reloadTimer = Math.max(0, weapon.reloadTimer - dt);
+    const progress = 1 - weapon.reloadTimer / weapon.def.reloadTime;
+    for (const cue of RELOAD_CUES) {
+      if (previousProgress < cue.progress && progress >= cue.progress) {
+        sfx.reload(weapon.def.kind, cue.phase);
+      }
     }
+    if (weapon.reloadTimer > 0) return;
+
+    const needed = Math.min(weapon.def.magSize - weapon.ammoInMag, p.reserveAmmo);
+    weapon.ammoInMag += needed;
+    p.reserveAmmo -= needed;
+    sfx.reload(weapon.def.kind, 'ready');
+    this.emitHud();
   }
 
   private updatePlayer(dt: number) {
@@ -2485,9 +2510,30 @@ export class TwilightEngine {
   }
 
   private getFootstepSurface(x: number, y: number): FootstepSurface {
-    const tile = this.map.tileGrid[Math.floor(y / TILE)]?.[Math.floor(x / TILE)];
-    if (tile?.style === 'wooden_plank' || this.map.bridges.some((bridge) => pointInRect(x, y, bridge))) return 'wood';
-    if (tile?.style === 'grass_ground' || tile?.style === 'hill') return 'soft';
+    const gx = clamp(Math.floor(x / TILE), 0, this.map.cols - 1);
+    const gy = clamp(Math.floor(y / TILE), 0, this.map.rows - 1);
+    const tile = this.map.tileGrid[gy]?.[gx];
+    const floor = this.map.floorGrid?.[gy]?.[gx];
+    if (
+      tile?.style === 'wooden_plank' ||
+      tile?.style === 'shrine_floor' ||
+      this.map.bridges.some((bridge) => pointInRect(x, y, bridge))
+    ) {
+      return 'wood';
+    }
+    if (tile?.style === 'hill') return 'soft';
+    if (tile?.elev === 0) {
+      if (
+        floor === 'grass_ground' ||
+        floor === 'bamboo_moss' ||
+        floor === 'shrine_dirt' ||
+        floor === 'desert_sand' ||
+        tile.style === 'grass_ground'
+      ) {
+        return 'soft';
+      }
+      if (floor === 'castle_stone' || floor === 'warehouse_steel') return 'hard';
+    }
     if (tile?.style && tile.style !== 'default') return 'hard';
     return this.map.biome.endsWith('_outdoor') ? 'soft' : 'hard';
   }
@@ -2850,13 +2896,12 @@ export class TwilightEngine {
       e.aggroLockTimer = Math.max(0, e.aggroLockTimer - dt);
       e.pathTimer = Math.max(0, e.pathTimer - dt);
 
-      // 電腦與玩家共用彈匣裝填計時，惟電腦備用彈藥無限
-      for (const w of e.weapons) {
-        if (w.type === 'gun' && w.reloadTimer > 0) {
-          w.reloadTimer = Math.max(0, w.reloadTimer - dt);
-          if (w.reloadTimer === 0) {
-            w.ammoInMag = w.def.magSize;
-          }
+      // 電腦與玩家共用彈匣裝填計時（僅在當前持握槍械手位上進行，惟電腦備用彈藥無限）
+      const activeReloadWeapon = e.weapons[e.activeHand];
+      if (activeReloadWeapon.type === 'gun' && activeReloadWeapon.reloadTimer > 0) {
+        activeReloadWeapon.reloadTimer = Math.max(0, activeReloadWeapon.reloadTimer - dt);
+        if (activeReloadWeapon.reloadTimer === 0) {
+          activeReloadWeapon.ammoInMag = activeReloadWeapon.def.magSize;
         }
       }
 
@@ -3011,18 +3056,18 @@ export class TwilightEngine {
           : e.weapons[1].type === 'melee' && e.weapons[1].def.kind === 'shield' && e.weapons[1].durability > 0
             ? 1
             : -1;
+      const curActiveWeapon = e.weapons[e.activeHand];
+      const activeGunReloading = curActiveWeapon.type === 'gun' && curActiveWeapon.reloadTimer > 0;
 
       let desiredHand: WeaponHand;
-      if (
-        shieldHand !== -1 &&
-        Boolean(losTargetPos) &&
-        (Boolean(heldGun && heldGun.reloadTimer > 0) || (bestLosDist <= 155 && e.hp < 55))
-      ) {
+      if (shieldHand !== -1 && Boolean(losTargetPos) && bestLosDist <= 155 && e.hp < 55) {
         desiredHand = shieldHand;
       } else if (isCloseMeleeRange && meleeHand !== -1) {
         desiredHand = meleeHand;
       } else if (losTargetPos && canHitRanged && gunHand !== -1) {
         desiredHand = gunHand;
+      } else if (activeGunReloading) {
+        desiredHand = e.activeHand;
       } else {
         desiredHand = this.getLightestEnemyHand(e);
       }
@@ -3790,9 +3835,11 @@ export class TwilightEngine {
     for (const pk of this.pickups) {
       if (dist(p.x, p.y, pk.x, pk.y) < 70) {
         nearby =
-          pk.meleeDef?.kind === 'shield' && pk.durability !== undefined
-            ? `${pk.label} (${pk.durability}/100)`
-            : pk.label;
+          pk.kind === 'gun' && pk.gunDef && pk.ammoInMag !== undefined
+            ? `${pk.label} (${pk.ammoInMag}/${pk.gunDef.magSize})`
+            : pk.meleeDef?.kind === 'shield' && pk.durability !== undefined
+              ? `${pk.label} (${pk.durability}/100)`
+              : pk.label;
         break;
       }
     }

@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
+import { CustomMapData, buildArenaMapFromCustom } from '../game/customMaps';
 import { renderMapBaseLayer } from '../game/mapRenderer';
 import { createArenaMap } from '../game/maps';
-import { MapId } from '../game/types';
 
 interface MiniMapPreviewProps {
-  mapId: MapId;
+  mapId: string;
+  customMap?: CustomMapData;
   className?: string;
 }
 
@@ -13,10 +14,13 @@ const ZOOM_MIN = 1;
 const ZOOM_MAX = 3;
 const ZOOM_STEP = 0.5;
 
-export const MiniMapPreview: React.FC<MiniMapPreviewProps> = ({ mapId, className = '' }) => {
+export const MiniMapPreview: React.FC<MiniMapPreviewProps> = ({ mapId, customMap, className = '' }) => {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const arena = useMemo(() => createArenaMap(mapId), [mapId]);
+  const arena = useMemo(
+    () => (customMap ? buildArenaMapFromCustom(customMap) : createArenaMap(mapId)),
+    [mapId, customMap]
+  );
 
   const [zoom, setZoom] = useState(1);
   const [boxSize, setBoxSize] = useState<{ w: number; h: number }>({ w: 640, h: 420 });

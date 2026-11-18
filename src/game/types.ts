@@ -109,6 +109,14 @@ export interface Rect {
   h: number;
 }
 
+export type FloorStyle =
+  | 'shrine_dirt'
+  | 'bamboo_moss'
+  | 'desert_sand'
+  | 'castle_stone'
+  | 'warehouse_steel'
+  | 'grass_ground';
+
 export type PlatformStyle =
   | 'default'
   | 'shrine_floor'
@@ -120,7 +128,7 @@ export type PlatformStyle =
   | 'rail_track';
 
 export interface StairRect extends Rect {
-  elevation: number; // 0.5 / 1.5 / 2.5
+  elevation: number; // 所在底層高度 +0.5（例：0.0 -> 0.5、1.0 -> 1.5、2.0 -> 2.5）
   direction: 'north' | 'south' | 'east' | 'west';
   style?: PlatformStyle;
 }
@@ -139,16 +147,22 @@ export type ObstacleStyle =
   | 'train_car';
 
 export interface Obstacle extends Rect {
-  blocksBullets: boolean;
-  elevation: number; // 1.0 small crate, 1.5 big crate, 2.0 shipping container / train car, 10 solid wall / house / bamboo / pillar
+  elevation: number; // 1.0 小木箱, 1.5 大木箱, 2.0 貨櫃／火車車廂, 10 實牆／房屋／竹林／石柱（子彈與視線統一依高度計算）
   kind: 'crate' | 'wall';
   style?: ObstacleStyle;
   colorVariant?: string;
+  direction?: 'north' | 'south' | 'east' | 'west';
 }
 
 export interface GridTile {
   gx: number;
   gy: number;
+}
+
+export interface RailTrackCell {
+  gx: number;
+  gy: number;
+  orientation: 'horizontal' | 'vertical';
 }
 
 export interface TerrainTileCell {
@@ -201,7 +215,7 @@ export interface PlayerState {
   angle: number;
   walkPhase: number;
   moveIntensity: number;
-  elevation: number; // 0, 0.5, 1.0, 1.5, 2.0, 2.5, or 3.0
+  elevation: number; // 地形與物件高度（平地 0.0、階梯 +0.5、疊加層 +1.0/層）
   hp: number;
   maxHp: number;
   maxShield: number;
@@ -402,6 +416,7 @@ export interface PickupItem {
   gunDef?: GunDef;
   meleeDef?: MeleeDef;
   amount?: number;
+  ammoInMag?: number;
   durability?: number;
   bobPhase: number;
   ammoSpawnIndex?: number;
@@ -417,7 +432,7 @@ export interface TimedSkillHudItem {
 
 export interface HudSnapshot {
   mode: GameMode;
-  mapId: MapId;
+  mapId: string;
   mapName: string;
   status: 'PLAYING' | 'PAUSED' | 'RESPAWNING' | 'GAME_OVER' | 'VICTORY';
   respawnSeconds: number;

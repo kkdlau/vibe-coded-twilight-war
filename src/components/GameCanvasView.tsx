@@ -7,14 +7,16 @@ import {
 } from 'lucide-react';
 import { sfx } from '../audio/sfx';
 import { FACTIONS } from '../game/data';
+import { CustomMapData } from '../game/customMaps';
 import { TwilightEngine } from '../game/engine';
-import { CharacterSkin, FactionId, HudSnapshot, MapId, RunRecord } from '../game/types';
+import { CharacterSkin, FactionId, HudSnapshot, RunRecord } from '../game/types';
 import { CharacterAvatarSvg, SkillIconSvg, WeaponIconSvg } from './WeaponArt';
 
 interface GameCanvasViewProps {
   faction: FactionId;
   characterSkin: CharacterSkin;
-  mapId: MapId;
+  mapId: string;
+  customMap?: CustomMapData;
   initialReputations: Record<FactionId, number>;
   onReputationsChange: (reps: Record<FactionId, number>) => void;
   onBackToFaction: () => void;
@@ -67,6 +69,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
   faction,
   characterSkin,
   mapId,
+  customMap,
   initialReputations,
   onReputationsChange,
   onBackToFaction,
@@ -85,6 +88,8 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
   initRepsRef.current = initialReputations;
   const repCallbackRef = useRef(onReputationsChange);
   repCallbackRef.current = onReputationsChange;
+  const customMapRef = useRef(customMap);
+  customMapRef.current = customMap;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -101,7 +106,8 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       mapId,
       initRepsRef.current,
       (snap) => setHud(snap),
-      (reps) => repCallbackRef.current(reps)
+      (reps) => repCallbackRef.current(reps),
+      customMapRef.current
     );
     engineRef.current = engine;
 

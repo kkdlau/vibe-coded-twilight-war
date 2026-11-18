@@ -1,8 +1,15 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { FactionRoomView } from './components/FactionRoomView';
 import { GameCanvasView } from './components/GameCanvasView';
+import { MapEditorView } from './components/MapEditorView';
 import { PortalView } from './components/PortalView';
-import { CharacterSkin, FactionId, MapId, RunRecord } from './game/types';
+import {
+  CustomMapData,
+  deleteCustomMap,
+  loadCustomMaps,
+  upsertCustomMap,
+} from './game/customMaps';
+import { CharacterSkin, FactionId, RunRecord } from './game/types';
 
 const STORAGE_KEY = 'twilight_rpg_records_v2';
 const OLD_REP_STORAGE_KEY = 'twilight_rpg_reputation_v1';
@@ -43,13 +50,19 @@ function loadReputations(): Record<FactionId, number> {
 }
 
 export default function App() {
-  const [screen, setScreen] = useState<'lobby' | 'faction' | 'battle'>('lobby');
+  const [screen, setScreen] = useState<'lobby' | 'faction' | 'battle' | 'editor'>('lobby');
   const [selectedFaction, setSelectedFaction] = useState<FactionId>('royal');
   const [selectedCharacter, setSelectedCharacter] = useState<CharacterSkin | null>(null);
-  const [selectedMapId, setSelectedMapId] = useState<MapId>('tokyo_shrine');
-  const [factionMapChoice, setFactionMapChoice] = useState<MapId | 'random'>('random');
+  const [selectedMapId, setSelectedMapId] = useState<string>('tokyo_shrine');
+  const [factionMapChoice, setFactionMapChoice] = useState<string>('random');
   const [records, setRecords] = useState<RunRecord[]>(() => loadRecords());
   const [reputations, setReputations] = useState<Record<FactionId, number>>(() => loadReputations());
+  const [customMaps, setCustomMaps] = useState<CustomMapData[]>(() => loadCustomMaps());
+
+  const activeCustomMap = useMemo(
+    () => customMaps.find((m) => m.id === selectedMapId),
+    [customMaps, selectedMapId]
+  );
 
   const handleReputationsChange = useCallback((nextReps: Record<FactionId, number>) => {
     const safeReps: Record<FactionId, number> = {
@@ -86,12 +99,37 @@ export default function App() {
     }
   }, []);
 
+  const handleSaveCustomMap = useCallback((entry: CustomMapData) => {
+    setCustomMaps((prev) => upsertCustomMap(prev, entry));
+  }, []);
+
+  const handleDeleteCustomMap = useCallback((id: string) => {
+    setCustomMaps((prev) => deleteCustomMap(prev, id));
+  }, []);
+
+  if (screen === 'editor') {
+    return (
+      <MapEditorView
+        savedMaps={customMaps}
+        onSaveMap={handleSaveCustomMap}
+        onDeleteMap={handleDeleteCustomMap}
+        onPlayCustomMap={(cm) => {
+          setSelectedMapId(cm.id);
+          setFactionMapChoice(cm.id);
+          setScreen('faction');
+        }}
+        onBackToLobby={() => setScreen('lobby')}
+      />
+    );
+  }
+
   if (screen === 'battle' && selectedCharacter) {
     return (
       <GameCanvasView
         faction={selectedFaction}
         characterSkin={selectedCharacter}
         mapId={selectedMapId}
+        customMap={activeCustomMap}
         initialReputations={reputations}
         onReputationsChange={handleReputationsChange}
         onBackToFaction={() => setScreen('faction')}
@@ -106,6 +144,7 @@ export default function App() {
       <FactionRoomView
         faction={selectedFaction}
         initialMapChoice={factionMapChoice}
+        customMaps={customMaps}
         reputations={reputations}
         onBackToLobby={() => setScreen('lobby')}
         onStartBattle={(fac, charSkin, mapId, mapChoice) => {
@@ -123,12 +162,14 @@ export default function App() {
     <PortalView
       records={records}
       reputations={reputations}
+      customMapCount={customMaps.length}
       onSelectFaction={(fac, preselectedMapId) => {
         setSelectedFaction(fac);
         setFactionMapChoice(preselectedMapId ?? 'random');
         if (preselectedMapId) setSelectedMapId(preselectedMapId);
         setScreen('faction');
       }}
+      onOpenMapEditor={() => setScreen('editor')}
       onClearRecords={handleClearRecords}
     />
   );

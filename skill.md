@@ -1,151 +1,187 @@
-# 光暈戰記 (Twilight Wars) — Repository Skill & Architecture Guide
+# 光暈戰記 (Twilight Wars) — 開發架構與核心規範指南 (`skill.md`)
 
-This document is the authoritative onboarding and technical reference for Agents working in this repository.
-
----
-
-## 1. Project Overview & Runtime Environment
-
-- **Game**: *光暈戰記 (Twilight Wars)* — single-mode 2D top-down 2.5D tactical arena shooter built with React 19, TypeScript, Tailwind CSS v4, HTML5 Canvas 2D, and Web Audio API.
-- **Dev Server & Build**:
-  - Runs on Vite + TypeScript (`npm run dev` on port `3000` with HMR disabled via `DISABLE_HMR`).
-  - Type check: `npm run lint` (`tsc --noEmit`).
-  - Tests: `npm test -- --run` (Vitest unit & integration suite in `src/game/engine.test.ts`).
-  - Production build: `npm run build`.
-- **Persistence**: LocalStorage only (`twilight_wars_records_v1` for match history, `twilight_wars_reputations_v1` for independent per-faction reputations initialized to `{ royal: 0, shadow: 0, mercenary: 0 }`).
-- **UI/Environment Rules**:
-  - Avoid `window.alert` / `window.open`.
-  - Keep HUD/UI clean without telemetry/debug logs.
-  - All user-facing copy is in Traditional Chinese (`zh-Hant`).
+本文件為所有在本程式碼庫工作的 Agent 與工程師之權威技術參考與架構守則，請於修改任何系統前詳閱並嚴格遵守各項不變量（Invariants）。
 
 ---
 
-## 2. Codebase Map
+## 1. 專案概覽與執行環境
 
-| File | Responsibility |
+- **作品名稱**：*光暈戰記 (Twilight Wars)* — 單機 2D 俯視角 2.5D 戰術競技場射擊遊戲，基於 React 19、TypeScript、Tailwind CSS v4、HTML5 Canvas 2D 與 Web Audio API 打造。
+- **開發伺服器與指令**：
+  - 本地開發：`npm run dev`（Port `3000`，依環境設定 `DISABLE_HMR` 停用 HMR）。
+  - 型別檢查：`npm run lint`（執行 `tsc --noEmit`）。
+  - 單元／整合測試：`npm test` / `npm test -- --run`（Vitest 測試套件位於 `src/game/engine.test.ts`）。
+  - 正式建置：`npm run build`（Vite 輸出至 `dist/`）。
+  - CI 流程：`.github/workflows/ci.yml` 於 push / pull_request（`main` / `master`）自動執行 `npm install --no-audit --no-fund`、`npm run lint`、`npm test`、`npm run build`。
+- **本地持久化（LocalStorage）**：
+  - `twilight_rpg_records_v2`：戰績與戰場紀錄 (`RunRecord[]`)。
+  - `twilight_rpg_reputations_v2`：三大陣營獨立聲望 (`{ royal: 0, shadow: 0, mercenary: 0 }`)。
+  - `twilight_wars_custom_maps_v1`：玩家透過地圖編輯器建立／匯入之自訂戰場 (`CustomMapData[]`)。
+- **UI 與環境守則**：
+  - 禁止使用 `window.alert` / `window.open`，提示訊息一律採用內嵌 Toast 或 Modal。
+  - 介面保持戰場潔淨，不可出現遙測數據、除錯日誌或狀態系統文字。
+  - 所有對外顯示文案統一採用**繁體中文 (`zh-Hant`)**。
+
+---
+
+## 2. 程式碼架構地圖
+
+| 檔案路徑 | 核心職責 |
 | --- | --- |
-| `src/App.tsx` | Top-level view router (`lobby` → `faction` → `battle`), persistent `RunRecord[]` & `Record<FactionId, number>` reputations. |
-| `src/components/PortalView.tsx` | Minimalist triangular 3-faction lobby (Royal top-left, Shadow top-right, Mercenary bottom-center) + bottom-right 5-tab Help modal acting as a live visual debug booklet (`地形物件` split into `一、地形` & `二、物件` via live Canvas previews / `地圖` / `武器` / `角色` / `玩法`). |
-| `src/components/FactionRoomView.tsx` | Single-viewport zero-scroll faction staging cockpit: 5 character skins, full 4-skill overview (`knife`, `claw`, `greatsword`, `shield`), map dropdown (`random` hides preview; named maps show `MiniMapPreview`), prominent reputation & launch CTA. |
-| `src/components/MiniMapPreview.tsx` | Zoomable/scrollable live Canvas preview of any selected `MapId` showing terrain + color-aligned faction spawns (`royal` white/sky, `shadow` deep purple-crimson `#9D174D`, `mercenary` amber `#F59E0B`). |
-| `src/components/GameCanvasView.tsx` | Game loop (`requestAnimationFrame`), keyboard/mouse input normalization, dual-ring HP/Qi HUD, timed skill cooldown boxes, top-right dual-hand weapon UI (ammo/shield durability displayed only beneath the active hand), `[Tab]` match progress, `[P]` pause, victory/defeat modal. |
-| `src/components/WeaponArt.tsx` | Crisp SVG artwork for all 8 weapons, 12 character skin styles, 3 faction crests, and 6 timed skill icons. |
-| `src/game/types.ts` | Canonical TypeScript interfaces for factions, shared dual-hand weapons (`EquippedWeapon`), player, AI (`EnemyEntity`), terrain, projectiles, pickups, and `HudSnapshot`. |
-| `src/game/data.ts` | Faction definitions (`FACTIONS`), 15 character skins (`FACTION_CHARACTERS`), 7-map catalog (`MAP_CATALOG`), `GUNS`, `MELEES`, `getWeaponSwapDuration`, `getReputationQiMultiplier`, and `ORIGIN_RESEARCH`. |
-| `src/game/tuning.ts` | Centralized combat & feel constants: `PLAYER_MOVEMENT`, `GUN_AIM` + `getGunSpread` distance-eased spread curves, `RELOAD_CUES`, `GUNFIRE_ANIMATION_SECONDS`, `RESPAWN_DELAY_SECONDS`, `AI_COMBAT`, `AI_PATROL`. |
-| `src/game/maps.ts` | Tile-based (`TILE = 48`) procedural builders for all 7 maps, BFS/layout helpers, water/bridge definitions, elevation grids, crates, walls (`elevation = 10`), bamboo, trees, bushes, weapon/ammo/shield spawns. |
-| `src/game/mapRenderer.ts` | Canvas 2D Floor & Object renderer (`renderMapBaseLayer`, `renderMapCanopies`), plus `renderHelpPreview` for exact proportion Help debug cards; tile water shore blending, stone/wood lighting, and proximity canopy transparency. |
-| `src/game/geometry.ts` | Pure math, 8-way snapping (`snapToEightDirections`), collision primitives (`resolveCircleRect`, `segmentCircleHit`), faction hostility (`areHostile`), and radius constants. |
-| `src/game/combatRenderer.ts` | Canvas 2D entity, pickup, weapon-in-hand, melee animation, VFX, muzzle flash, and crosshair renderer (`drawCharacter`, `drawPickup`, `drawSlashEffect`, `drawProjectiles`, `drawCrosshair`, etc.). |
-| `src/game/engine.ts` | `TwilightEngine` core simulation: A* pathfinding, 2.5D movement/LoS/bullet tracing, combat/skills, screen flashbang fade, AI decision/patrol, pickups, wave spawning, respawn flow, and HUD snapshots. |
-| `src/audio/sfx.ts` | Web Audio API sound engine (`SoundEngine` singleton `sfx`): loads `public/assets/audio/pistol-shot.wav` with per-gun filtering/pitch, plus procedural footsteps, phased reload clacks, melee charge hum, and death/respawn cues. |
-| `src/game/engine.test.ts` | Comprehensive Vitest suite covering reputation math, faction deployment, reloads, 2.5D elevation/bullet blocking, map invariants, 0-damage shield mechanics, skills, unified Player/AI dual-hand parity, respawn, flashbang, rifle bloom, and AI patrol. |
+| `src/App.tsx` | 頂層視圖路由（`lobby` → `faction` → `battle` / `editor`），管理 `RunRecord[]`、陣營獨立聲望及 `CustomMapData[]` 狀態。 |
+| `src/components/PortalView.tsx` | 極簡三角大廳（皇家左上、天影右上、第三勢力正下）、左下角「創建地圖」入口按鈕，以及右下角 5 頁籤即時 Canvas 視覺化說明／Debug 手冊（`地板地形物件` 嚴格切分為 `一、地板`、`二、地形`、`三、物件`／`地圖`／`武器`／`角色`／`玩法`）。 |
+| `src/components/FactionRoomView.tsx` | 單視窗零捲動出戰整裝室：5 種角色造型、4 種近戰武器技能總覽（`knife`、`claw`、`greatsword`、`shield`）、戰場下拉選單（內建 7 張與「自訂戰場」分類；選「隨機地圖」時隱藏預覽以免劇透）、顯著聲望卡與出戰按鈕。 |
+| `src/components/MiniMapPreview.tsx` | 支援按長寬自動適配、按鈕／滾輪縮放與拖曳捲動之即時戰場 Canvas 預覽，支援內建地圖與 `CustomMapData`，僅顯示地形與與陣營對齊之出生點色標（皇家白藍、天影紫紅 `#9D174D`、第三琥珀 `#F59E0B`），不顯示地上武器／彈藥。 |
+| `src/components/MapEditorView.tsx` | 雙欄戰場編輯器：左側可縮放／支援座標與高度／疊加總高度標記之即時 Canvas 畫布，右側 Sidebar 分為 `地板`（6 種可混搭 0.0 地坪＋鋪滿全圖）／`地形`／`物件`（含水域河道、多格等高預警與直橫旋轉）／`出生物資`（含盾牌與彈藥箱於「地圖武器點」按鈕群，放置無數字標示）；支援 R 鍵旋轉、Ctrl+Z/Y 復原重做與三方 BFS 連通驗證。 |
+| `src/components/GameCanvasView.tsx` | `requestAnimationFrame` 主迴圈、鍵鼠輸入標準化、雙環血量／氣條 HUD、限時技能冷卻格、右上雙手武器 UI（僅於當前持握主手下方顯示彈匣／備彈或盾牌耐久）、`[Tab]` 戰況、`[P]` 暫停與結算畫面。 |
+| `src/components/WeaponArt.tsx` | 全 8 把武器、12 款角色造型風格、3 大陣營徽章與 6 種限時技能之高精細 SVG 繪製。 |
+| `src/game/types.ts` | 核心型別定義：陣營、共用雙手武器 (`EquippedWeapon`)、玩家、電腦 (`EnemyEntity`)、正交四層地圖型別（`FloorStyle`、地形／物件／階梯）、投射物、拾取物（含 `ammoInMag` 與 `durability`）與 `HudSnapshot`。 |
+| `src/game/data.ts` | 陣營設定 (`FACTIONS`)、15 款角色造型 (`FACTION_CHARACTERS`)、7 張內建戰場目錄 (`MAP_CATALOG`)、`GUNS`、`MELEES`、`getWeaponSwapDuration`、`getReputationQiMultiplier` 與 `ORIGIN_RESEARCH`。 |
+| `src/game/tuning.ts` | 集中化手感與平衡常數：`PLAYER_MOVEMENT`、`GUN_AIM` + `getGunSpread` 距離緩動擴散曲線、`RELOAD_CUES`、`GUNFIRE_ANIMATION_SECONDS`、`RESPAWN_DELAY_SECONDS`、`AI_COMBAT`、`AI_PATROL`。 |
+| `src/game/maps.ts` | 網格化（`TILE = 48`）7 大戰場建構器、獨立逐格混搭地板網格 (`floorGrid`)、水域／木橋定義、可疊加地形高度網格、箱體、實牆（`elevation = 10`）、竹林、樹木、草叢與武器／彈藥／盾牌生成點。 |
+| `src/game/customMaps.ts` | 自訂戰場核心引擎：`CustomMapData` 結構、6 種平權地板選項 (`FLOOR_STYLE_OPTIONS`)、內建地圖逆向轉範本 (`arenaMapToCustomData`)、階梯「底層 `+0.5`」＋物件「底層 `+物件高`」編譯器 (`buildArenaMapFromCustom`)、多格等高驗證 (`hasUniformCellElevation`)、全圖 BFS 連通性檢驗 (`validateCustomMap`) 及 LocalStorage 讀寫。 |
+| `src/game/mapRenderer.ts` | Canvas 2D 分層繪製管線（可混搭 `floorGrid` 地板 → 依高台層級交錯繪製參道／透明邊緣水域／木橋／路軌 → 階梯 → 植被 → 依高度排序之箱體與直橫雙向火車／房屋）；另提供 `renderHelpPreview` 繪製實戰同源圖鑑與編輯器縮圖。 |
+| `src/game/geometry.ts` | 純數學運算、8 方向鎖定 (`snapToEightDirections`)、碰撞原語 (`resolveCircleRect`、`segmentCircleHit`)、敵我判定 (`areHostile`) 與角色半徑常數。 |
+| `src/game/combatRenderer.ts` | Canvas 2D 角色、拾取物、持握武器、揮砍動態、光影粒子、槍口火花、準心與純數值扣減飄字渲染。 |
+| `src/game/engine.ts` | `TwilightEngine` 核心模擬引擎：A* 尋路、純高度 2.5D 移動／視線／子彈追蹤、戰鬥與技能邏輯、全畫面閃白褪色致盲、電腦巡邏與接戰決策、拾取與波次增援、玩家重生與 HUD 快照發送。 |
+| `src/audio/sfx.ts` | Web Audio API 音效引擎 (`SoundEngine` 單例 `sfx`)：載入槍聲波表並依槍種濾波變調，搭配腳步聲材質切換、分段換彈音、集氣蜂鳴與陣亡重生音效。 |
+| `src/game/engine.test.ts` | 完整 Vitest 驗證套件：涵蓋聲望倍率、出兵隊列、裝彈與換手取消、拾取物彈匣／耐久保留、純高度物理、地圖不變量、自訂地圖編譯與 BFS 驗證、0 傷害盾牌、全技能行為、玩家與 AI 對稱性、致盲與巡邏機制。 |
+| `.github/workflows/ci.yml` | GitHub Actions 持續整合流程，驗證 TypeScript 編譯、Vitest 全數測試與 Vite 建置。 |
 
 ---
 
-## 3. Core Game Systems & Non-Obvious Invariants
+## 3. 核心遊戲系統與不可違背之設計規範 (Invariants)
 
-### A. Factions, Hostility & Independent Reputation
-- **Factions (`FactionId`)**:
-  - `'royal'` (皇家騎士團): White character nameplates; allies with other `'royal'` units; hostile to `'shadow'` & `'mercenary'`.
-  - `'shadow'` (天影十字軍): Deep purple-crimson nameplates (`#6E146B` in canvas / `#C026D3` in UI); allies with other `'shadow'` units; hostile to `'royal'` & `'mercenary'`.
-  - `'mercenary'` (第三勢力／傭兵團): Brown nameplates (`#92400E`); **free-for-all** (`areHostile` returns `true` for everyone else, including other `'mercenary'` units).
-- **Zero Faction Passives & Unified 100 HP**:
-  - Both Player and AI start with **`100` max HP (`maxHp = 100`)** across all 3 factions.
-  - Factions have **no passive stat modifiers** (no passive armor, speed bonus, damage multiplier, crit, or passive lifesteal). All tactical advantages come strictly from weapon choice and active Qi skills.
-- **10-Soldier Deployment Cap & Independent Player Lives**:
-  - Each faction deploys `10` total AI soldiers per match, capped at `2` active units on the field per faction (`deploymentQueue` refills every `0.65s`).
-  - Player's `3` personal lives are **independent** of AI `deploymentQueue`: player respawn (`2.5s`) does **not** decrement `deploymentQueue[player.faction]`. While the player is `RESPAWNING`, `1` field slot in `player.faction` stays reserved (`reservedSlot = 1`) so an ally doesn't take the player's spot before respawn.
-- **Reputation & Qi Speed**:
-  - Killing `'royal'`/`'shadow'` enemy: `+1` own faction rep, `-1` victim faction rep.
-  - Killing `'mercenary'` enemy: `+1` own faction rep, **never** deducts `'mercenary'` rep.
-  - Friendly-fire kill by player: `-1` own faction rep.
-  - Qi charge/regen multiplier (`getReputationQiMultiplier`): `0 -> 0.50×`, `10 -> 1.00×`, `100 -> 1.50×`, `1000 -> 2.00×` (`0.5 + 0.5 * log10(max(1, rep))`, clamped at `0.5` for `<= 0`).
-  - AI soldiers always operate at a fixed reputation of **`100`** (`AI_FIXED_REPUTATION = 100`, `1.50×` Qi multiplier).
+### A. 三大陣營、無被動與獨立聲望系統
+- **陣營定義 (`FactionId`)**：
+  - `'royal'`（皇家騎士團）：白藍配色名牌；與同陣營為友軍，與 `'shadow'`、`'mercenary'` 敵對。
+  - `'shadow'`（天影十字軍）：紫紅配色名牌（畫布 `#6E146B` / UI `#C026D3`）；與同陣營為友軍，與 `'royal'`、`'mercenary'` 敵對。
+  - `'mercenary'`（第三勢力／傭兵團）：琥珀褐名牌（`#92400E`）；**全場大亂鬥**（`areHostile` 對除自己以外的所有單位皆回傳 `true`，包含其他第三勢力單位）。
+- **零陣營被動與統一 `100` 血量**：
+  - 玩家與電腦全陣營初始最大血量一律為 **`100` HP（`maxHp = 100`）**。
+  - 陣營之間**不存在任何被動屬性加成**（無被動減傷、無移動加速、無被動增傷、無爆擊率或被動吸血）。所有戰術差異嚴格來自武器特性與主動集氣技能。
+- **10 兵出戰總額與獨立玩家 3 命**：
+  - 每場對戰各陣營共可部署 `10` 名 AI 士兵，場上同時活躍上限為每陣營 `2` 名（`deploymentQueue` 每 `0.65s` 補兵）。
+  - 玩家的 `3` 條個人生命與 AI `deploymentQueue` **完全獨立**：玩家陣亡重生（`2.5s`）不會消耗所屬陣營之 AI 出兵名額。玩家處於 `RESPAWNING` 狀態期間，會為所屬陣營保留 `1` 個場上名額（`reservedSlot = 1`），避免友軍 AI 搶佔玩家重生空位。
+- **聲望變動與集氣倍率**：
+  - 擊殺 `'royal'` / `'shadow'` 敵人：己方陣營 `+1` 聲望、死者陣營 `-1` 聲望。
+  - 擊殺 `'mercenary'` 敵人：己方陣營 `+1` 聲望，**永不扣除** `'mercenary'` 聲望。
+  - 玩家誤殺友軍：己方陣營 `-1` 聲望。
+  - 氣條消耗／回復倍率 (`getReputationQiMultiplier`)：`0 -> 0.50×`、`10 -> 1.00×`、`100 -> 1.50×`、`1000 -> 2.00×`（`0.5 + 0.5 * log10(max(1, rep))`，`<= 0` 時下限鎖定 `0.5×`）。
+  - 電腦 AI 士兵恆定以 **`100` 聲望**（`AI_FIXED_REPUTATION = 100`，`1.50×` 集氣倍率）運行。
 
-### B. Unified Dual-Hand Weapon Model (`[0, 1]`), Ammo & Shield Rules
-- **Shared Dual-Hand Model (`weapons: [EquippedWeapon, EquippedWeapon]`)**:
-  - Both `PlayerState` and `EnemyEntity` use identical weapon slot state: `activeHand: WeaponHand` (`0 | 1`), `weapons: [EquippedWeapon, EquippedWeapon]`, `swapTimer`, `swapDuration`, inline `ammoInMag` / `reloadTimer` on guns, inline `durability` on shields, and shared `dropWeapon` on death/swap.
-  - Fixed default weapons per hand on spawn, respawn, and `[Esc]` drop: Hand `0 -> 制式小槍 (pistol)`, Hand `1 -> 戰術小刀 (knife)`.
-  - `[Space]` replaces **only the currently active hand** with a nearby ground weapon (dropping non-default items back on the floor).
-  - `[Esc]` drops a non-default weapon in the active hand and restores that hand's default (`0 -> pistol`, `1 -> knife`).
-  - Death drops both non-default weapons on the ground for both players and AI.
-  - **Q-Cancel Combo (Player)**: Switching within `0.02s–0.34s` after an attack cancels recovery cooldown, shortens swap rub animation (`0.45×`), and empowers the next attack (`+25%` damage).
-  - **Top-Right HUD Display Rule**: Active hand is rendered lower-left/larger (`z-index` higher), off-hand is upper-right/thinner. Magazine/reserve ammo and shield durability are displayed **only beneath the active hand** (never for the off-hand).
-- **Reserve Ammo (Only Player vs AI Gun Difference)**:
-  - Player reserve ammo starts at `30` (max `45`, refilled by ground ammo pads).
-  - **AI reserve ammo is infinite**: when an AI gun hits `0` in mag, it enters normal `def.reloadTime` and refills to full `def.magSize` from infinite reserve.
-- **Semi-Auto Pistol & Rifle Continuous Shrink**:
-  - **Pistol (`pistol`)**: Strictly **semi-automatic** (`fireRate: 2.4`, `0.417s` gap — no hold-to-autofire for player and paced interval for AI, significantly slower than `rifle`'s `8.5`/s). `shotgun` and `sniper` are also semi-automatic; only `rifle` auto-fires while holding left-click.
-  - **Assault Rifle (`rifle`)**: Shares Pistol's distance curve (`{ near: 0.35, far: 1.75 }`) with rested crosshair strictly **`1.1×` Pistol** (`baseCrosshair: 12.1` vs `11`). Crosshair **continuously shrinks** every frame (`bloomRecovery: 20`) regardless of tiny movement, while firing (`bloomPerShot: 14`) or wide/fast cursor sweeps (`Math.min(18, Math.max(0, moveDist - 2) * 0.09)`) expand faster than recovery up to `maxCrosshair: 70`.
-- **Tactical Ballistic Shield (`meleeKind: 'shield'`)**:
-  - Classified strictly as a **Weapon / Equipment** (never as a Terrain or Object entry in Help or map geometry). Ground pickup is `kind: 'melee'` (`meleeDef.kind === 'shield'`), carrying preserved `durability` (`1–100`).
-  - Blocks **only frontal incoming attacks** (`|angleDiff(defender.angle, incomingAngle)| <= Math.PI * 0.38`) while **actively held in hand**:
-    - Bullets/ranged: absorbed `1:1` by durability (`-XX` floating deduction, no text prefix).
-    - Melee: incoming damage halved (`0.5×`), blocked portion deducted from durability (`-XX` floating deduction, no text prefix).
-  - **Zero Damage (Push-Only)**: Left-click shield bash knocks back + stuns targets while dealing strictly **`0` HP damage** (even `0`-dmg hits never trigger minimum HP clamps or consume enemy shield durability).
-  - Durability `0` shatters the shield and reverts the hand to `knife`.
+### B. 統一雙手武器模型 (`[0, 1]`)、彈匣保留與換手規則
+- **共用雙手架構 (`weapons: [EquippedWeapon, EquippedWeapon]`)**：
+  - `PlayerState` 與 `EnemyEntity` 使用完全相同的雙手插槽狀態：`activeHand: WeaponHand` (`0 | 1`)、`weapons` 陣列、`swapTimer` / `swapDuration`、內嵌於槍械的 `ammoInMag` 與 `reloadTimer`、內嵌於盾牌的 `durability`，以及共用的 `dropWeapon` 掉落邏輯。
+  - 出生、重生與 `[Esc]` 棄械後各手預設固定武器：**手位 `0 -> 制式小槍 (pistol)`、手位 `1 -> 戰術小刀 (knife)`**。
+  - `[Space]` 僅替換**當前持握主手**並將原本手持之非預設武器掉回地面（包含保留剩餘數值）。
+  - `[Esc]` 丟棄當前持握的非預設武器並將該手位恢復為預設武器（`0 -> pistol`、`1 -> knife`）。
+  - 玩家與 AI 陣亡時，皆會將身上兩把非預設武器掉落至戰場地面。
+  - **彈匣與耐久持久化不變量（嚴格遵守）**：
+    - 盾牌放下、陣亡掉落後再被**任何玩家或 AI**拾起，必須精確保留其原本 **`durability`（1–100）**。
+    - 槍械放下、陣亡掉落後再被**任何玩家或 AI**拾起，同樣必須精確保留其原本 **`ammoInMag`（剩餘彈匣子彈數）**，絕不因換人拾取而免費回滿。
+  - **單手裝彈與換手立即取消（Bug 防護不變量）**：
+    - 裝彈計時（`reloadTimer`）**只允許在當前手持該槍械時推進**（玩家 `updateReloads` 與 AI `updateEnemies` 皆僅檢查 `weapons[activeHand]`）。
+    - **玩家（`switchWeapon`）與電腦（`switchEnemyHand`）一旦換手，必須立刻將前一手槍械的 `reloadTimer` 歸零取消**，絕不可於副手在背景自動裝彈或換手後突然滿彈。
+  - **Q 取消硬直連攜（玩家）**：攻擊後 `0.02s–0.34s` 內換手可取消收招硬直、將切槍搓手時間縮短至 `0.45×`，並賦予下一擊 `+25%` 傷害增幅。
+  - **右上角 HUD 顯示規則**：主手卡片較大且置於左下前景，副手較細且置於右上背景；**僅在當前持握主手下方顯示彈匣／備彈或盾牌耐久數值**（副手下方不顯示）。
+- **備用彈藥（玩家與 AI 唯一差異點）**：
+  - 玩家初始備彈 `30` 發（上限 `45` 發，需拾取地圖彈藥箱補充）。
+  - **電腦備用彈藥無限**：當 AI 槍枝於手持裝彈完成時從無限備彈補滿該槍 `magSize`。
+- **半自動小槍與步槍動態準心**：
+  - **制式小槍 (`pistol`)**：嚴格**半自動單發**（`fireRate: 2.4`，約 `0.417s` 間隔），玩家按住左鍵不會連發，AI 亦依此節奏射擊，射擊間隔明顯長於步槍（`8.5`/s）。`shotgun` 與 `sniper` 亦為半自動，僅 `rifle` 支援按住連續射擊。
+  - **突擊步槍 (`rifle`)**：與小槍共用距離曲線（`{ near: 0.35, far: 1.75 }`），最細靜止準心嚴格為小槍的 **`1.1×`**（`baseCrosshair: 12.1` vs `11`）。準心每幀**持續收縮**（`bloomRecovery: 20`），僅在連發射擊（`bloomPerShot: 14`）或大幅快速甩動游標（`Math.min(18, Math.max(0, moveDist - 2) * 0.09)`）時擴張速度大於收縮速度，上限 `maxCrosshair: 70`。
+- **戰術防彈盾 (`meleeKind: 'shield'`)**：
+  - 嚴格歸類為**近戰裝備／武器**（絕不歸類於地圖地形或物件）。
+  - 僅於**正面持握時**格擋來自前方的攻擊（`|angleDiff(defender.angle, incomingAngle)| <= Math.PI * 0.38`），側面與背面攻擊穿透直接扣血：
+    - 子彈／遠程傷害：`1:1` 由盾牌耐久吸收（飄字僅顯示直接扣減數字 `-XX`，不加「盾擋」等字眼）。
+    - 近戰攻擊：實傷減半（`0.5×`），格擋掉的傷害扣除盾牌耐久（飄字僅顯示 `-XX`）。
+  - **零傷害推人**：持盾左鍵揮擊僅造成擊退與短暫暈眩，**嚴格造成 `0` 點 HP 傷害**（且不觸發任何最低傷害保護或扣減敵方盾牌耐久）。
+  - 盾牌耐久歸 `0` 時碎裂並自動將該手回復為 `knife`。
 
-### C. Melee Qi Charging & 9+3 Skills (Player & AI Aligned)
-- **Unified Qi Bar (`100 -> 0`)**:
-  - Holding Left-Click / AI close-range melee charge drains `qi` from `100` to `0` at `115 * repMult` without slowing movement speed; regenerates at `24 * repMult`. Cast cooldown is `0.25s`, and timed skill durations/damage are identical for Player and AI.
-  - **Shield (`shield`) — All Factions**: `護盾修復` restores held shield durability to `100` and emits a shockwave that knocks back & stuns nearby enemies with strictly **`0` HP damage**.
-  - **Royal (`royal`)**:
-    - `knife`: `聖光護盾` (`6.5s` ranged immunity, `-20%` melee damage taken; **breaks immediately if holder fires a gun**).
-    - `claw`: `閃光瞬移` (teleports safely near nearest enemy + `0.5–1.0s` flash blind; **when cast by hostile Royal AI, blinds the Player** via `blindTimer`/`blindDuration` rendered as a full-screen sudden white flash that fades smoothly back to transparent).
-    - `greatsword`: `聖光彈齊射` (5 yellow piercing orbs, `30` dmg; **does friendly fire** `noFriendlyFire: false`).
-  - **Shadow (`shadow`)**:
-    - `knife`: `鷹眼術` (`8.0s`, narrows gun spread `0.45×`; on Player, shifts camera ahead toward cursor without zooming out).
-    - `claw`: `影分身` (`6.5s`, renders twin flanking afterimages, `2/3` ranged MISS; **immediately broken when hit by melee**).
-    - `greatsword`: `黑龍波` (fires exclusively along the **8 cardinal/diagonal directions** `snapToEightDirections`; deep purple-indigo segmented dragon; head `20` dmg, body `15` dmg; bounces off walls/high cliffs/trees up to `5` bounces / `1050px` with equal **`1/3` probability of `+45°`, `0°`, or `-45°`** post-reflection rotation to prevent infinite same-path ping-ponging; `noFriendlyFire: true`).
-  - **Mercenary (`mercenary`)**:
-    - `knife`: `吸血術` (`7.5s` strictly; heals `50%` melee / `33%` ranged dmg dealt).
-    - `claw`: `縮小化` (`7.5s`, `0.62×` scale, `+35%` melee damage taken).
-    - `greatsword`: `巨人化` (`7.5s`, `1.32×` scale, `+30%` melee damage, `-10%` damage taken).
+### C. 近戰集氣與 9+3 技能（玩家與 AI 完全對齊）
+- **統一氣條 (`100 -> 0`)**：
+  - 集氣期間以 `115 * repMult` 消耗氣條至 `0` 觸發技能，**集氣期間不減緩移動速度**；非集氣期間以 `24 * repMult` 回氣。施放冷卻 `0.25s`，技能效果與數值在玩家與 AI 之間完全對齊。
+  - **戰術盾牌 (`shield`) — 全陣營通用**：`護盾修復` — 將手持盾牌耐久回滿至 `100` 並放出衝擊波擊退暈眩周圍敵人（嚴格 `0` 傷害）。
+  - **皇家騎士團 (`royal`)**：
+    - `knife`：**聖光護盾**（`6.5s` 免疫遠程彈藥、近戰減傷 `20%`；**持盾者一旦開槍立即破盾**）。
+    - `claw`：**閃光瞬移**（瞬移至最近敵人附近並致盲周圍 `0.5–1.0s`；**敵對皇家 AI 施放時會致盲玩家**，玩家畫面呈現瞬間全白閃光並平滑褪色回透明顯示原地圖）。
+    - `greatsword`：**聖光彈齊射**（扇形 5 顆穿透金光彈，每顆 `30` 傷害；**具友軍誤傷** `noFriendlyFire: false`）。
+  - **天影十字軍 (`shadow`)**：
+    - `knife`：**鷹眼術**（`8.0s`，槍械散射縮至 `0.45×`；玩家視角依游標方向往前景平移，不縮放鏡頭倍率）。
+    - `claw`：**影分身**（`6.5s`，角色左右繪製殘影，`2/3` 機率迴避遠程攻擊；**遭近戰擊中立即破除**）。
+    - `greatsword`：**黑龍波**（嚴格限定**前後左右與四斜角共 8 個方向** `snapToEightDirections`；深紫靛藍分段龍身，龍頭 `20` 傷／龍身 `15` 傷；撞牆、高崖或樹木最多反彈 `5` 次／總程 `1050px`，每次反彈以**均等 `1/3` 機率採 `+45°`、`0°`（原角反射）或 `-45°`** 偏轉，避免陷入同路徑死循環；`noFriendlyFire: true`）。
+  - **第三勢力 (`mercenary`)**：
+    - `knife`：**吸血術**（固定 `7.5s`；近戰傷害 `50%`／遠程傷害 `33%` 轉為自身治療）。
+    - `claw`：**縮小化**（固定 `7.5s`，體型 `0.62×`，承受近戰傷害 `+35%`）。
+    - `greatsword`：**巨人化**（固定 `7.5s`，體型 `1.32×`，近戰傷害 `+30%`，全傷害減免 `10%`）。
 
-### D. 2.5D Grid Elevation, Floor/Object Layering, Help Debug Booklet & Clean Combat Visuals
-- **Tile Size**: `TILE = 48px`, character base diameter = `1 * TILE` (`radius = 24px`).
-- **Elevation Levels & Height `10` Solids**:
-  - Floor terrain: `0.0` (ground / grass / water), stackable `hill` & cut-stone platforms (`每層 +1.0`: `1.0`, `2.0`, `3.0`), and matching `0.5 / 1.5 / 2.5` stairs.
-  - **Standard Solid Height = `10`**: All solid walls (`stone_wall_*`, `shrine_wall`), marble pillars, houses, `bamboo` walls, and **`1×1` trees (`map.trees`)** share **`elevation = 10`** (`isWall = true`), blocking movement, bullets, Black Dragon Wave, and line of sight.
-- **Floor Layer vs. Object Layer (Transparent Grounding & Help Debug Booklet)**:
-  - **地形 (`TERRAIN_GUIDE_ITEMS`)**: `一般平地` (`0.0`), `青綠草坪平地` (`0.0`), `河道與泥岸` (`0.0`, non-walkable), stackable `土丘高地` (`每層 +1.0`) + `土坡階梯` (`0.5 / 1.5`), stackable `切石高台` (`每層 +1.0`) + `切石石階` (`0.5 / 1.5 / 2.5`).
-  - **物件 (`OBJECT_GUIDE_ITEMS`)**: `跨河木橋` (`0.0`), `鐵道路軌` (`0.0`), `木條階梯踏台` (`0.5`), `小木箱` (`1.0`), `大木箱` (`1.5`), `貨櫃` (`2.0`), `火車車廂` (`2.0`), `石砌實牆` (`10`), `江戶杉木板塀` (`10`), `聖殿雕紋石柱` (`10`), `斜頂磚石房屋` (`10`), `竹林實牆` (`10`), `野生灌木草叢` (`0.0`), `林間樹木` (`10`).
-  - **Numeric Height Rule**: Help height badges MUST always carry numeric values (`0.0`, `每層 +1.0`, `0.5 / 1.5`, `10`, etc.)—never non-numeric labels like `"通行無阻"` or `"水阻"`.
-  - Objects with transparent gaps (e.g., `bamboo` on `hill`/`grass_ground`) never cast opaque rectangular tile shadows, revealing underlying floor textures cleanly.
-- **Zero Terrain Combat Buffs & Zero Bush Vision Shrinkage**:
-  - Terrain grants **zero combat stat buffs** (no `+15%` high-ground damage, no extra defense, no speed modifier) and **zero sight radius reduction** (bushes do NOT shrink enemy or player LoS).
-- **Clean Combat UI Visuals**:
-  - AI character nameplates render **only `e.name`** (never `[警覺]`, `[裝彈]`, `[致盲]`, etc.). When an AI freshly gains LoS to a hostile, it pops a floating yellow **`"!"`** (`#FACC15`).
-  - Player death drops weapons and disappears without drawing any dark oval / "black hole" corpse marker.
-- **Movement & Collision (`moveCharacterWithElevation`)**:
-  - Characters can step across `|Δh| <= 0.5`.
-  - `ELEV_PADDING = 0.1 * TILE` prevents snagging; 1-tile tunnels use automatic center-alignment nudging.
-  - `countElevationViolations` checks 8 perimeter samples + walls + `1×1` solid trees.
-- **Map Design Constraints**:
-  1. All walls, water, terrain cells, crates, bamboo, and trees sit cleanly on the grid (large houses are the only multi-tile buildings).
-  2. **Stair Rule**: Never place `0.5` and `1.5` hill/terrain stairs adjacent to each other; prefer `1×1` single-tile stairs matching the terrain style.
-  3. **Map Catalog (7 Maps)**: `tokyo_shrine` (`grass_ground` perimeter + central dirt courtyard & shrine dais, `1×1` wood walls, no crates, 2 hills), `european_castle` (marble dais & pillars), `desert_ruins` (3-tier pyramid, tile river + 2 bridges, northeast `stone_wall_tan` wall + `(25,4)` `1×1 small_crate`, `(16,14)` big crate), `industrial_warehouse` (`2.0` shipping containers & crate stairs), `western_railway` (rail tracks, stationary train, L/U walls with `small_crate` firing slits, 2-room outpost), `bamboo_fortress` (outer & central continuous `gy=6..23` connected hills, no water/crates, 4 distinct 3-stalk bamboo tile styles spanning valleys & hills), `stanley_island` (`34×44` vertical organic outer-ring island + inner lake + islet + south channel + 2 bridges, no crates).
-  4. **Same-Faction Spawns**: Non-mercenary faction spawns (`royal`, `shadow`) must be grouped near each other (`<= 3.5` tiles in test assertions) and all key map pickups/spawns must be mutually reachable via `findPathAStar`.
-- **Line of Sight vs Bullet Tracing**:
-  - `hasLineOfSight`: `8` tiles base (`9.5` tiles for sniper / Eagle Eye); blocked by walls, `1×1` trees, or points `> max(aElev, bElev) + 1.0`.
-  - `traceBulletSegment`: Shots cannot hit targets `>= 2.0` elevation above shooter (`canRangedHitTarget`). `1.5`-tile big crates penetrate `0.49 * TILE` inward before stopping; `>= 2.0` walls/containers/trees stop immediately at the edge. All 4 guns span the full map (`Math.hypot(width, height) + TILE * 2`) and stop on first character hit.
+### D. 純高度物理總則、地板／物件分層與相對 `+0.5` 階梯系統
+- **網格基準**：單格大小 `TILE = 48px`，角色基礎直徑等於 `1 * TILE`（半徑 `24px`）。
+- **純高度統一物理法則（已廢除獨立「擋子彈／擋視野」屬性）**：
+  - 地圖障礙與地形**不存在** `blocksBullets` 或額外的「擋視野／擋子彈」布林開關；移動、視線與子彈遮擋全部統一由數值高度 `h` 推導：
+    1. **步行規則**：相鄰腳下高度差 `|Δh| ≤ 0.5` 方可通行；搭配 `ELEV_PADDING = 0.1 * TILE` 防卡邊與 1 格通道自動置中微調。
+    2. **視線規則 (`hasLineOfSight`)**：基礎視距 `8` 格（狙擊手／鷹眼術為 `9.5` 格）；射線上若出現高度 `h > max(觀察者高度, 目標高度) + 1.0` 之格子或物件則遮蔽視線。
+    3. **子彈規則 (`traceBulletSegment`)**：令高度差 `Δh = 障礙物高度 - 射擊者高度`：
+       - `Δh ≤ 1.0`：子彈可從上方越過（含平地打 `1.0` 小木箱或高台對射）。
+       - `1.0 < Δh < 2.0`（例如平地射向 `1.5` 大木箱）：子彈深入約半格（`0.49 * TILE`）後受阻停止。
+       - `Δh ≥ 2.0`（例如貨櫃 `2.0`、車廂 `2.0`、高崖或高度 `10` 實牆／房屋／竹林／樹木）：無法打高處目標，且子彈於邊緣立即阻斷。
+- **物件高度疊加與多格底層等高不變量（極關鍵）**：
+  - **疊加於地形之上**：任何物件皆可放置於任意地形高台之上，最終高度等於「**所在地形高度 ＋ 物件自身高度**」（例：`+1.0` 土丘上的 `+1.0` 小木箱 = `2.0` 總高；`+1.0` 高台上的 `+1.5` 大木箱 = `2.5`；`+1.0` 高台上的 `+2.0` 貨櫃/火車 = `3.0`）。`engine.ts` 的 `getHeightAtPoint` 亦讀取該格實際 `tileGrid[gy][gx].elev` 作為箱體下方的 `terrainHeight`，確保站在高台上射越物件與平地仰射物件之物理完全正確。
+  - **跨多格 (`> 1×1`) 底層等高原則**：任何寬度或高度大於 1 格的物件（`2×2` 大木箱、`4×2`/`2×4` 貨櫃與火車、`3×2`/`2×3` 房屋、跨格木橋），所覆蓋的每一個格位底層地形高度**必須完全一致**，禁止一半壓在 `1.0` 土丘、一半懸空在 `0.0` 平地。`MapEditorView`（即時紅色預覽拒絕）與 `validateCustomMap` 雙重把關。
+- **階梯相對高度不變量（`所在底層 +0.5`）**：
+  - 所有地形階梯與木條階梯之高度**永遠動態計算為「所在底層高度 `+0.5`」**（`baseElev + 0.5`），而非寫死為 `0.5 / 1.5 / 2.5`，支援任意多層高度疊加（`mapRenderer.ts` 動態依各層級渲染所有 `elev >= 1.0` 高台並交錯繪製該層水面／參道／橋樑／路軌）。
+  - 設計規範：相鄰格子切勿並排放置互不平順之階梯（如 `0.5` 與 `1.5` 緊鄰橫堵通道），優先採用 `1×1` 單格階梯順接高低層。
+- **所有實心掩體與植物統一高度 `10`**：
+  - 實牆（`stone_wall_*`、`shrine_wall`）、聖殿石柱、磚石房屋、竹林牆 (`bamboo`) 與 **`1×1` 林間樹木 (`map.trees`)** 統一為 **`elevation >= 10`**（`isWall = true`），阻擋行走、子彈、黑龍波與視線。
+- **正交三層地圖分類與 Help Debug 手冊規範**：
+  - **一、地板 (`FLOOR_GUIDE_ITEMS` / `floorGrid`)**：廢除「一般地板」，將 **6 種 `0.0` 地坪（江戶泥土、嵐山苔土、荒野沙海、聖殿石磚、東港鋼板、青綠草坪）**完全平權化，支援單格或矩形自由混搭，與地形高台、水域及物件正交獨立。
+  - **二、地形 (`TERRAIN_GUIDE_ITEMS`)**：專司純高度層變化，包含可疊加 `土丘高地` (`每層 +1.0`) ＋ `土坡階梯` (`所在層 +0.5`)、可疊加 `切石高台` (`每層 +1.0`) ＋ `切石石階` (`所在層 +0.5`)、`木板神社高台` (`每層 +1.0`)。升降地形不會抹除底層地板花紋。
+  - **三、物件 (`OBJECT_GUIDE_ITEMS`)**：涵蓋 **`水域河道`**（邊緣透明不覆蓋底層地板色，亦不吃掉下方 `1.0` 土丘高度）、`跨河木橋`、`石板參道`、`鐵道路軌`（水平/垂直/自動轉角分叉）、`木條階梯踏台` (`+0.5`)、`小木箱` (`+1.0`)、`大木箱` (`+1.5`)、`貨櫃` (`+2.0`)、`火車頭/車廂` (`+2.0`，橫向 `4×2` 與直向 `2×4` 皆具備完整車輪/煤水駕駛室/煙囪/排障器繪製)、`石砌實牆` (`10`)、`江戶杉木板塀` (`10`)、`聖殿雕紋石柱` (`10`)、`斜頂磚石房屋` (`10`)、`竹林實牆` (`10`)、`野生灌木草叢` (`+0.0`)、`林間樹木` (`10`)。
+  - **純數值高度標籤規定**：Help 與編輯器高度徽章必須標示具體數字，禁止使用「通行無阻」、「水阻」等非數字詞彙；放置補給／盾牌點時亦不得出現 `(+30發)`、`(100耐久)` 等數值說明文字。
+  - **物件透明度原則**：河道岸邊與物件層（竹林、參道等）帶透明處必須完整透出底層地板或高台邊緣紋理。
+- **地形零加成與潔淨戰場呈現**：
+  - 地形**不提供任何戰鬥數值加成**（無高地 `+15%` 增傷、無額外防禦或減速），草叢亦**不縮減視野半徑**。
+  - AI 頭頂僅顯示純粹名字（`e.name`，絕無 `[警覺]`、`[裝彈]` 等後綴），僅在剛發現敵對目標建立視線時於頭頂彈出黃色 **`"!"`**（`#FACC15`）。
+  - 玩家死亡時掉落武器並直接消失，不留任何黑色橢圓／「黑洞」屍體標記。
+- **內建 7 張戰場與出生點規則**：
+  - `tokyo_shrine`（江戶古社）、`european_castle`（歐式城堡）、`desert_ruins`（古埃及遺跡）、`industrial_warehouse`（工業倉庫）、`western_railway`（西部鐵道）、`bamboo_fortress`（嵐山竹林）、`stanley_island`（赤柱雙環島）。
+  - 非第三勢力（`royal`、`shadow`）的同陣營出生點必須彼此相鄰群聚（測試斷言 `<= 3.5` 格），且關鍵出生點與補給點必須通過 A*／BFS 相互可達。
+
+### E. 自訂地圖創作器 (`創建地圖`) 架構與地圖設計核心原則
+- **入口與互動方式**：
+  - 主頁（`PortalView`）左下角點擊「創建地圖」進入 `MapEditorView`，預設為**完全空白畫布**，上方可**自由輸入寬 × 高格數 (`12..60`)**。
+  - **按住拖曳矩形佈置與清除**：左鍵／右鍵按住並拖曳可實時預覽並以矩形一次佈置或清除範圍。
+  - **真實物件即時預覽 (WYSIWYG)**：滑鼠懸停或拉框期間直接於畫布上渲染實際物件與高台疊層預覽；若多格物件跨及高低不平格位，立即轉為紅色警告框並提示「底層高度不一致」。
+- **右側 Sidebar 四大分頁（全具象真實預覽）**：
+  1. **地板**：6 種平權 `0.0` 地板筆刷單格／矩形混搭，另提供「鋪滿全圖」快捷鍵，完全獨立不影響地形與物件。
+  2. **地形**：土丘、切石、木板高台自動依格底 `+1.0` 疊加，搭配 `R` 鍵四向旋轉階梯與橡皮擦（嚴禁分裂既有跨格物件底層）。
+  3. **物件**：含**水域河道**（保留底層地板與高台）、木橋、參道、路軌、各類可疊加箱體、橫直向火車／貨櫃、房屋、竹林、實牆與樹叢。
+  4. **出生物資**：三大陣營出生點與清除工具；下方**「地圖武器點」**按鈕群統一納入 5 把進階武器、**防彈盾牌**與**彈藥箱**（純淨名稱＋分類，無數值括號字串）。
+- **儲存強制連線門檻**：
+  - **無論「儲存」或「儲存並出戰」**，皆嚴格要求三大陣營至少各 1 個可站立出生點、多格物件底層等高，且必須通過全圖 BFS 連通性驗證（`validation.valid === true`）方可存檔。
+
+- **地圖系統五大原則性核心思路（架構決策指導）**：
+  1. **嚴守「地板 (`floorGrid`) × 地形 (`tileGrid`) × 物件 (`obstacles/water/roads/rails`)」三層正交**：地板只管質感混搭、地形只管高度與階梯、水域作為透明覆蓋物件不吃地板也不毀高台，徹底杜絕屬性互相覆蓋。
+  2. **物件疊加地形高度 + 多格底層等高不變量**：所有物件皆以 `底層地形 + 物件高` 計算總高度；凡 `> 1×1` 跨格物件強制底層格高一致，杜絕半截浮空或穿模的物理矛盾。
+  3. **以單一數值高度 `h` 與相對推導取代特例屬性**：全系統不設「擋視野／擋子彈」或寫死階梯高度特例，統一由相對高度差 `Δh` 決定移動、視線與子彈遮擋。
+  4. **鄰接自適應拼合與全向 `R` 旋轉**：鐵軌（雙排、90° 彎道、T／十字分叉）、水岸、高台邊緣與直橫火車／房屋／竹林依拓撲與旋轉方向無縫繪製。
+  5. **所見即所得與可玩性寫入守門員**：編輯當下即顯示紅框／合法預覽與疊加總高度標記，儲存前強制通過三方 BFS 連通與等高驗收。
 
 ---
 
-## 4. Continuous Architecture & Gameplay Audit Directive
+## 4. 持續架構與玩法合理性審視守則
 
-Agents working on this repository **must continuously audit both architectural consistency and gameplay rationality** across every change:
-1. **Enforce Player / AI Symmetry First**: Never introduce parallel state machines, duplicate lookup tables, or legacy single-purpose fields for AI vs. Player unless intentionally specified (currently only Player reserve ammo cap vs. AI infinite reserve ammo, and AI fixed `100` reputation). Prefer shared data structures (`EquippedWeapon`), shared helpers, and shared combat/duration constants.
-2. **Eliminate Dead Code & Enforce Clean Domain Taxonomy**: Remove unused type fields, stale UI props, or dead config properties immediately when mechanics change. Audit category boundaries carefully (e.g., Terrain vs. Object classification—stackable terrain `+1.0/tier` + matching stairs in Terrain; `bridge`/`rail_track`/`crate`/`wall`/`tree` in Objects; equippable gear like `shield` strictly in Weapons; numeric-only height badges), and proactively confirm edge boundaries with the user.
-3. **Scrutinize Gameplay & Fairness Edge Cases**: Actively check timed-buff expiration, friendly-fire rules, zero-damage shove preservation, line-of-sight/elevation occlusion, zero hidden terrain buffs or sight penalties, shield durability conservation, spawn/respawn side-effects on queue counts, and weapon balance/feel (e.g., crosshair baseline, continuous shrink, semi-auto pistol cadence, swap speed, bounce variety, stair reachability). Whenever you spot architectural drift, undocumented asymmetry, or questionable gameplay behavior, surface it clearly for the user to decide.
+所有在本專案開發之 Agent，每次修改都**必須主動審視架構一致性與玩法合理性**：
+1. **貫徹玩家與 AI 邏輯對稱**：除非需求明確指定差異（目前僅玩家備彈上限 `45` vs. AI 無限備彈，以及 AI 固定 `100` 聲望），否則一律共用相同資料結構（`EquippedWeapon`）、相同換彈／換手／技能規則與相同平衡常數，禁止另建平行狀態機或殘留專用欄位。
+2. **清除 Dead Code 與維護清晰分類邊界**：規則調整後立即清理過時欄位與無效屬性（例如已移除 `blocksBullets`、`PlayerState` 無用欄位與地形數值 Buff）；嚴守「地形（含多層高台與對應 `+0.5` 階梯）／物件（涵蓋橋樑、參道、路軌、箱體、實牆、植物）／裝備武器（盾牌等）」三大分類邊界。若發現分類或邊界模糊之處，主動向使用者確認定奪。
+3. **主動檢驗極端邊界與遊戲手感**：每次改動皆須核對限時增益到期、友軍誤傷、盾牌 0 傷害純推人與耐久保留、槍械彈匣保留與換手即取消裝彈、純高度視線／子彈遮擋、動態 `+0.5` 階梯連通、準心連續收縮、半自動小槍射速節奏、地圖編輯器矩形佈置／透明水岸／路軌轉角／三方 BFS 驗證，以及 AI 行為合理性；發現任何潛在矛盾或體驗疑慮，務必直接提出討論。
 
 ---
 
-## 5. Verification Checklist (Always Run After Code Changes)
+## 5. 驗證檢查清單（每次改動後必跑）
 
-1. `npm test -- --run` — Must pass all `64+` tests in `src/game/engine.test.ts` (add/update assertions whenever modifying map geometry, weapons, AI parity, skills, or respawn/HP rules).
-2. `npm run lint` — Must exit `0` (`tsc --noEmit`).
-3. `npm run build` — Must build cleanly with zero errors.
-4. Confirm dev server on port `3000` serves HTTP 200 without console/runtime errors.
-
+1. `npm test -- --run` — 必須通過 `src/game/engine.test.ts` 全部單元與整合測試（修改地形、武器、技能、AI 或地圖架構時須同步更新與補充測試）。
+2. `npm run lint` — 必須退出碼 `0`（`tsc --noEmit` 零型別錯誤）。
+3. `npm run build` — Vite 正式建置零錯誤通過。
+4. 確認 Port `3000` 開發伺服器回傳 HTTP 200 且畫面無執行期錯誤。

@@ -1,5 +1,36 @@
-import { ArenaMap, TILE } from './maps';
-import { Obstacle, PlatformStyle } from './types';
+import { ArenaMap, TILE, biomeToDefaultFloor, createFloorGrid } from './maps';
+import { FloorStyle, Obstacle, PlatformStyle } from './types';
+
+function drawFloorStyleTile(
+  ctx: CanvasRenderingContext2D,
+  tx: number,
+  ty: number,
+  gx: number,
+  gy: number,
+  floorStyle: FloorStyle
+) {
+  switch (floorStyle) {
+    case 'grass_ground':
+      drawGrassGroundTile(ctx, tx, ty, gx, gy);
+      return;
+    case 'bamboo_moss':
+      drawUniformTileMotif(ctx, tx, ty, '#33663D', BIOME_SPECKS.bamboo_outdoor);
+      return;
+    case 'desert_sand':
+      drawUniformTileMotif(ctx, tx, ty, '#C99864', BIOME_SPECKS.desert_outdoor);
+      return;
+    case 'castle_stone':
+      drawUniformTileMotif(ctx, tx, ty, '#A7B1BD', BIOME_SPECKS.castle_indoor);
+      return;
+    case 'warehouse_steel':
+      drawUniformTileMotif(ctx, tx, ty, '#445061', BIOME_SPECKS.warehouse_indoor);
+      return;
+    case 'shrine_dirt':
+    default:
+      drawUniformTileMotif(ctx, tx, ty, '#BD8F5D', BIOME_SPECKS.shrine_outdoor);
+      return;
+  }
+}
 
 export interface BiomePalette {
   a: string;
@@ -221,76 +252,244 @@ function drawGrassGroundTile(ctx: CanvasRenderingContext2D, tx: number, ty: numb
 }
 
 /**
- * 1×1 鐵道路軌地磚（碎石道碴＋枕木＋雙鋼軌，支援 2 格寬標準鐵道拼合）
+ * 1×1 鐵道路軌物件（支援水平、垂直、雙排並軌、90° 轉角與 T 形／十字分叉）
  */
-function drawRailTrackTile(
+function drawRailTrackObjectTile(
   ctx: CanvasRenderingContext2D,
   tx: number,
   ty: number,
   gx: number,
-  hasTrackNorth: boolean,
-  hasTrackSouth: boolean
+  gy: number,
+  selfAxis: 'horizontal' | 'vertical',
+  nAxis: 'horizontal' | 'vertical' | null,
+  sAxis: 'horizontal' | 'vertical' | null,
+  wAxis: 'horizontal' | 'vertical' | null,
+  eAxis: 'horizontal' | 'vertical' | null
 ) {
-  // 道碴碎石床
-  ctx.fillStyle = '#6B6257';
-  ctx.fillRect(tx, ty, TILE, TILE);
-  ctx.fillStyle = '#524A40';
-  ctx.fillRect(tx + ((gx * 13) % 14) + 3, ty + 6, 5, 3);
-  ctx.fillRect(tx + ((gx * 19) % 16) + 18, ty + 22, 6, 3);
-  ctx.fillStyle = '#8A7F72';
-  ctx.fillRect(tx + ((gx * 7) % 12) + 8, ty + 35, 4, 3);
-
-  // 外側路基護緣
-  if (!hasTrackNorth) {
-    ctx.fillStyle = '#443C33';
-    ctx.fillRect(tx, ty, TILE, 4);
-  }
-  if (!hasTrackSouth) {
-    ctx.fillStyle = '#443C33';
-    ctx.fillRect(tx, ty + TILE - 4, TILE, 4);
-  }
-
-  // 深棕木質枕木（每格 3 根枕木，跨兩行時無縫銜接）
-  const tieTop = hasTrackNorth ? ty : ty + 7;
-  const tieBottom = hasTrackSouth ? ty + TILE : ty + TILE - 7;
-  for (let ox = 4; ox < TILE; ox += 16) {
-    ctx.fillStyle = '#29170A';
-    ctx.fillRect(tx + ox + 1, tieTop, 9, tieBottom - tieTop);
-    ctx.fillStyle = '#5C381B';
-    ctx.fillRect(tx + ox, tieTop, 8, tieBottom - tieTop);
-  }
-
-  // 雙條光澤鋼軌
-  const drawSteelRail = (ry: number) => {
+  const drawSteelH = (yPos: number) => {
     ctx.fillStyle = '#1E293B';
-    ctx.fillRect(tx, ry - 1, TILE, 6);
+    ctx.fillRect(tx, yPos - 1, TILE, 6);
     ctx.fillStyle = '#94A3B8';
-    ctx.fillRect(tx, ry, TILE, 4);
+    ctx.fillRect(tx, yPos, TILE, 4);
     ctx.fillStyle = '#E2E8F0';
-    ctx.fillRect(tx, ry + 0.5, TILE, 1.5);
+    ctx.fillRect(tx, yPos + 0.5, TILE, 1.5);
+  };
+  const drawSteelV = (xPos: number) => {
+    ctx.fillStyle = '#1E293B';
+    ctx.fillRect(xPos - 1, ty, 6, TILE);
+    ctx.fillStyle = '#94A3B8';
+    ctx.fillRect(xPos, ty, 4, TILE);
+    ctx.fillStyle = '#E2E8F0';
+    ctx.fillRect(xPos + 0.5, ty, 1.5, TILE);
   };
 
-  if (!hasTrackNorth && hasTrackSouth) {
-    drawSteelRail(ty + 14);
-  } else if (hasTrackNorth && !hasTrackSouth) {
-    drawSteelRail(ty + TILE - 18);
-  } else if (!hasTrackNorth && !hasTrackSouth) {
-    drawSteelRail(ty + 11);
-    drawSteelRail(ty + TILE - 15);
+  // 1. 平行雙排水平鐵道（例如西部鐵道 2 格寬雙軌帶）
+  if (
+    selfAxis === 'horizontal' &&
+    (nAxis === 'horizontal' || sAxis === 'horizontal') &&
+    nAxis !== 'vertical' &&
+    sAxis !== 'vertical'
+  ) {
+    const hasNorth = nAxis === 'horizontal';
+    const hasSouth = sAxis === 'horizontal';
+    ctx.fillStyle = '#6B6257';
+    ctx.fillRect(tx, ty, TILE, TILE);
+    ctx.fillStyle = '#524A40';
+    ctx.fillRect(tx + ((gx * 13) % 14) + 3, ty + 6, 5, 3);
+    ctx.fillRect(tx + ((gx * 19) % 16) + 18, ty + 22, 6, 3);
+    if (!hasNorth) {
+      ctx.fillStyle = '#443C33';
+      ctx.fillRect(tx, ty, TILE, 4);
+    }
+    if (!hasSouth) {
+      ctx.fillStyle = '#443C33';
+      ctx.fillRect(tx, ty + TILE - 4, TILE, 4);
+    }
+    const tieTop = hasNorth ? ty : ty + 7;
+    const tieBottom = hasSouth ? ty + TILE : ty + TILE - 7;
+    for (let ox = 4; ox < TILE; ox += 16) {
+      ctx.fillStyle = '#29170A';
+      ctx.fillRect(tx + ox + 1, tieTop, 9, tieBottom - tieTop);
+      ctx.fillStyle = '#5C381B';
+      ctx.fillRect(tx + ox, tieTop, 8, tieBottom - tieTop);
+    }
+    if (!hasNorth && hasSouth) drawSteelH(ty + 14);
+    else if (hasNorth && !hasSouth) drawSteelH(ty + TILE - 18);
+    return;
+  }
+
+  // 2. 平行雙排垂直鐵道
+  if (
+    selfAxis === 'vertical' &&
+    (wAxis === 'vertical' || eAxis === 'vertical') &&
+    wAxis !== 'horizontal' &&
+    eAxis !== 'horizontal'
+  ) {
+    const hasWest = wAxis === 'vertical';
+    const hasEast = eAxis === 'vertical';
+    ctx.fillStyle = '#6B6257';
+    ctx.fillRect(tx, ty, TILE, TILE);
+    ctx.fillStyle = '#524A40';
+    ctx.fillRect(tx + 6, ty + ((gy * 13) % 14) + 3, 3, 5);
+    ctx.fillRect(tx + 22, ty + ((gy * 19) % 16) + 18, 3, 6);
+    if (!hasWest) {
+      ctx.fillStyle = '#443C33';
+      ctx.fillRect(tx, ty, 4, TILE);
+    }
+    if (!hasEast) {
+      ctx.fillStyle = '#443C33';
+      ctx.fillRect(tx + TILE - 4, ty, 4, TILE);
+    }
+    const tieLeft = hasWest ? tx : tx + 7;
+    const tieRight = hasEast ? tx + TILE : tx + TILE - 7;
+    for (let oy = 4; oy < TILE; oy += 16) {
+      ctx.fillStyle = '#29170A';
+      ctx.fillRect(tieLeft, ty + oy + 1, tieRight - tieLeft, 9);
+      ctx.fillStyle = '#5C381B';
+      ctx.fillRect(tieLeft, ty + oy, tieRight - tieLeft, 8);
+    }
+    if (!hasWest && hasEast) drawSteelV(tx + 14);
+    else if (hasWest && !hasEast) drawSteelV(tx + TILE - 18);
+    return;
+  }
+
+  // 3. 單格直軌／90° 轉角／T 形分叉／十字交會：計算四向連接埠 (N, S, W, E)
+  let N = false;
+  let S = false;
+  let W = false;
+  let E = false;
+
+  if (selfAxis === 'horizontal') {
+    N = nAxis === 'vertical';
+    S = sAxis === 'vertical';
+    if (N || S) {
+      W = wAxis !== null;
+      E = eAxis !== null;
+      if (!W && !E) {
+        W = true;
+        E = true;
+      }
+    } else {
+      W = true;
+      E = true;
+    }
+  } else {
+    W = wAxis === 'horizontal';
+    E = eAxis === 'horizontal';
+    if (W || E) {
+      N = nAxis !== null;
+      S = sAxis !== null;
+      if (!N && !S) {
+        N = true;
+        S = true;
+      }
+    } else {
+      N = true;
+      S = true;
+    }
+  }
+
+  // 碎石道碴（僅覆蓋有通向的臂段，轉角留空處透出底層地板）
+  const armPad = 6;
+  ctx.fillStyle = '#6B6257';
+  ctx.fillRect(tx + armPad, ty + armPad, TILE - armPad * 2, TILE - armPad * 2);
+  if (N) ctx.fillRect(tx + armPad, ty, TILE - armPad * 2, armPad + 2);
+  if (S) ctx.fillRect(tx + armPad, ty + TILE - armPad - 2, TILE - armPad * 2, armPad + 2);
+  if (W) ctx.fillRect(tx, ty + armPad, armPad + 2, TILE - armPad * 2);
+  if (E) ctx.fillRect(tx + TILE - armPad - 2, ty + armPad, armPad + 2, TILE - armPad * 2);
+
+  ctx.fillStyle = '#443C33';
+  if (!N) ctx.fillRect(tx + armPad, ty + armPad, TILE - armPad * 2, 3);
+  if (!S) ctx.fillRect(tx + armPad, ty + TILE - armPad - 3, TILE - armPad * 2, 3);
+  if (!W) ctx.fillRect(tx + armPad, ty + armPad, 3, TILE - armPad * 2);
+  if (!E) ctx.fillRect(tx + TILE - armPad - 3, ty + armPad, 3, TILE - armPad * 2);
+
+  // 碎石顆粒點綴
+  ctx.fillStyle = '#524A40';
+  ctx.fillRect(tx + 12 + ((gx * 7) % 10), ty + 14 + ((gy * 5) % 8), 5, 3);
+  ctx.fillRect(tx + 24, ty + 28, 5, 3);
+
+  // 木質枕木
+  const drawTieH = (ox: number) => {
+    ctx.fillStyle = '#29170A';
+    ctx.fillRect(tx + ox + 1, ty + 8, 8, TILE - 16);
+    ctx.fillStyle = '#5C381B';
+    ctx.fillRect(tx + ox, ty + 8, 7, TILE - 16);
+  };
+  const drawTieV = (oy: number) => {
+    ctx.fillStyle = '#29170A';
+    ctx.fillRect(tx + 8, ty + oy + 1, TILE - 16, 8);
+    ctx.fillStyle = '#5C381B';
+    ctx.fillRect(tx + 8, ty + oy, TILE - 16, 7);
+  };
+  if (W && E) {
+    for (const ox of [4, 20, 36]) drawTieH(ox);
+  } else {
+    if (W) drawTieH(4);
+    if (E) drawTieH(36);
+  }
+  if (N && S) {
+    for (const oy of [4, 20, 36]) drawTieV(oy);
+  } else {
+    if (N) drawTieV(4);
+    if (S) drawTieV(36);
+  }
+
+  // 中心交會木墊
+  if ((N || S) && (W || E)) {
+    ctx.fillStyle = '#5C381B';
+    ctx.fillRect(tx + 11, ty + 11, TILE - 22, TILE - 22);
+  }
+
+  // 鋼軌圓弧轉向 helper（以角點為圓心、半徑 15 與 33，與直軌 tx+15/33 完全切線對齊）
+  const drawCornerArcRails = (cx: number, cy: number, a0: number, a1: number) => {
+    for (const rad of [15, 33]) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, rad, a0, a1);
+      ctx.strokeStyle = '#1E293B';
+      ctx.lineWidth = 6.2;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, rad, a0, a1);
+      ctx.strokeStyle = '#CBD5E1';
+      ctx.lineWidth = 3.2;
+      ctx.stroke();
+    }
+  };
+
+  if (N && W) drawCornerArcRails(tx, ty, 0, Math.PI / 2);
+  if (N && E) drawCornerArcRails(tx + TILE, ty, Math.PI / 2, Math.PI);
+  if (S && W) drawCornerArcRails(tx, ty + TILE, -Math.PI / 2, 0);
+  if (S && E) drawCornerArcRails(tx + TILE, ty + TILE, Math.PI, Math.PI * 1.5);
+
+  if (W && E) {
+    drawSteelH(ty + 13);
+    drawSteelH(ty + TILE - 17);
+  }
+  if (N && S) {
+    drawSteelV(tx + 13);
+    drawSteelV(tx + TILE - 17);
   }
 }
 
 /**
- * 1×1 竹林實牆：依格座標變化 4 種 3 株布局（2上1下／1上2下／1左2右／2左1右）與竹葉簇
+ * 1×1 竹林實牆：支援指定方位 (north 2上1下 / south 1上2下 / east 1左2右 / west 2左1右)，或依格座標變化
  */
 function drawBambooTile(ctx: CanvasRenderingContext2D, obs: Obstacle) {
-  const { x, y } = obs;
+  const { x, y, direction } = obs;
   const gx = Math.round(x / TILE);
   const gy = Math.round(y / TILE);
-  const layoutIdx = (((gx * 3 + gy * 7) % 4) + 4) % 4;
-  const j1 = (((gx * 5 + gy * 11) % 3) - 1) * 1.1;
-  const j2 = (((gx * 11 + gy * 3) % 3) - 1) * 1.1;
-  const j3 = (((gx * 7 + gy * 5) % 3) - 1) * 1.1;
+  const dirMap: Record<'north' | 'south' | 'east' | 'west', number> = {
+    north: 0,
+    south: 1,
+    east: 2,
+    west: 3,
+  };
+  const layoutIdx = direction ? dirMap[direction] : (((gx * 3 + gy * 7) % 4) + 4) % 4;
+  const j1 = direction ? 0 : (((gx * 5 + gy * 11) % 3) - 1) * 1.1;
+  const j2 = direction ? 0 : (((gx * 11 + gy * 3) % 3) - 1) * 1.1;
+  const j3 = direction ? 0 : (((gx * 7 + gy * 5) % 3) - 1) * 1.1;
 
   // 地表竹蔭草墊（配合竹群重心微移）
   const padOffsets: [number, number][] = [
@@ -400,60 +599,100 @@ function drawBambooTile(ctx: CanvasRenderingContext2D, obs: Obstacle) {
 }
 
 /**
- * 靜止火車頭／貨運車廂（elev 2.0，支援西方荒野鐵道鎮攀爬與掩體）
+ * 靜止火車頭／貨運車廂（elev 2.0，支援橫向 4×2 與旋轉直向 2×4 攀爬與掩體）
  */
 function drawTrainCar(ctx: CanvasRenderingContext2D, obs: Obstacle) {
   const { x, y, w, h, colorVariant } = obs;
   const isLoco = colorVariant === 'loco';
+  const isVertical = h > w;
 
   // 底部鋼輪軸陰影露出邊緣
   ctx.fillStyle = '#0F172A';
-  ctx.fillRect(x + 8, y - 2, w - 16, h + 4);
+  if (isVertical) {
+    ctx.fillRect(x - 2, y + 8, w + 4, h - 16);
+  } else {
+    ctx.fillRect(x + 8, y - 2, w - 16, h + 4);
+  }
 
   if (isLoco) {
-    // 西部蒸汽火車頭（朝西排障器 + 黑鐵鍋爐 + 銅箍環 + 煙囪 + 駕駛室頂棚）
     ctx.fillStyle = '#1E293B';
     ctx.fillRect(x, y, w, h);
 
-    // 駕駛室後半部（深紅木頂棚）
-    const cabW = w * 0.34;
-    ctx.fillStyle = '#7F1D1D';
-    ctx.fillRect(x + w - cabW, y + 3, cabW - 3, h - 6);
-    ctx.strokeStyle = '#F59E0B';
-    ctx.lineWidth = 1.8;
-    ctx.strokeRect(x + w - cabW, y + 3, cabW - 3, h - 6);
+    if (isVertical) {
+      // 垂直火車頭（車頭朝北↑：前方排障器 + 縱向鍋爐 + 銅箍環 + 煙囪 + 南側駕駛室）
+      const cabH = h * 0.34;
+      ctx.fillStyle = '#7F1D1D';
+      ctx.fillRect(x + 3, y + h - cabH, w - 6, cabH - 3);
+      ctx.strokeStyle = '#F59E0B';
+      ctx.lineWidth = 1.8;
+      ctx.strokeRect(x + 3, y + h - cabH, w - 6, cabH - 3);
 
-    // 前部圓筒蒸汽鍋爐
-    const boilerX = x + 12;
-    const boilerW = w - cabW - 14;
-    const grad = ctx.createLinearGradient(0, y + 8, 0, y + h - 8);
-    grad.addColorStop(0, '#334155');
-    grad.addColorStop(0.45, '#64748B');
-    grad.addColorStop(1, '#0F172A');
-    ctx.fillStyle = grad;
-    ctx.fillRect(boilerX, y + 10, boilerW, h - 20);
-    ctx.strokeStyle = '#020617';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(boilerX, y + 10, boilerW, h - 20);
+      const boilerY = y + 12;
+      const boilerH = h - cabH - 14;
+      const grad = ctx.createLinearGradient(x + 8, 0, x + w - 8, 0);
+      grad.addColorStop(0, '#334155');
+      grad.addColorStop(0.45, '#64748B');
+      grad.addColorStop(1, '#0F172A');
+      ctx.fillStyle = grad;
+      ctx.fillRect(x + 10, boilerY, w - 20, boilerH);
+      ctx.strokeStyle = '#020617';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x + 10, boilerY, w - 20, boilerH);
 
-    // 黃銅鍋爐箍環
-    ctx.fillStyle = '#D97706';
-    for (let rx = boilerX + 16; rx < boilerX + boilerW - 8; rx += 26) {
-      ctx.fillRect(rx, y + 10, 4, h - 20);
+      ctx.fillStyle = '#D97706';
+      for (let ry = boilerY + 16; ry < boilerY + boilerH - 8; ry += 26) {
+        ctx.fillRect(x + 10, ry, w - 20, 4);
+      }
+
+      ctx.fillStyle = '#020617';
+      ctx.beginPath();
+      ctx.arc(x + w / 2, boilerY + 22, 13, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#D97706';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      // 北側車頭前排障器鋼條
+      ctx.fillStyle = '#D97706';
+      ctx.fillRect(x + 12, y + 2, w - 24, 8);
+    } else {
+      // 水平火車頭（朝西排障器 + 黑鐵鍋爐 + 銅箍環 + 煙囪 + 駕駛室頂棚）
+      const cabW = w * 0.34;
+      ctx.fillStyle = '#7F1D1D';
+      ctx.fillRect(x + w - cabW, y + 3, cabW - 3, h - 6);
+      ctx.strokeStyle = '#F59E0B';
+      ctx.lineWidth = 1.8;
+      ctx.strokeRect(x + w - cabW, y + 3, cabW - 3, h - 6);
+
+      const boilerX = x + 12;
+      const boilerW = w - cabW - 14;
+      const grad = ctx.createLinearGradient(0, y + 8, 0, y + h - 8);
+      grad.addColorStop(0, '#334155');
+      grad.addColorStop(0.45, '#64748B');
+      grad.addColorStop(1, '#0F172A');
+      ctx.fillStyle = grad;
+      ctx.fillRect(boilerX, y + 10, boilerW, h - 20);
+      ctx.strokeStyle = '#020617';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(boilerX, y + 10, boilerW, h - 20);
+
+      ctx.fillStyle = '#D97706';
+      for (let rx = boilerX + 16; rx < boilerX + boilerW - 8; rx += 26) {
+        ctx.fillRect(rx, y + 10, 4, h - 20);
+      }
+
+      ctx.fillStyle = '#020617';
+      ctx.beginPath();
+      ctx.arc(boilerX + 22, y + h / 2, 13, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#D97706';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      ctx.fillStyle = '#D97706';
+      ctx.fillRect(x + 2, y + 12, 8, h - 24);
     }
 
-    // 大煙囪環
-    ctx.fillStyle = '#020617';
-    ctx.beginPath();
-    ctx.arc(boilerX + 22, y + h / 2, 13, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#D97706';
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-    // 西側車頭前排障器鋼條
-    ctx.fillStyle = '#D97706';
-    ctx.fillRect(x + 2, y + 12, 8, h - 24);
     ctx.strokeStyle = '#020617';
     ctx.lineWidth = 3;
     ctx.strokeRect(x, y, w, h);
@@ -465,27 +704,48 @@ function drawTrainCar(ctx: CanvasRenderingContext2D, obs: Obstacle) {
   ctx.fillStyle = bodyColor;
   ctx.fillRect(x, y, w, h);
 
-  // 兩端緩衝連掛鋼座
-  ctx.fillStyle = '#334155';
-  ctx.fillRect(x, y + 6, 8, h - 12);
-  ctx.fillRect(x + w - 8, y + 6, 8, h - 12);
+  if (isVertical) {
+    // 上下兩端緩衝連掛鋼座
+    ctx.fillStyle = '#334155';
+    ctx.fillRect(x + 6, y, w - 12, 8);
+    ctx.fillRect(x + 6, y + h - 8, w - 12, 8);
 
-  // 車頂橫向木板紋
-  ctx.strokeStyle = 'rgba(15, 23, 42, 0.42)';
-  ctx.lineWidth = 1.6;
-  for (let px = x + 14; px < x + w - 10; px += 12) {
-    ctx.beginPath();
-    ctx.moveTo(px, y + 4);
-    ctx.lineTo(px, y + h - 4);
-    ctx.stroke();
+    // 車頂木板橫紋
+    ctx.strokeStyle = 'rgba(15, 23, 42, 0.42)';
+    ctx.lineWidth = 1.6;
+    for (let py = y + 14; py < y + h - 10; py += 12) {
+      ctx.beginPath();
+      ctx.moveTo(x + 4, py);
+      ctx.lineTo(x + w - 4, py);
+      ctx.stroke();
+    }
+
+    // 車頂中央縱向走道木板 (Catwalk)
+    ctx.fillStyle = '#D6A15C';
+    ctx.fillRect(x + w / 2 - 9, y + 6, 18, h - 12);
+    ctx.strokeStyle = '#451A03';
+    ctx.lineWidth = 1.6;
+    ctx.strokeRect(x + w / 2 - 9, y + 6, 18, h - 12);
+  } else {
+    ctx.fillStyle = '#334155';
+    ctx.fillRect(x, y + 6, 8, h - 12);
+    ctx.fillRect(x + w - 8, y + 6, 8, h - 12);
+
+    ctx.strokeStyle = 'rgba(15, 23, 42, 0.42)';
+    ctx.lineWidth = 1.6;
+    for (let px = x + 14; px < x + w - 10; px += 12) {
+      ctx.beginPath();
+      ctx.moveTo(px, y + 4);
+      ctx.lineTo(px, y + h - 4);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = '#D6A15C';
+    ctx.fillRect(x + 6, y + h / 2 - 9, w - 12, 18);
+    ctx.strokeStyle = '#451A03';
+    ctx.lineWidth = 1.6;
+    ctx.strokeRect(x + 6, y + h / 2 - 9, w - 12, 18);
   }
-
-  // 車頂中央縱向走道木板 (Catwalk)
-  ctx.fillStyle = '#D6A15C';
-  ctx.fillRect(x + 6, y + h / 2 - 9, w - 12, 18);
-  ctx.strokeStyle = '#451A03';
-  ctx.lineWidth = 1.6;
-  ctx.strokeRect(x + 6, y + h / 2 - 9, w - 12, 18);
 
   // 四角黃銅鉚釘與外鋼框
   ctx.fillStyle = '#F59E0B';
@@ -500,27 +760,80 @@ function drawTrainCar(ctx: CanvasRenderingContext2D, obs: Obstacle) {
 }
 
 /**
- * 1 格河道中央靜水美術（對應 tile.png 第一行第 1 格：冷灰藍河水 + 有機深褐泥岸）
+ * 1 格河道繪製：邊緣保持透明以自然呈現底層地板色彩，並以濕潤水岸陰影與亮波紋過渡
  */
-function drawRiverCenterTile(
+function drawTransparentWaterTile(
   ctx: CanvasRenderingContext2D,
   tx: number,
   ty: number,
   gx: number,
   gy: number,
-  animTime: number
+  animTime: number,
+  hasN: boolean,
+  hasS: boolean,
+  hasW: boolean,
+  hasE: boolean,
+  hasNW: boolean,
+  hasNE: boolean,
+  hasSW: boolean,
+  hasSE: boolean
 ) {
+  const M = 8; // 暴露岸邊留白寬度（透明，直接透出底下草地／沙地／石板色彩）
+  const left = hasW ? 0 : M;
+  const right = TILE - (hasE ? 0 : M);
+  const top = hasN ? 0 : M;
+  const bottom = TILE - (hasS ? 0 : M);
+  const rw = right - left;
+  const rh = bottom - top;
+  const rTL = !hasN && !hasW ? 11 : 0;
+  const rTR = !hasN && !hasE ? 11 : 0;
+  const rBR = !hasS && !hasE ? 11 : 0;
+  const rBL = !hasS && !hasW ? 11 : 0;
+
+  const traceWaterPath = (pad: number) => {
+    const x0 = tx + Math.max(0, left - pad);
+    const y0 = ty + Math.max(0, top - pad);
+    const x1 = tx + Math.min(TILE, right + pad);
+    const y1 = ty + Math.min(TILE, bottom + pad);
+    const rtl = rTL ? rTL + pad : 0;
+    const rtr = rTR ? rTR + pad : 0;
+    const rbr = rBR ? rBR + pad : 0;
+    const rbl = rBL ? rBL + pad : 0;
+
+    ctx.beginPath();
+    ctx.moveTo(x0 + rtl, y0);
+    ctx.lineTo(x1 - rtr, y0);
+    if (rtr) ctx.quadraticCurveTo(x1, y0, x1, y0 + rtr);
+    ctx.lineTo(x1, y1 - rbr);
+    if (rbr) ctx.quadraticCurveTo(x1, y1, x1 - rbr, y1);
+    ctx.lineTo(x0 + rbl, y1);
+    if (rbl) ctx.quadraticCurveTo(x0, y1, x0, y1 - rbl);
+    ctx.lineTo(x0, y0 + rtl);
+    if (rtl) ctx.quadraticCurveTo(x0, y0, x0 + rtl, y0);
+    ctx.closePath();
+  };
+
+  // 半透明濕潤岸邊暈染（會隨底下沙地／草地自然變深）
+  if (!hasN || !hasS || !hasW || !hasE) {
+    traceWaterPath(3.5);
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.22)';
+    ctx.fill();
+  }
+
+  // 主體水色（裁剪後繪製動態波紋）
+  ctx.save();
+  traceWaterPath(0);
+  ctx.clip();
+
   ctx.fillStyle = '#5B8296';
   ctx.fillRect(tx, ty, TILE, TILE);
-
-  // 細微柔和深淺水斑紋
   ctx.fillStyle = '#4E7487';
   ctx.fillRect(tx + ((gx * 13 + gy * 7) % 18) + 4, ty + 8, 12, 6);
   ctx.fillStyle = '#6A92A6';
   ctx.fillRect(tx + ((gx * 9 + gy * 15) % 16) + 12, ty + 27, 14, 5);
 
   const drift = Math.sin(animTime * 1.6 + gx * 0.7 + gy * 0.4) * 1.6;
-  ctx.strokeStyle = 'rgba(203, 228, 240, 0.34)';
+  ctx.strokeStyle = 'rgba(203, 228, 240, 0.36)';
   ctx.lineWidth = 1.4;
   ctx.beginPath();
   ctx.moveTo(tx + 8, ty + 17 + drift);
@@ -531,78 +844,31 @@ function drawRiverCenterTile(
   ctx.moveTo(tx + 10, ty + 35 - drift);
   ctx.quadraticCurveTo(tx + 24, ty + 32 - drift, tx + 38, ty + 35 - drift);
   ctx.stroke();
-}
 
-function drawMudBankStrip(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, vertical: boolean) {
-  // 有機參差泥岸邊緣（外淺土 -> 深泥土 -> 濕泥邊）
-  ctx.fillStyle = '#8C6239';
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = '#4A2E18';
-  if (vertical) {
-    ctx.fillRect(x + (w > 10 ? 2 : 1), y, Math.max(4, w - 4), h);
-    for (let oy = 2; oy < h - 4; oy += 8) {
-      ctx.fillStyle = '#331E0E';
-      ctx.fillRect(x + 1, y + oy, w - 2, 4);
-      ctx.fillStyle = '#C9A87C';
-      ctx.fillRect(x + ((oy * 3) % 3), y + oy + 3, 2, 3);
-    }
-  } else {
-    ctx.fillRect(x, y + (h > 10 ? 2 : 1), w, Math.max(4, h - 4));
-    for (let ox = 2; ox < w - 4; ox += 8) {
-      ctx.fillStyle = '#331E0E';
-      ctx.fillRect(x + ox, y + 1, 4, h - 2);
-      ctx.fillStyle = '#C9A87C';
-      ctx.fillRect(x + ox + 3, y + ((ox * 3) % 3), 3, 2);
-    }
-  }
-}
-
-function drawRiverEdgeN(ctx: CanvasRenderingContext2D, tx: number, ty: number) {
-  drawMudBankStrip(ctx, tx, ty, TILE, 10, false);
-  ctx.fillStyle = 'rgba(191, 219, 234, 0.35)';
-  ctx.fillRect(tx, ty + 10, TILE, 3);
-}
-
-function drawRiverEdgeS(ctx: CanvasRenderingContext2D, tx: number, ty: number) {
-  drawMudBankStrip(ctx, tx, ty + TILE - 10, TILE, 10, false);
-  ctx.fillStyle = 'rgba(191, 219, 234, 0.35)';
-  ctx.fillRect(tx, ty + TILE - 13, TILE, 3);
-}
-
-function drawRiverEdgeW(ctx: CanvasRenderingContext2D, tx: number, ty: number) {
-  drawMudBankStrip(ctx, tx, ty, 10, TILE, true);
-  ctx.fillStyle = 'rgba(191, 219, 234, 0.35)';
-  ctx.fillRect(tx + 10, ty, 3, TILE);
-}
-
-function drawRiverEdgeE(ctx: CanvasRenderingContext2D, tx: number, ty: number) {
-  drawMudBankStrip(ctx, tx + TILE - 10, ty, 10, TILE, true);
-  ctx.fillStyle = 'rgba(191, 219, 234, 0.35)';
-  ctx.fillRect(tx + TILE - 13, ty, 3, TILE);
-}
-
-function drawRiverCorner(
-  ctx: CanvasRenderingContext2D,
-  tx: number,
-  ty: number,
-  corner: 'NW' | 'NE' | 'SW' | 'SE',
-  inner: boolean
-) {
-  const r = inner ? 11 : 18;
-  const cx = corner.includes('W') ? tx : tx + TILE;
-  const cy = corner.includes('N') ? ty : ty + TILE;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(tx, ty, TILE, TILE);
-  ctx.clip();
-  ctx.fillStyle = '#4A2E18';
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#8C6239';
-  ctx.lineWidth = 3;
+  // 內岸邊淺白水花細線
+  ctx.strokeStyle = 'rgba(224, 242, 254, 0.45)';
+  ctx.lineWidth = 2;
+  traceWaterPath(0);
   ctx.stroke();
+
+  // 內凹轉角岸地透出（當上下左右有水但對角是陸地時）
+  const drawInnerLandCorner = (cx: number, cy: number) => {
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.26)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(224, 242, 254, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  };
+  if (hasN && hasW && !hasNW) drawInnerLandCorner(tx, ty);
+  if (hasN && hasE && !hasNE) drawInnerLandCorner(tx + TILE, ty);
+  if (hasS && hasW && !hasSW) drawInnerLandCorner(tx, ty + TILE);
+  if (hasS && hasE && !hasSE) drawInnerLandCorner(tx + TILE, ty + TILE);
+
   ctx.restore();
+  void rw;
+  void rh;
 }
 
 /**
@@ -824,71 +1090,138 @@ function drawPlatformTile(
 }
 
 /**
- * 繪製 tile.png 風格房屋（俯視斜屋頂石磚＋青苔蔓藤＋屋脊橫樑＋兩側藍窗）
+ * 繪製房屋物件（支援橫向 3×2 與旋轉直向 2×3 雙坡石磚屋頂＋青苔蔓藤＋屋脊橫樑＋兩側藍窗＋門向標示）
  */
 function drawTileHouse(ctx: CanvasRenderingContext2D, obs: Obstacle) {
-  const { x, y, w, h } = obs;
+  const { x, y, w, h, direction } = obs;
+  const isVertical = direction === 'east' || direction === 'west' || h > w;
 
-  // 兩側屋簷與藍色窗戶
-  ctx.fillStyle = '#334155';
-  ctx.fillRect(x - 2, y + 6, 6, h - 12);
-  ctx.fillRect(x + w - 4, y + 6, 6, h - 12);
-  ctx.fillStyle = '#38BDF8';
-  ctx.fillRect(x - 1, y + h * 0.34, 4, h * 0.32);
-  ctx.fillRect(x + w - 3, y + h * 0.34, 4, h * 0.32);
+  if (isVertical) {
+    // 南北兩側屋簷與藍窗
+    ctx.fillStyle = '#334155';
+    ctx.fillRect(x + 6, y - 2, w - 12, 6);
+    ctx.fillRect(x + 6, y + h - 4, w - 12, 6);
+    ctx.fillStyle = '#38BDF8';
+    ctx.fillRect(x + w * 0.34, y - 1, w * 0.32, 4);
+    ctx.fillRect(x + w * 0.34, y + h - 3, w * 0.32, 4);
 
-  // 主體石磚斜屋頂
-  ctx.fillStyle = '#9D7E54';
-  ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = '#9D7E54';
+    ctx.fillRect(x, y, w, h);
 
-  // 上斜坡較亮、下斜坡略暗（營造雙坡屋頂立體感）
-  ctx.fillStyle = '#B09064';
-  ctx.fillRect(x + 2, y + 2, w - 4, h / 2 - 4);
-  ctx.fillStyle = '#7E613B';
-  ctx.fillRect(x + 2, y + h / 2 + 2, w - 4, h / 2 - 4);
+    // 左斜坡較亮、右斜坡略暗
+    ctx.fillStyle = '#B09064';
+    ctx.fillRect(x + 2, y + 2, w / 2 - 4, h - 4);
+    ctx.fillStyle = '#7E613B';
+    ctx.fillRect(x + w / 2 + 2, y + 2, w / 2 - 4, h - 4);
 
-  // 交錯屋頂石磚線
-  ctx.strokeStyle = '#3E2B16';
-  ctx.lineWidth = 1.6;
-  const rowH = 14;
-  for (let ry = y + rowH; ry < y + h; ry += rowH) {
-    ctx.beginPath();
-    ctx.moveTo(x + 3, ry);
-    ctx.lineTo(x + w - 3, ry);
-    ctx.stroke();
-    const rowIdx = Math.floor((ry - y) / rowH);
-    const shift = (rowIdx % 2) * 14;
-    for (let rx = x + 12 + shift; rx < x + w - 6; rx += 26) {
+    // 交錯屋頂石磚線（垂直屋瓦排）
+    ctx.strokeStyle = '#3E2B16';
+    ctx.lineWidth = 1.6;
+    const colW = 14;
+    for (let rx = x + colW; rx < x + w; rx += colW) {
       ctx.beginPath();
-      ctx.moveTo(rx, ry - rowH);
-      ctx.lineTo(rx, ry);
+      ctx.moveTo(rx, y + 3);
+      ctx.lineTo(rx, y + h - 3);
       ctx.stroke();
+      const colIdx = Math.floor((rx - x) / colW);
+      const shift = (colIdx % 2) * 14;
+      for (let ry = y + 12 + shift; ry < y + h - 6; ry += 26) {
+        ctx.beginPath();
+        ctx.moveTo(rx - colW, ry);
+        ctx.lineTo(rx, ry);
+        ctx.stroke();
+      }
     }
+
+    // 青苔綠植點綴
+    ctx.fillStyle = '#22C55E';
+    for (const [ox, oy, rw, rh] of [
+      [0.2, 0.22, 6, 10],
+      [0.24, 0.65, 5, 11],
+      [0.68, 0.35, 6, 10],
+      [0.64, 0.75, 5, 9],
+    ] as const) {
+      ctx.fillRect(x + w * ox, y + h * oy, rw, rh);
+    }
+
+    // 垂直屋脊木樑
+    ctx.fillStyle = '#C9A46B';
+    ctx.fillRect(x + w / 2 - 4, y + 2, 8, h - 4);
+    ctx.strokeStyle = '#33200E';
+    ctx.lineWidth = 1.8;
+    ctx.strokeRect(x + w / 2 - 4, y + 2, 8, h - 4);
+
+    // 東／西側玄關雨遮標記
+    const doorX = direction === 'west' ? x - 3 : x + w - 5;
+    ctx.fillStyle = '#78350F';
+    ctx.fillRect(doorX, y + h * 0.38, 8, h * 0.24);
+    ctx.strokeStyle = '#F59E0B';
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(doorX, y + h * 0.38, 8, h * 0.24);
+  } else {
+    // 東西兩側屋簷與藍色窗戶
+    ctx.fillStyle = '#334155';
+    ctx.fillRect(x - 2, y + 6, 6, h - 12);
+    ctx.fillRect(x + w - 4, y + 6, 6, h - 12);
+    ctx.fillStyle = '#38BDF8';
+    ctx.fillRect(x - 1, y + h * 0.34, 4, h * 0.32);
+    ctx.fillRect(x + w - 3, y + h * 0.34, 4, h * 0.32);
+
+    ctx.fillStyle = '#9D7E54';
+    ctx.fillRect(x, y, w, h);
+
+    ctx.fillStyle = '#B09064';
+    ctx.fillRect(x + 2, y + 2, w - 4, h / 2 - 4);
+    ctx.fillStyle = '#7E613B';
+    ctx.fillRect(x + 2, y + h / 2 + 2, w - 4, h / 2 - 4);
+
+    ctx.strokeStyle = '#3E2B16';
+    ctx.lineWidth = 1.6;
+    const rowH = 14;
+    for (let ry = y + rowH; ry < y + h; ry += rowH) {
+      ctx.beginPath();
+      ctx.moveTo(x + 3, ry);
+      ctx.lineTo(x + w - 3, ry);
+      ctx.stroke();
+      const rowIdx = Math.floor((ry - y) / rowH);
+      const shift = (rowIdx % 2) * 14;
+      for (let rx = x + 12 + shift; rx < x + w - 6; rx += 26) {
+        ctx.beginPath();
+        ctx.moveTo(rx, ry - rowH);
+        ctx.lineTo(rx, ry);
+        ctx.stroke();
+      }
+    }
+
+    ctx.fillStyle = '#22C55E';
+    for (const [ox, oy, rw, rh] of [
+      [0.24, 0.22, 10, 5],
+      [0.64, 0.28, 12, 6],
+      [0.42, 0.72, 11, 5],
+      [0.75, 0.65, 9, 5],
+      [0.16, 0.68, 8, 4],
+    ] as const) {
+      ctx.fillRect(x + w * ox, y + h * oy, rw, rh);
+    }
+    ctx.fillStyle = '#15803D';
+    ctx.fillRect(x + w * 0.66, y + h * 0.3, 8, 4);
+    ctx.fillRect(x + w * 0.44, y + h * 0.74, 7, 3);
+
+    ctx.fillStyle = '#C9A46B';
+    ctx.fillRect(x + 2, y + h / 2 - 4, w - 4, 8);
+    ctx.strokeStyle = '#33200E';
+    ctx.lineWidth = 1.8;
+    ctx.strokeRect(x + 2, y + h / 2 - 4, w - 4, 8);
+
+    // 北／南側玄關雨遮標記
+    const doorY = direction === 'north' ? y - 3 : y + h - 5;
+    ctx.fillStyle = '#78350F';
+    ctx.fillRect(x + w * 0.38, doorY, w * 0.24, 8);
+    ctx.strokeStyle = '#F59E0B';
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(x + w * 0.38, doorY, w * 0.24, 8);
   }
 
-  // 青苔綠植點綴
-  ctx.fillStyle = '#22C55E';
-  for (const [ox, oy, rw, rh] of [
-    [0.24, 0.22, 10, 5],
-    [0.64, 0.28, 12, 6],
-    [0.42, 0.72, 11, 5],
-    [0.75, 0.65, 9, 5],
-    [0.16, 0.68, 8, 4],
-  ] as const) {
-    ctx.fillRect(x + w * ox, y + h * oy, rw, rh);
-  }
-  ctx.fillStyle = '#15803D';
-  ctx.fillRect(x + w * 0.66, y + h * 0.3, 8, 4);
-  ctx.fillRect(x + w * 0.44, y + h * 0.74, 7, 3);
-
-  // 中央屋脊木樑
-  ctx.fillStyle = '#C9A46B';
-  ctx.fillRect(x + 2, y + h / 2 - 4, w - 4, 8);
-  ctx.strokeStyle = '#33200E';
-  ctx.lineWidth = 1.8;
-  ctx.strokeRect(x + 2, y + h / 2 - 4, w - 4, 8);
-
-  // 外圍厚木簷框
   ctx.strokeStyle = '#1C140D';
   ctx.lineWidth = 3.2;
   ctx.strokeRect(x, y, w, h);
@@ -1068,129 +1401,173 @@ export function renderMapBaseLayer(
 ) {
   const pal = getBiomePalette(map.biome);
 
-  // 1. 1×1 同紋理地板（全格一致基準圖案＋細微像素點綴，支援 grass_ground 與 rail_track）
-  const groundSpecks = BIOME_SPECKS[map.biome];
+  // 1. 1×1 可混搭地板層（完全獨立於水域與高台，確保透明岸邊與降層後皆保留底層地板紋理）
+  const fallbackFloor = biomeToDefaultFloor(map.biome);
+  const railMap = new Map<string, 'horizontal' | 'vertical'>();
+  for (const rt of map.railTracks || []) {
+    railMap.set(`${rt.gx},${rt.gy}`, rt.orientation);
+  }
   for (let gy = 0; gy < map.rows; gy++) {
     for (let gx = 0; gx < map.cols; gx++) {
       const tx = gx * TILE;
       const ty = gy * TILE;
       const cell = map.tileGrid[gy][gx];
-      if (cell.elev === 0 && cell.style === 'grass_ground') {
-        drawGrassGroundTile(ctx, tx, ty, gx, gy);
-      } else if (cell.elev === 0 && cell.style === 'rail_track') {
-        const hasTrackNorth = gy > 0 && map.tileGrid[gy - 1][gx].style === 'rail_track';
-        const hasTrackSouth = gy < map.rows - 1 && map.tileGrid[gy + 1][gx].style === 'rail_track';
-        drawRailTrackTile(ctx, tx, ty, gx, hasTrackNorth, hasTrackSouth);
-      } else {
-        drawUniformTileMotif(ctx, tx, ty, pal.a, groundSpecks);
+      const cellFloor: FloorStyle =
+        map.floorGrid?.[gy]?.[gx] ??
+        (cell.elev === 0 && cell.style === 'grass_ground' ? 'grass_ground' : fallbackFloor);
+
+      drawFloorStyleTile(ctx, tx, ty, gx, gy, cellFloor);
+
+      if (cell.style === 'rail_track' && !railMap.has(`${gx},${gy}`)) {
+        railMap.set(`${gx},${gy}`, 'horizontal');
       }
 
-      if (map.biome === 'warehouse_indoor') {
-        if (gy === 10 && gx % 2 === 0) {
-          ctx.fillStyle = 'rgba(245, 158, 11, 0.22)';
-          ctx.fillRect(tx + 6, ty + TILE / 2 - 2, TILE - 12, 4);
+      if (map.id === 'industrial_warehouse' && gy === 10 && gx % 2 === 0) {
+        ctx.fillStyle = 'rgba(245, 158, 11, 0.22)';
+        ctx.fillRect(tx + 6, ty + TILE / 2 - 2, TILE - 12, 4);
+      } else if (map.id === 'european_castle' && gy >= 9 && gy <= 10 && gx >= 2 && gx <= map.cols - 3) {
+        ctx.fillStyle = 'rgba(190, 18, 60, 0.32)';
+        ctx.fillRect(tx, ty, TILE, TILE);
+        if (gy === 9) {
+          ctx.fillStyle = 'rgba(250, 204, 21, 0.5)';
+          ctx.fillRect(tx, ty, TILE, 4);
         }
-      } else if (map.biome === 'shrine_outdoor') {
-        if (gx >= 14 && gx <= 15) {
-          ctx.fillStyle = 'rgba(226, 232, 240, 0.16)';
-          ctx.fillRect(tx + 6, ty + 6, TILE - 12, TILE - 12);
-        }
-      } else if (map.biome === 'castle_indoor') {
-        if (gy >= 9 && gy <= 10 && gx >= 2 && gx <= map.cols - 3) {
-          ctx.fillStyle = 'rgba(190, 18, 60, 0.32)';
-          ctx.fillRect(tx, ty, TILE, TILE);
-          if (gy === 9) {
-            ctx.fillStyle = 'rgba(250, 204, 21, 0.5)';
-            ctx.fillRect(tx, ty, TILE, 4);
-          }
-          if (gy === 10) {
-            ctx.fillStyle = 'rgba(250, 204, 21, 0.5)';
-            ctx.fillRect(tx, ty + TILE - 4, TILE, 4);
-          }
+        if (gy === 10) {
+          ctx.fillStyle = 'rgba(250, 204, 21, 0.5)';
+          ctx.fillRect(tx, ty + TILE - 4, TILE, 4);
         }
       }
     }
   }
 
-  // 1.5 逐格河道繪製：1 種河道中央格 + 8 種泥岸接壤邊緣／轉角格
-  const isWater = (gx: number, gy: number) => {
-    if (gy < 0 || gy >= map.rows) return true;
-    return map.waterTileKeys.has(`${gx},${gy}`);
+  // 分層疊加地表物件：石板參道、水域河道（邊緣透明）、跨河木橋、鐵道路軌（皆可置於平地或任何地形層之上）
+  const cellElevAt = (gx: number, gy: number) => {
+    if (gy < 0 || gy >= map.rows || gx < 0 || gx >= map.cols) return 0;
+    return map.tileGrid[gy][gx].elev;
   };
-  for (const wt of map.waterTiles) {
-    const tx = wt.gx * TILE;
-    const ty = wt.gy * TILE;
-    drawRiverCenterTile(ctx, tx, ty, wt.gx, wt.gy, animTime);
 
-    const hasN = isWater(wt.gx, wt.gy - 1);
-    const hasS = isWater(wt.gx, wt.gy + 1);
-    const hasW = isWater(wt.gx - 1, wt.gy);
-    const hasE = isWater(wt.gx + 1, wt.gy);
-
-    if (!hasN) drawRiverEdgeN(ctx, tx, ty);
-    if (!hasS) drawRiverEdgeS(ctx, tx, ty);
-    if (!hasW) drawRiverEdgeW(ctx, tx, ty);
-    if (!hasE) drawRiverEdgeE(ctx, tx, ty);
-
-    if (!hasN && !hasW) drawRiverCorner(ctx, tx, ty, 'NW', false);
-    else if (hasN && hasW && !isWater(wt.gx - 1, wt.gy - 1)) drawRiverCorner(ctx, tx, ty, 'NW', true);
-
-    if (!hasN && !hasE) drawRiverCorner(ctx, tx, ty, 'NE', false);
-    else if (hasN && hasE && !isWater(wt.gx + 1, wt.gy - 1)) drawRiverCorner(ctx, tx, ty, 'NE', true);
-
-    if (!hasS && !hasW) drawRiverCorner(ctx, tx, ty, 'SW', false);
-    else if (hasS && hasW && !isWater(wt.gx - 1, wt.gy + 1)) drawRiverCorner(ctx, tx, ty, 'SW', true);
-
-    if (!hasS && !hasE) drawRiverCorner(ctx, tx, ty, 'SE', false);
-    else if (hasS && hasE && !isWater(wt.gx + 1, wt.gy + 1)) drawRiverCorner(ctx, tx, ty, 'SE', true);
-  }
-
-  // 跨河橋樑
-  for (const br of map.bridges) {
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.45)';
-    ctx.fillRect(br.x + 4, br.y + 8, br.w, br.h);
-
-    ctx.fillStyle = '#A66E38';
-    ctx.fillRect(br.x, br.y, br.w, br.h);
-    ctx.strokeStyle = '#5C3A21';
-    ctx.lineWidth = 2;
-    if (br.orientation === 'horizontal') {
-      for (let bx = br.x + 12; bx < br.x + br.w; bx += 12) {
-        ctx.beginPath();
-        ctx.moveTo(bx, br.y + 4);
-        ctx.lineTo(bx, br.y + br.h - 4);
-        ctx.stroke();
-      }
-      ctx.fillStyle = '#E0B475';
-      ctx.fillRect(br.x, br.y, br.w, 6);
-      ctx.fillRect(br.x, br.y + br.h - 6, br.w, 6);
-    } else {
-      for (let by = br.y + 12; by < br.y + br.h; by += 12) {
-        ctx.beginPath();
-        ctx.moveTo(br.x + 4, by);
-        ctx.lineTo(br.x + br.w - 4, by);
-        ctx.stroke();
-      }
-      ctx.fillStyle = '#E0B475';
-      ctx.fillRect(br.x, br.y, 6, br.h);
-      ctx.fillRect(br.x + br.w - 6, br.y, 6, br.h);
+  const drawTierSurfaceOverlays = (tier: number) => {
+    // 參道石板
+    for (const sr of map.stoneRoads || []) {
+      if (Math.abs(cellElevAt(sr.gx, sr.gy) - tier) > 0.01) continue;
+      const tx = sr.gx * TILE;
+      const ty = sr.gy * TILE;
+      ctx.fillStyle = 'rgba(226, 232, 240, 0.24)';
+      ctx.fillRect(tx + 5, ty + 5, TILE - 10, TILE - 10);
+      ctx.strokeStyle = 'rgba(248, 250, 252, 0.22)';
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(tx + 5, ty + 5, TILE - 10, TILE - 10);
     }
-    ctx.strokeStyle = '#3B2313';
-    ctx.lineWidth = 2.5;
-    ctx.strokeRect(br.x, br.y, br.w, br.h);
-  }
 
-  ctx.strokeStyle = '#0F172A';
-  ctx.lineWidth = 8;
-  ctx.strokeRect(0, 0, map.width, map.height);
+    // 逐格河道繪製：邊緣保持透明以透出底層地板或高台邊緣
+    const isWaterOnTier = (gx: number, gy: number) => {
+      if (gy < 0 || gy >= map.rows || gx < 0 || gx >= map.cols) return tier === 0;
+      return map.waterTileKeys.has(`${gx},${gy}`) && Math.abs(cellElevAt(gx, gy) - tier) <= 0.01;
+    };
+    for (const wt of map.waterTiles) {
+      if (Math.abs(cellElevAt(wt.gx, wt.gy) - tier) > 0.01) continue;
+      const tx = wt.gx * TILE;
+      const ty = wt.gy * TILE;
+      drawTransparentWaterTile(
+        ctx,
+        tx,
+        ty,
+        wt.gx,
+        wt.gy,
+        animTime,
+        isWaterOnTier(wt.gx, wt.gy - 1),
+        isWaterOnTier(wt.gx, wt.gy + 1),
+        isWaterOnTier(wt.gx - 1, wt.gy),
+        isWaterOnTier(wt.gx + 1, wt.gy),
+        isWaterOnTier(wt.gx - 1, wt.gy - 1),
+        isWaterOnTier(wt.gx + 1, wt.gy - 1),
+        isWaterOnTier(wt.gx - 1, wt.gy + 1),
+        isWaterOnTier(wt.gx + 1, wt.gy + 1)
+      );
+    }
 
-  // 2. 逐格多層高台繪製（1.0 / 2.0 / 3.0 依鄰格自動拼合邊緣，絕無內部接縫）
+    // 跨河橋樑
+    for (const br of map.bridges) {
+      const bgx = Math.floor(br.x / TILE);
+      const bgy = Math.floor(br.y / TILE);
+      if (Math.abs(cellElevAt(bgx, bgy) - tier) > 0.01) continue;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.45)';
+      ctx.fillRect(br.x + 4, br.y + 8, br.w, br.h);
+
+      ctx.fillStyle = '#A66E38';
+      ctx.fillRect(br.x, br.y, br.w, br.h);
+      ctx.strokeStyle = '#5C3A21';
+      ctx.lineWidth = 2;
+      if (br.orientation === 'horizontal') {
+        for (let bx = br.x + 12; bx < br.x + br.w; bx += 12) {
+          ctx.beginPath();
+          ctx.moveTo(bx, br.y + 4);
+          ctx.lineTo(bx, br.y + br.h - 4);
+          ctx.stroke();
+        }
+        ctx.fillStyle = '#E0B475';
+        ctx.fillRect(br.x, br.y, br.w, 6);
+        ctx.fillRect(br.x, br.y + br.h - 6, br.w, 6);
+      } else {
+        for (let by = br.y + 12; by < br.y + br.h; by += 12) {
+          ctx.beginPath();
+          ctx.moveTo(br.x + 4, by);
+          ctx.lineTo(br.x + br.w - 4, by);
+          ctx.stroke();
+        }
+        ctx.fillStyle = '#E0B475';
+        ctx.fillRect(br.x, br.y, 6, br.h);
+        ctx.fillRect(br.x + br.w - 6, br.y, 6, br.h);
+      }
+      ctx.strokeStyle = '#3B2313';
+      ctx.lineWidth = 2.5;
+      ctx.strokeRect(br.x, br.y, br.w, br.h);
+    }
+
+    // 鐵道路軌物件（支援同層水平、垂直、轉角與分叉）
+    const railAtSameTier = (gx: number, gy: number) => {
+      if (gy < 0 || gy >= map.rows || gx < 0 || gx >= map.cols) return null;
+      if (Math.abs(cellElevAt(gx, gy) - tier) > 0.01) return null;
+      return railMap.get(`${gx},${gy}`) ?? null;
+    };
+    for (const [key, axis] of railMap.entries()) {
+      const [gxStr, gyStr] = key.split(',');
+      const gx = Number(gxStr);
+      const gy = Number(gyStr);
+      if (Math.abs(cellElevAt(gx, gy) - tier) > 0.01) continue;
+      drawRailTrackObjectTile(
+        ctx,
+        gx * TILE,
+        gy * TILE,
+        gx,
+        gy,
+        axis,
+        railAtSameTier(gx, gy - 1),
+        railAtSameTier(gx, gy + 1),
+        railAtSameTier(gx - 1, gy),
+        railAtSameTier(gx + 1, gy)
+      );
+    }
+  };
+
+  drawTierSurfaceOverlays(0);
+
+  // 2. 逐格多層高台繪製（支援任意高度 >= 1.0 依鄰格自動拼合邊緣，並依層疊加該層水面／橋樑／路軌／參道）
   const hasTier = (gx: number, gy: number, tier: number) => {
     if (gy < 0 || gy >= map.rows || gx < 0 || gx >= map.cols) return false;
     return map.tileGrid[gy][gx].elev >= tier;
   };
 
-  for (const tier of [1.0, 2.0, 3.0]) {
+  const tierSet = new Set<number>();
+  for (let gy = 0; gy < map.rows; gy++) {
+    for (let gx = 0; gx < map.cols; gx++) {
+      const e = map.tileGrid[gy][gx].elev;
+      if (e >= 1.0) tierSet.add(Math.round(e * 10) / 10);
+    }
+  }
+  const tiers = Array.from(tierSet).sort((a, b) => a - b);
+
+  for (const tier of tiers) {
     const shadowDepth = 5 + tier * 4;
     ctx.fillStyle = 'rgba(9, 10, 13, 0.5)';
     for (let gy = 0; gy < map.rows; gy++) {
@@ -1222,9 +1599,15 @@ export function renderMapBaseLayer(
         drawPlatformTile(ctx, tx, ty, cell.style, tier, openN, openS, openW, openE);
       }
     }
+
+    drawTierSurfaceOverlays(tier);
   }
 
-  // 3. 梯級 (0.5 / 1.5 / 2.5) — 對應 tile.png 有階段的小箱子（深棕木條階梯與天然石板階梯）
+  ctx.strokeStyle = '#0F172A';
+  ctx.lineWidth = 8;
+  ctx.strokeRect(0, 0, map.width, map.height);
+
+  // 3. 梯級 (所在層 +0.5) — 深棕木條階梯與天然土坡／切石板階梯
   const sortedStairs = [...map.stairs].sort((a, b) => a.elevation - b.elevation);
   for (const st of sortedStairs) {
     if (st.style === 'hill') {
@@ -1324,27 +1707,41 @@ export function renderMapBaseLayer(
       continue;
     }
 
-    // tile.png 有階梯的小箱子階梯風格：深木底座 + 陰影立體踏板木條
-    ctx.fillStyle = '#4E3119';
+    // 切石／木條踏台階梯：顯式繪製上坡方向亮邊與漸層踏階，旋轉時方向清晰可辨
+    const isStoneStair = st.style === 'pyramid' || st.style === 'castle_dais';
+    ctx.fillStyle = isStoneStair ? '#78716C' : '#4E3119';
     ctx.fillRect(st.x, st.y, st.w, st.h);
     ctx.strokeStyle = '#1E1107';
     ctx.lineWidth = 2;
     ctx.strokeRect(st.x, st.y, st.w, st.h);
 
+    const stepHi = isStoneStair ? '#E7E5E4' : '#D4A362';
+    const stepBase = isStoneStair ? '#A8A29E' : '#B8874A';
     if (st.direction === 'east' || st.direction === 'west') {
-      for (let sx = st.x + 5; sx < st.x + st.w - 3; sx += 9) {
+      const steps = Math.max(3, Math.floor((st.w - 8) / 9));
+      for (let i = 0; i < steps; i++) {
+        const sx = st.x + 5 + i * 9;
+        const t = st.direction === 'east' ? i / Math.max(1, steps - 1) : 1 - i / Math.max(1, steps - 1);
         ctx.fillStyle = '#231409';
         ctx.fillRect(sx + 2, st.y + 4, 6, st.h - 8);
-        ctx.fillStyle = '#B8874A';
+        ctx.fillStyle = t > 0.55 ? stepHi : stepBase;
         ctx.fillRect(sx, st.y + 3, 5, st.h - 7);
       }
+      // 上坡頂緣亮邊
+      ctx.fillStyle = 'rgba(253, 224, 71, 0.35)';
+      ctx.fillRect(st.direction === 'east' ? st.x + st.w - 4 : st.x + 1, st.y + 3, 3, st.h - 6);
     } else {
-      for (let sy = st.y + 5; sy < st.y + st.h - 3; sy += 9) {
+      const steps = Math.max(3, Math.floor((st.h - 8) / 9));
+      for (let i = 0; i < steps; i++) {
+        const sy = st.y + 5 + i * 9;
+        const t = st.direction === 'south' ? i / Math.max(1, steps - 1) : 1 - i / Math.max(1, steps - 1);
         ctx.fillStyle = '#231409';
         ctx.fillRect(st.x + 4, sy + 2, st.w - 8, 6);
-        ctx.fillStyle = '#B8874A';
+        ctx.fillStyle = t > 0.55 ? stepHi : stepBase;
         ctx.fillRect(st.x + 3, sy, st.w - 7, 5);
       }
+      ctx.fillStyle = 'rgba(253, 224, 71, 0.35)';
+      ctx.fillRect(st.x + 3, st.direction === 'south' ? st.y + st.h - 4 : st.y + 1, st.w - 6, 3);
     }
   }
 
@@ -1658,6 +2055,11 @@ export function renderMapCanopies(
 }
 
 export type HelpCatalogVisualId =
+  | 'floor_shrine_dirt'
+  | 'floor_bamboo_moss'
+  | 'floor_desert_sand'
+  | 'floor_castle_stone'
+  | 'floor_warehouse_steel'
   | 'terrain_flat'
   | 'terrain_grass'
   | 'terrain_river'
@@ -1665,7 +2067,9 @@ export type HelpCatalogVisualId =
   | 'terrain_hill_stair'
   | 'terrain_platform'
   | 'terrain_platform_stair'
+  | 'terrain_plank'
   | 'object_bridge'
+  | 'object_stone_road'
   | 'object_rail'
   | 'object_stair_crate'
   | 'object_small_crate'
@@ -1673,6 +2077,7 @@ export type HelpCatalogVisualId =
   | 'object_container'
   | 'object_train_car'
   | 'object_stone_wall'
+  | 'object_stone_wall_green'
   | 'object_shrine_wall'
   | 'object_castle_pillar'
   | 'object_house'
@@ -1696,11 +2101,14 @@ function createMiniArenaMap(
     height: rows * TILE,
     biome,
     name: 'preview',
+    floorGrid: createFloorGrid(cols, rows, biomeToDefaultFloor(biome)),
     tileGrid,
     stairs: [],
     waterTiles: [],
     waterTileKeys: new Set<string>(),
     bridges: [],
+    stoneRoads: [],
+    railTracks: [],
     obstacles: [],
     bushes: [],
     trees: [],
@@ -1712,7 +2120,7 @@ function createMiniArenaMap(
 }
 
 /**
- * 供 Help 百科「地形／物件 Debug 圖鑑」使用的實戰同源 Canvas 預覽繪製器：
+ * 供 Help 百科「地形／物件 Debug 圖鑑」與編輯器工具欄使用的實戰同源 Canvas 預覽繪製器：
  * 直接呼叫主渲染管線（地板層 -> 高台層 -> 物件層 -> 樹冠層），確保圖鑑與實戰畫面完全一致。
  */
 export function renderHelpPreview(
@@ -1725,20 +2133,38 @@ export function renderHelpPreview(
   let drawCanopy = false;
 
   switch (visualId) {
+    case 'floor_shrine_dirt': {
+      map = createMiniArenaMap(3, 2, 'shrine_outdoor');
+      break;
+    }
+    case 'floor_bamboo_moss': {
+      map = createMiniArenaMap(3, 2, 'bamboo_outdoor');
+      break;
+    }
+    case 'floor_desert_sand':
     case 'terrain_flat': {
       map = createMiniArenaMap(3, 2, 'desert_outdoor');
       break;
     }
+    case 'floor_castle_stone': {
+      map = createMiniArenaMap(3, 2, 'castle_indoor');
+      break;
+    }
+    case 'floor_warehouse_steel': {
+      map = createMiniArenaMap(3, 2, 'warehouse_indoor');
+      break;
+    }
     case 'terrain_grass': {
       map = createMiniArenaMap(3, 2, 'shrine_outdoor');
-      for (let gy = 0; gy < 2; gy++) {
-        for (let gx = 0; gx < 3; gx++) map.tileGrid[gy][gx] = { elev: 0, style: 'grass_ground' };
-      }
+      map.floorGrid = createFloorGrid(3, 2, 'grass_ground');
       break;
     }
     case 'terrain_river': {
+      // 展示混搭草坪＋沙地上鋪設透明邊緣河道
       map = createMiniArenaMap(4, 3, 'desert_outdoor');
       for (let gy = 0; gy < 3; gy++) {
+        map.floorGrid![gy][0] = 'grass_ground';
+        map.floorGrid![gy][1] = 'grass_ground';
         for (let gx = 1; gx <= 2; gx++) {
           map.waterTiles.push({ gx, gy });
           map.waterTileKeys.add(`${gx},${gy}`);
@@ -1779,6 +2205,13 @@ export function renderHelpPreview(
       map.stairs.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, elevation: 0.5, direction: 'east', style: 'pyramid' });
       break;
     }
+    case 'terrain_plank': {
+      map = createMiniArenaMap(4, 3, 'shrine_outdoor');
+      for (let gy = 0; gy < 3; gy++) {
+        for (let gx = 1; gx <= 3; gx++) map.tileGrid[gy][gx] = { elev: 1.0, style: 'shrine_floor' };
+      }
+      break;
+    }
     case 'object_bridge': {
       map = createMiniArenaMap(5, 3, 'desert_outdoor');
       for (let gy = 0; gy < 3; gy++) {
@@ -1790,11 +2223,24 @@ export function renderHelpPreview(
       map.bridges.push({ x: 1 * TILE, y: 1 * TILE, w: 3 * TILE, h: 1 * TILE, orientation: 'horizontal' });
       break;
     }
-    case 'object_rail': {
-      map = createMiniArenaMap(4, 2, 'desert_outdoor');
-      for (let gy = 0; gy < 2; gy++) {
-        for (let gx = 0; gx < 4; gx++) map.tileGrid[gy][gx] = { elev: 0, style: 'rail_track' };
+    case 'object_stone_road': {
+      map = createMiniArenaMap(4, 3, 'shrine_outdoor');
+      for (let gy = 0; gy < 3; gy++) {
+        map.floorGrid![gy][0] = 'grass_ground';
+        map.floorGrid![gy][3] = 'grass_ground';
+        map.stoneRoads.push({ gx: 1, gy }, { gx: 2, gy });
       }
+      break;
+    }
+    case 'object_rail': {
+      map = createMiniArenaMap(4, 3, 'desert_outdoor');
+      map.railTracks.push(
+        { gx: 0, gy: 1, orientation: 'horizontal' },
+        { gx: 1, gy: 1, orientation: 'horizontal' },
+        { gx: 2, gy: 0, orientation: 'vertical' },
+        { gx: 2, gy: 1, orientation: 'vertical' },
+        { gx: 2, gy: 2, orientation: 'vertical' }
+      );
       break;
     }
     case 'object_stair_crate': {
@@ -1804,64 +2250,72 @@ export function renderHelpPreview(
     }
     case 'object_small_crate': {
       map = createMiniArenaMap(3, 2, 'warehouse_indoor');
-      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, blocksBullets: false, elevation: 1.0, kind: 'crate', style: 'small_crate' });
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, elevation: 1.0, kind: 'crate', style: 'small_crate' });
       break;
     }
     case 'object_big_crate': {
       map = createMiniArenaMap(4, 3, 'warehouse_indoor');
-      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 2 * TILE, h: 2 * TILE, blocksBullets: true, elevation: 1.5, kind: 'crate', style: 'default' });
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 2 * TILE, h: 2 * TILE, elevation: 1.5, kind: 'crate', style: 'default' });
       break;
     }
     case 'object_container': {
       map = createMiniArenaMap(6, 3, 'warehouse_indoor');
-      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 4 * TILE, h: 2 * TILE, blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#0284C7' });
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 4 * TILE, h: 2 * TILE, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#0284C7' });
       break;
     }
     case 'object_train_car': {
       map = createMiniArenaMap(6, 3, 'desert_outdoor');
       for (let gx = 0; gx < 6; gx++) {
-        map.tileGrid[0][gx] = { elev: 0, style: 'rail_track' };
-        map.tileGrid[1][gx] = { elev: 0, style: 'rail_track' };
+        map.railTracks.push({ gx, gy: 0, orientation: 'horizontal' }, { gx, gy: 1, orientation: 'horizontal' });
       }
-      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 4 * TILE, h: 2 * TILE, blocksBullets: true, elevation: 2.0, kind: 'crate', style: 'train_car', colorVariant: 'loco' });
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 4 * TILE, h: 2 * TILE, elevation: 2.0, kind: 'crate', style: 'train_car', colorVariant: 'loco' });
       break;
     }
     case 'object_stone_wall': {
       map = createMiniArenaMap(4, 3, 'desert_outdoor');
       map.obstacles.push(
-        { x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'stone_wall_tan' },
-        { x: 2 * TILE, y: 0.5 * TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'stone_wall_tan' },
-        { x: TILE, y: 1.5 * TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'stone_wall_tan' }
+        { x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, elevation: 10, kind: 'wall', style: 'stone_wall_tan' },
+        { x: 2 * TILE, y: 0.5 * TILE, w: TILE, h: TILE, elevation: 10, kind: 'wall', style: 'stone_wall_tan' },
+        { x: TILE, y: 1.5 * TILE, w: TILE, h: TILE, elevation: 10, kind: 'wall', style: 'stone_wall_tan' }
+      );
+      break;
+    }
+    case 'object_stone_wall_green': {
+      map = createMiniArenaMap(4, 3, 'shrine_outdoor');
+      map.obstacles.push(
+        { x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, elevation: 10, kind: 'wall', style: 'stone_wall_green' },
+        { x: 2 * TILE, y: 0.5 * TILE, w: TILE, h: TILE, elevation: 10, kind: 'wall', style: 'stone_wall_green' },
+        { x: TILE, y: 1.5 * TILE, w: TILE, h: TILE, elevation: 10, kind: 'wall', style: 'stone_wall_green' }
       );
       break;
     }
     case 'object_shrine_wall': {
       map = createMiniArenaMap(3, 2, 'shrine_outdoor');
-      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'shrine_wall' });
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, elevation: 10, kind: 'wall', style: 'shrine_wall' });
       break;
     }
     case 'object_castle_pillar': {
       map = createMiniArenaMap(3, 2, 'castle_indoor');
-      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'castle_pillar' });
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: TILE, h: TILE, elevation: 10, kind: 'wall', style: 'castle_pillar' });
       break;
     }
     case 'object_house': {
       map = createMiniArenaMap(5, 3, 'desert_outdoor');
-      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 3 * TILE, h: 2 * TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'house' });
+      map.obstacles.push({ x: TILE, y: 0.5 * TILE, w: 3 * TILE, h: 2 * TILE, elevation: 10, kind: 'wall', style: 'house', direction: 'south' });
       break;
     }
     case 'object_bamboo': {
       // 同時展示竹林物件套用在「草坪平地」與「土丘高地」上時透明處清晰呈現底層地形
       map = createMiniArenaMap(4, 3, 'bamboo_outdoor');
       for (let gy = 0; gy < 3; gy++) {
-        map.tileGrid[gy][0] = { elev: 0, style: 'grass_ground' };
-        map.tileGrid[gy][1] = { elev: 0, style: 'grass_ground' };
+        map.floorGrid![gy][0] = 'grass_ground';
+        map.floorGrid![gy][1] = 'grass_ground';
         map.tileGrid[gy][2] = { elev: 1.0, style: 'hill' };
         map.tileGrid[gy][3] = { elev: 1.0, style: 'hill' };
       }
       map.obstacles.push(
-        { x: 0.5 * TILE, y: TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'bamboo' },
-        { x: 2.5 * TILE, y: TILE, w: TILE, h: TILE, blocksBullets: true, elevation: 10, kind: 'wall', style: 'bamboo' }
+        { x: 0.5 * TILE, y: TILE, w: TILE, h: TILE, elevation: 10, kind: 'wall', style: 'bamboo', direction: 'north' },
+        { x: 2.5 * TILE, y: TILE, w: TILE, h: TILE, elevation: 10, kind: 'wall', style: 'bamboo', direction: 'east' }
       );
       break;
     }
@@ -1873,7 +2327,7 @@ export function renderHelpPreview(
     case 'object_tree': {
       map = createMiniArenaMap(3, 3, 'shrine_outdoor');
       for (let gy = 0; gy < 3; gy++) {
-        for (let gx = 0; gx < 3; gx++) map.tileGrid[gy][gx] = { elev: 0, style: 'grass_ground' };
+        for (let gx = 0; gx < 3; gx++) map.floorGrid![gy][gx] = 'grass_ground';
       }
       map.trees.push({
         x: TILE,

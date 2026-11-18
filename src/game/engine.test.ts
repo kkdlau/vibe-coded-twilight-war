@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { sfx } from '../audio/sfx';
+import {
+  arenaMapToCustomData,
+  buildArenaMapFromCustom,
+  createBlankCustomMap,
+  hasUniformCellElevation,
+  validateCustomMap,
+} from './customMaps';
 import { FACTION_CHARACTERS, GUNS, MELEES, getReputationQiMultiplier, getWeaponSwapDuration } from './data';
 import { TwilightEngine, snapToEightDirections } from './engine';
 import { TILE, createArenaMap } from './maps';
@@ -1697,8 +1704,7 @@ describe('Map redesigns, allied spawn proximity, and character title format', ()
 
   it('builds western_railway without grass platforms or hills, with rail tracks, train cars, two-room building & small crates; and stanley_island as 34x44 vertical zero-crate breached island', () => {
     const railway = createArenaMap('western_railway');
-    const railCount = railway.tileGrid.flat().filter((t) => t.style === 'rail_track').length;
-    expect(railCount).toBeGreaterThan(20);
+    expect(railway.railTracks.length).toBeGreaterThan(20);
     expect(railway.tileGrid.flat().some((t) => t.style === 'hill' || t.style === 'wooden_plank' || t.elev > 0)).toBe(false);
     const trains = railway.obstacles.filter((o) => o.style === 'train_car');
     expect(trains.length).toBeGreaterThanOrEqual(3);
@@ -2068,7 +2074,7 @@ describe('Rifle 1.1x pistol baseline, map & layer updates, wall height 10, zero 
     const desert = createArenaMap('desert_ruins');
     expect(desert.obstacles.some((o) => o.kind === 'wall' && o.style === 'stone_wall_tan' && Math.round(o.x / TILE) === 25 && Math.round(o.y / TILE) === 2)).toBe(true);
     expect(desert.obstacles.some((o) => o.kind === 'wall' && o.style === 'stone_wall_tan' && Math.round(o.x / TILE) === 25 && Math.round(o.y / TILE) === 5)).toBe(true);
-    expect(desert.obstacles.some((o) => o.kind === 'crate' && o.style === 'small_crate' && Math.round(o.x / TILE) === 25 && Math.round(o.y / TILE) === 4 && !o.blocksBullets)).toBe(true);
+    expect(desert.obstacles.some((o) => o.kind === 'crate' && o.style === 'small_crate' && Math.round(o.x / TILE) === 25 && Math.round(o.y / TILE) === 4 && o.elevation === 1.0)).toBe(true);
     expect(desert.obstacles.some((o) => o.kind === 'crate' && o.w === 2 * TILE && Math.round(o.x / TILE) === 16 && Math.round(o.y / TILE) === 14)).toBe(true);
 
     const allMaps: MapId[] = [
@@ -2373,4 +2379,286 @@ describe('Solid height-10 trees, zero bush vision penalty, continuous rifle shri
     expect(engine.floatingTexts.some((ft) => ft.text.includes('盾擋') || ft.text.includes('盾格'))).toBe(false);
   });
 });
+
+describe('Gun magazine persistence across drop/pickup, active-hand reload & swap cancel, and custom map builder', () => {
+  it('preserves exact gun ammoInMag across player and AI drops and pickups with zero free refill', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const rifle = GUNS.find((g) => g.kind === 'rifle')!;
+    engine.pickups = [];
+
+    // Player equips a rifle with 11/30 ammo, drops it, and picks it back up -> must remain 11/30
+    engine.player.activeHand = 0;
+    engine.player.weapons[0] = { type: 'gun', def: rifle, ammoInMag: 11, reloadTimer: 0 };
+    engine.dropActiveWeapon();
+    expect(engine.player.weapons[0].def.kind).toBe('pistol');
+    expect(engine.pickups.length).toBe(1);
+    expect(engine.pickups[0].ammoInMag).toBe(11);
+
+    engine.tryPickup();
+    const pickedByPlayer = gunInHand(engine, 0);
+    expect(pickedByPlayer.def.kind).toBe('rifle');
+    expect(pickedByPlayer.ammoInMag).toBe(11);
+
+    // Player drops again with 7 bullets remaining; an AI soldier picks it up -> AI keeps 7 bullets
+    pickedByPlayer.ammoInMag = 7;
+    engine.dropActiveWeapon();
+    const enemy = engine.enemies[0];
+    enemy.weapons[0] = { type: 'gun', def: GUNS.find((g) => g.kind === 'pistol')!, ammoInMag: 12, reloadTimer: 0 };
+    enemy.x = engine.pickups[0].x;
+    enemy.y = engine.pickups[0].y;
+    (engine as unknown as { enemyTryPickupWeapon: (e: EnemyEntity) => void }).enemyTryPickupWeapon(enemy);
+    expect(enemy.weapons[0].type).toBe('gun');
+    if (enemy.weapons[0].type === 'gun') {
+      expect(enemy.weapons[0].def.kind).toBe('rifle');
+      expect(enemy.weapons[0].ammoInMag).toBe(7);
+    }
+  });
+
+  it('cancels player reload on hand swap and never finishes reloading a holstered gun', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    engine.enemies = [];
+    const rifle = GUNS.find((g) => g.kind === 'rifle')!;
+    engine.player.activeHand = 0;
+    engine.player.reserveAmmo = 30;
+    engine.player.weapons[0] = { type: 'gun', def: rifle, ammoInMag: 4, reloadTimer: 0 };
+
+    engine.startReload();
+    expect(gunInHand(engine, 0).reloadTimer).toBeGreaterThan(0);
+
+    // Swap to melee hand mid-reload -> cancels reloadTimer immediately
+    engine.switchWeapon();
+    expect(engine.player.activeHand).toBe(1);
+    expect(gunInHand(engine, 0).reloadTimer).toBe(0);
+
+    // Advance well past reloadTime while holding melee hand -> off-hand gun stays at 4 bullets and reserve stays 30
+    for (let i = 0; i < 60; i++) engine.update(0.05, 1280, 720);
+    expect(gunInHand(engine, 0).ammoInMag).toBe(4);
+    expect(engine.player.reserveAmmo).toBe(30);
+  });
+
+  it('cancels AI reload on hand swap and never refills off-hand gun magazine during swap', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    (engine as unknown as { deploymentQueue: Record<FactionId, number> }).deploymentQueue = {
+      royal: 0,
+      shadow: 0,
+      mercenary: 0,
+    };
+
+    const rifle = GUNS.find((g) => g.kind === 'rifle')!;
+    enemy.activeHand = 0;
+    enemy.weapons[0] = { type: 'gun', def: rifle, ammoInMag: 0, reloadTimer: 1.5 };
+
+    // Swap AI to melee hand -> reloadTimer must immediately cancel and ammoInMag remain 0
+    (engine as unknown as { switchEnemyHand: (e: EnemyEntity, hand: WeaponHand) => void }).switchEnemyHand(enemy, 1);
+    expect(enemy.activeHand).toBe(1);
+    expect(enemy.weapons[0].type === 'gun' && enemy.weapons[0].reloadTimer).toBe(0);
+    expect(enemy.weapons[0].type === 'gun' && enemy.weapons[0].ammoInMag).toBe(0);
+
+    // Simulate close-range melee engagement where AI stays in hand 1 over 2s -> off-hand gun stays at 0
+    enemy.stunTimer = 0;
+    enemy.blindTimer = 0;
+    enemy.x = 12 * TILE;
+    enemy.y = 19.3 * TILE;
+    engine.player.x = 12.9 * TILE;
+    engine.player.y = 19.3 * TILE;
+    for (let i = 0; i < 40; i++) engine.update(0.05, 1280, 720);
+    if (enemy.weapons[0].type === 'gun' && (enemy.activeHand as WeaponHand) === 1) {
+      expect(enemy.weapons[0].ammoInMag).toBe(0);
+    }
+  });
+
+  it('compiles dynamic baseElev + 0.5 stairs, boots TwilightEngine with customMap, and validates 3-faction reachability via BFS', () => {
+    const custom = createBlankCustomMap('高台測試圖', 'desert_outdoor', 28, 20);
+    // Stack elevated tiles at 2.0 and 3.0, and place stairs directly on top of them
+    custom.tileGrid[8][10] = { elev: 2.0, style: 'pyramid' };
+    custom.tileGrid[8][11] = { elev: 3.0, style: 'pyramid' };
+    custom.stairs.push(
+      { gx: 10, gy: 8, direction: 'east', style: 'pyramid' },
+      { gx: 11, gy: 8, direction: 'east', style: 'pyramid' }
+    );
+    custom.railTracks.push(
+      { gx: 4, gy: 5, orientation: 'horizontal' },
+      { gx: 5, gy: 5, orientation: 'vertical' }
+    );
+    custom.obstacles.push(
+      { gx: 7, gy: 7, gw: 1, gh: 1, elevation: 10, kind: 'wall', style: 'bamboo', direction: 'west' },
+      { gx: 14, gy: 10, gw: 2, gh: 3, elevation: 10, kind: 'wall', style: 'house', direction: 'east' }
+    );
+
+    const arena = buildArenaMapFromCustom(custom);
+    const stair25 = arena.stairs.find((s) => Math.round(s.x / TILE) === 10 && Math.round(s.y / TILE) === 8);
+    const stair35 = arena.stairs.find((s) => Math.round(s.x / TILE) === 11 && Math.round(s.y / TILE) === 8);
+    expect(stair25?.elevation).toBeCloseTo(2.5, 5);
+    expect(stair35?.elevation).toBeCloseTo(3.5, 5);
+    expect(arena.railTracks).toEqual([
+      { gx: 4, gy: 5, orientation: 'horizontal' },
+      { gx: 5, gy: 5, orientation: 'vertical' },
+    ]);
+    expect(arena.obstacles.find((o) => o.style === 'bamboo')?.direction).toBe('west');
+    expect(arena.obstacles.find((o) => o.style === 'house')?.direction).toBe('east');
+
+    // Blank map starts genuinely empty and fails validation until 3 factions have reachable spawns
+    const emptyBlank = createBlankCustomMap('空白起手圖', 'shrine_outdoor', 28, 20);
+    expect(emptyBlank.factionSpawns.royal.length).toBe(0);
+    expect(emptyBlank.factionSpawns.shadow.length).toBe(0);
+    expect(emptyBlank.factionSpawns.mercenary.length).toBe(0);
+    expect(emptyBlank.obstacles.length).toBe(0);
+    expect(validateCustomMap(emptyBlank).valid).toBe(false);
+
+    // Populating all 3 faction spawns on open ground passes BFS validation and boots engine
+    const validBlank = createBlankCustomMap('連通圖', 'shrine_outdoor', 28, 20);
+    validBlank.factionSpawns.royal = [{ gx: 2, gy: 9 }, { gx: 2, gy: 10 }];
+    validBlank.factionSpawns.shadow = [{ gx: 25, gy: 9 }, { gx: 25, gy: 10 }];
+    validBlank.factionSpawns.mercenary = [{ gx: 14, gy: 3 }, { gx: 14, gy: 16 }];
+    expect(validateCustomMap(validBlank).valid).toBe(true);
+
+    // Booting TwilightEngine directly with a customMap uses custom.id and custom geometry
+    const engine = new TwilightEngine(
+      'royal',
+      FACTION_CHARACTERS.royal[0],
+      validBlank.id,
+      { royal: 10, shadow: 10, mercenary: 10 },
+      () => {},
+      () => {},
+      validBlank
+    );
+    expect(engine.map.id).toBe(validBlank.id);
+    expect(engine.map.cols).toBe(28);
+    expect(engine.map.rows).toBe(20);
+
+    // Isolating Shadow spawn on an unbridged elev=2.0 cliff without +0.5 stairs must fail BFS validation
+    const isolated = createBlankCustomMap('孤島失敗圖', 'shrine_outdoor', 28, 20);
+    isolated.factionSpawns.royal = [{ gx: 2, gy: 9 }];
+    isolated.factionSpawns.shadow = [{ gx: 24, gy: 9 }];
+    isolated.factionSpawns.mercenary = [{ gx: 14, gy: 3 }];
+    const sSpawn = isolated.factionSpawns.shadow[0];
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        isolated.tileGrid[sSpawn.gy + dy][sSpawn.gx + dx] = { elev: 2.0, style: 'hill' };
+      }
+    }
+    const invalidRes = validateCustomMap(isolated);
+    expect(invalidRes.valid).toBe(false);
+    expect(invalidRes.errors.some((msg) => msg.includes('無法與其他陣營連通'))).toBe(true);
+
+    // Tokyo shrine stone road (14..15, y) must exist as explicit stoneRoads objects rather than biome hardcoding
+    const shrine = createArenaMap('tokyo_shrine');
+    expect(shrine.stoneRoads.length).toBe(shrine.rows * 2);
+    expect(shrine.stoneRoads.every((r) => r.gx === 14 || r.gx === 15)).toBe(true);
+  });
+
+  it('stacks objects atop elevated terrain, enforces uniform base elevation for multi-tile objects, and preserves floorGrid/elevation under water', () => {
+    const stacked = createBlankCustomMap('疊加測試圖', 'bamboo_outdoor', 24, 18);
+    stacked.factionSpawns.royal = [{ gx: 2, gy: 9 }];
+    stacked.factionSpawns.shadow = [{ gx: 21, gy: 9 }];
+    stacked.factionSpawns.mercenary = [{ gx: 12, gy: 15 }];
+
+    // Build a 1.0 hill plateau across (8..13, 6..10)
+    for (let gy = 6; gy <= 10; gy++) {
+      for (let gx = 8; gx <= 13; gx++) {
+        stacked.tileGrid[gy][gx] = { elev: 1.0, style: 'hill' };
+      }
+    }
+    // Mix multiple FloorStyle values on the ground and under water
+    stacked.floorGrid![9][4] = 'grass_ground';
+    stacked.floorGrid![9][5] = 'castle_stone';
+    stacked.floorGrid![9][6] = 'warehouse_steel';
+    // Water placed on grass_ground AND on a 1.0 hill tile keeps both floorGrid and tileGrid elevation intact
+    stacked.waterTiles.push({ gx: 4, gy: 9 }, { gx: 8, gy: 6 });
+
+    // Place small crate (+1.0 -> 2.0), big crate (+1.5 -> 2.5), container (+2.0 -> 3.0) uniformly on 1.0 plateau
+    stacked.obstacles.push(
+      { gx: 9, gy: 8, gw: 1, gh: 1, elevation: 1.0, kind: 'crate', style: 'small_crate' },
+      { gx: 10, gy: 7, gw: 2, gh: 2, elevation: 1.5, kind: 'crate', style: 'default' },
+      { gx: 9, gy: 9, gw: 4, gh: 2, elevation: 2.0, kind: 'crate', style: 'container', colorVariant: '#0284C7' }
+    );
+
+    expect(hasUniformCellElevation(stacked.tileGrid, 10, 7, 2, 2)).toBe(true);
+    expect(validateCustomMap(stacked).valid).toBe(true);
+
+    const compiled = buildArenaMapFromCustom(stacked);
+    const small = compiled.obstacles.find((o) => o.style === 'small_crate')!;
+    const big = compiled.obstacles.find((o) => o.style === 'default')!;
+    const cont = compiled.obstacles.find((o) => o.style === 'container')!;
+    expect(small.elevation).toBe(2.0);
+    expect(big.elevation).toBe(2.5);
+    expect(cont.elevation).toBe(3.0);
+
+    // Water preserved floorGrid and tileGrid elevation
+    expect(compiled.floorGrid?.[9][4]).toBe('grass_ground');
+    expect(compiled.floorGrid?.[9][5]).toBe('castle_stone');
+    expect(compiled.floorGrid?.[9][6]).toBe('warehouse_steel');
+    expect(compiled.tileGrid[6][8].elev).toBe(1.0);
+    expect(compiled.waterTileKeys.has('4,9')).toBe(true);
+    expect(compiled.waterTileKeys.has('8,6')).toBe(true);
+
+    // Roundtrip back to CustomMapData subtracts base terrain elev to restore intrinsic height
+    const roundtrip = arenaMapToCustomData(compiled);
+    expect(roundtrip.obstacles.find((o) => o.style === 'small_crate')?.elevation).toBe(1.0);
+    expect(roundtrip.obstacles.find((o) => o.style === 'default')?.elevation).toBe(1.5);
+    expect(roundtrip.obstacles.find((o) => o.style === 'container')?.elevation).toBe(2.0);
+
+    // Physics verification in TwilightEngine:
+    const engine = new TwilightEngine(
+      'royal',
+      FACTION_CHARACTERS.royal[0],
+      stacked.id,
+      { royal: 10, shadow: 10, mercenary: 10 },
+      () => {},
+      () => {},
+      stacked
+    );
+    const internals = engine as unknown as {
+      getHeightAtPoint: (x: number, y: number) => {
+        totalHeight: number;
+        terrainHeight: number;
+        isWall: boolean;
+        isCrate: boolean;
+      };
+      traceBulletSegment: (
+        x1: number,
+        y1: number,
+        angle: number,
+        maxDist: number,
+        startElev: number,
+        emitBurst?: boolean
+      ) => { x1: number; y1: number; x2: number; y2: number };
+      getFootstepSurface: (x: number, y: number) => string;
+    };
+
+    // getHeightAtPoint inside stacked small crate reports total 2.0 and underlying terrainHeight 1.0
+    const h = internals.getHeightAtPoint(9.5 * TILE, 8.5 * TILE);
+    expect(h.totalHeight).toBe(2.0);
+    expect(h.terrainHeight).toBe(1.0);
+    expect(h.isCrate).toBe(true);
+
+    // Ground (0.0) shooter cannot shoot past the stacked 2.0 small crate (Δh = 2.0 >= 2.0)
+    const groundShot = internals.traceBulletSegment(5.5 * TILE, 8.5 * TILE, 0, 12 * TILE, 0, false);
+    expect(groundShot.x2).toBeLessThanOrEqual(9.05 * TILE);
+
+    // Shooter standing on 1.0 hill shoots cleanly OVER the stacked 2.0 small crate (Δh = 1.0 <= 1.0)
+    const hillShot = internals.traceBulletSegment(8.3 * TILE, 8.5 * TILE, 0, 3 * TILE, 1.0, false);
+    expect(hillShot.x2).toBeGreaterThan(10.0 * TILE);
+
+    // Footsteps adapt dynamically across mixed floorGrid styles
+    expect(internals.getFootstepSurface(4.5 * TILE, 9.5 * TILE)).toBe('soft');
+    expect(internals.getFootstepSurface(5.5 * TILE, 9.5 * TILE)).toBe('hard');
+    expect(internals.getFootstepSurface(6.5 * TILE, 9.5 * TILE)).toBe('hard');
+
+    // Straddling a multi-tile object across 1.0 hill and 0.0 ground fails validateCustomMap
+    const uneven = createBlankCustomMap('高低錯落失敗圖', 'shrine_outdoor', 24, 18);
+    uneven.factionSpawns.royal = [{ gx: 2, gy: 9 }];
+    uneven.factionSpawns.shadow = [{ gx: 21, gy: 9 }];
+    uneven.factionSpawns.mercenary = [{ gx: 12, gy: 15 }];
+    uneven.tileGrid[7][10] = { elev: 1.0, style: 'hill' }; // only 1 of 4 tiles raised
+    uneven.obstacles.push({ gx: 10, gy: 7, gw: 2, gh: 2, elevation: 1.5, kind: 'crate', style: 'default' });
+    expect(hasUniformCellElevation(uneven.tileGrid, 10, 7, 2, 2)).toBe(false);
+    const unevenRes = validateCustomMap(uneven);
+    expect(unevenRes.valid).toBe(false);
+    expect(unevenRes.errors.some((err) => err.includes('地形高度不一致'))).toBe(true);
+  });
+});
+
 

@@ -1,16 +1,18 @@
 import React, { useMemo, useState } from 'react';
 import { ArrowLeft, ChevronDown, MapPin, Play, Shuffle, Swords } from 'lucide-react';
+import { BIOME_OPTIONS, CustomMapData } from '../game/customMaps';
 import { FACTIONS, FACTION_CHARACTERS, MAP_CATALOG, getReputationQiMultiplier } from '../game/data';
-import { CharacterSkin, FactionId, MapId, MeleeKind } from '../game/types';
+import { CharacterSkin, FactionId, MeleeKind } from '../game/types';
 import { MiniMapPreview } from './MiniMapPreview';
 import { CharacterAvatarSvg, FactionLogoSvg, WeaponIconSvg } from './WeaponArt';
 
 interface FactionRoomViewProps {
   faction: FactionId;
-  initialMapChoice: MapId | 'random';
+  initialMapChoice: string;
+  customMaps: CustomMapData[];
   reputations: Record<FactionId, number>;
   onBackToLobby: () => void;
-  onStartBattle: (faction: FactionId, character: CharacterSkin, mapId: MapId, mapChoice: MapId | 'random') => void;
+  onStartBattle: (faction: FactionId, character: CharacterSkin, mapId: string, mapChoice: string) => void;
 }
 
 const MELEE_KEYS: { kind: MeleeKind; label: string }[] = [
@@ -20,13 +22,14 @@ const MELEE_KEYS: { kind: MeleeKind; label: string }[] = [
   { kind: 'shield', label: '戰術防彈盾' },
 ];
 
-function pickRandomMapId(): MapId {
+function pickRandomMapId(): string {
   return MAP_CATALOG[Math.floor(Math.random() * MAP_CATALOG.length)].id;
 }
 
 export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
   faction,
   initialMapChoice,
+  customMaps,
   reputations,
   onBackToLobby,
   onStartBattle,
@@ -37,12 +40,19 @@ export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
   const qiMult = getReputationQiMultiplier(facRep);
 
   const [selectedCharId, setSelectedCharId] = useState<string>(characters[0].id);
-  const [selectedMapChoice, setSelectedMapChoice] = useState<MapId | 'random'>(initialMapChoice);
+  const [selectedMapChoice, setSelectedMapChoice] = useState<string>(initialMapChoice);
 
   const selectedChar = characters.find((c) => c.id === selectedCharId) || characters[0];
+  const selectedCustomMap = useMemo(
+    () => (selectedMapChoice === 'random' ? undefined : customMaps.find((m) => m.id === selectedMapChoice)),
+    [selectedMapChoice, customMaps]
+  );
   const selectedMapMeta = useMemo(
-    () => (selectedMapChoice === 'random' ? null : MAP_CATALOG.find((m) => m.id === selectedMapChoice) || MAP_CATALOG[0]),
-    [selectedMapChoice]
+    () =>
+      selectedMapChoice === 'random' || selectedCustomMap
+        ? null
+        : MAP_CATALOG.find((m) => m.id === selectedMapChoice) || MAP_CATALOG[0],
+    [selectedMapChoice, selectedCustomMap]
   );
 
   const handleLaunchBattle = () => {
@@ -181,15 +191,29 @@ export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
                 <select
                   id="map-select"
                   value={selectedMapChoice}
-                  onChange={(e) => setSelectedMapChoice(e.target.value as MapId | 'random')}
+                  onChange={(e) => setSelectedMapChoice(e.target.value)}
                   className="w-full appearance-none bg-slate-900 border border-slate-700 hover:border-amber-400/70 focus:border-amber-400 focus:outline-none rounded-xl pl-3.5 pr-9 py-2 text-xs font-semibold text-white cursor-pointer"
                 >
                   <option value="random">隨機地圖（7 張戰場隨機抽取）</option>
-                  {MAP_CATALOG.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name}（{m.environment} · {m.region}）
-                    </option>
-                  ))}
+                  <optgroup label="內建戰場">
+                    {MAP_CATALOG.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}（{m.environment} · {m.region}）
+                      </option>
+                    ))}
+                  </optgroup>
+                  {customMaps.length > 0 && (
+                    <optgroup label="自訂戰場">
+                      {customMaps.map((cm) => {
+                        const biomeInfo = BIOME_OPTIONS.find((b) => b.id === cm.biome);
+                        return (
+                          <option key={cm.id} value={cm.id}>
+                            ★ {cm.name}（自訂 · {cm.cols}×{cm.rows} · {biomeInfo?.environment ?? '野外'}）
+                          </option>
+                        );
+                      })}
+                    </optgroup>
+                  )}
                 </select>
                 <ChevronDown className="pointer-events-none w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
               </div>
@@ -198,7 +222,7 @@ export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
 
           {/* Map Preview Container: Show mystery panel on Random, real MiniMapPreview with Zoom/Scroll when specific map chosen */}
           <div className="flex-1 min-h-0 flex flex-col items-center justify-center bg-slate-950/75 border border-slate-800/80 rounded-xl overflow-hidden relative">
-            {selectedMapChoice === 'random' || !selectedMapMeta ? (
+            {selectedMapChoice === 'random' || (!selectedMapMeta && !selectedCustomMap) ? (
               <div className="flex flex-col items-center justify-center text-center max-w-md px-6 py-8">
                 <div className="w-20 h-20 rounded-2xl bg-slate-900 border border-amber-400/40 flex items-center justify-center mb-4 shadow-xl shadow-amber-500/10">
                   <Shuffle className="w-9 h-9 text-amber-400" />
@@ -211,11 +235,22 @@ export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
                   如需指定地形並預覽出生點，請於上方選單切換特定地圖
                 </div>
               </div>
+            ) : selectedCustomMap ? (
+              <>
+                <MiniMapPreview
+                  mapId={selectedCustomMap.id}
+                  customMap={selectedCustomMap}
+                  className="w-full h-full border-0 rounded-none"
+                />
+                <div className="pointer-events-none absolute top-2 left-2 bg-slate-950/88 border border-amber-400/50 rounded-lg px-2.5 py-1 text-[11px] font-medium text-amber-200">
+                  自訂地圖 · {selectedCustomMap.name} · {selectedCustomMap.cols}×{selectedCustomMap.rows}
+                </div>
+              </>
             ) : (
               <>
-                <MiniMapPreview mapId={selectedMapMeta.id} className="w-full h-full border-0 rounded-none" />
+                <MiniMapPreview mapId={selectedMapMeta!.id} className="w-full h-full border-0 rounded-none" />
                 <div className="pointer-events-none absolute top-2 left-2 bg-slate-950/88 border border-slate-700/80 rounded-lg px-2.5 py-1 text-[11px] font-medium text-slate-200">
-                  {selectedMapMeta.name} · {selectedMapMeta.environment} · {selectedMapMeta.region}
+                  {selectedMapMeta!.name} · {selectedMapMeta!.environment} · {selectedMapMeta!.region}
                 </div>
               </>
             )}
@@ -225,10 +260,19 @@ export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
           <div className="shrink-0 pt-2.5 border-t border-slate-800 flex items-center justify-between gap-4">
             <div className="min-w-0 flex-1">
               <div className="text-xs font-semibold text-white truncate">
-                {selectedChar.name} · {selectedMapMeta ? selectedMapMeta.name : '隨機戰場（開戰抽取）'}
+                {selectedChar.name} ·{' '}
+                {selectedCustomMap
+                  ? `自訂：${selectedCustomMap.name}`
+                  : selectedMapMeta
+                    ? selectedMapMeta.name
+                    : '隨機戰場（開戰抽取）'}
               </div>
               <div className="text-[11px] text-slate-400 truncate mt-0.5">
-                {selectedMapMeta ? selectedMapMeta.highlight : '7 張不對稱實戰戰場 · 地形與出生點開戰揭曉'}
+                {selectedCustomMap
+                  ? `${selectedCustomMap.cols}×${selectedCustomMap.rows} 玩家創作戰場 · 支援全高台疊加與自訂出生點`
+                  : selectedMapMeta
+                    ? selectedMapMeta.highlight
+                    : '7 張不對稱實戰戰場 · 地形與出生點開戰揭曉'}
               </div>
             </div>
 
