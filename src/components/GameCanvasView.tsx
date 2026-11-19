@@ -381,7 +381,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
           {/* Ammo / Shield Durability shown ONLY directly beneath the active weapon icon */}
           {p.weapon.type === 'gun' ? (
             <div
-              className="mt-0.5 flex items-center justify-center gap-2 font-mono-num text-sm font-black tracking-tight"
+              className="mt-0.5 flex items-center justify-center gap-2 font-cyrbit text-sm font-black"
               style={{ textShadow: '0 2px 4px rgba(0,0,0,0.95)' }}
             >
               <span className="text-white">
@@ -391,10 +391,10 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
             </div>
           ) : p.weapon.def.kind === 'shield' ? (
             <div
-              className="mt-0.5 flex items-center justify-center font-mono-num text-sm font-black tracking-tight"
+              className="mt-0.5 flex items-center justify-center font-cyrbit text-sm font-black"
               style={{ textShadow: '0 2px 4px rgba(0,0,0,0.95)' }}
             >
-              <span className={p.shield <= 25 ? 'text-amber-400' : 'text-sky-300'}>
+              <span className={p.shield <= 25 ? 'text-amber-400' : 'text-white'}>
                 {p.shield}/{p.maxShield}
               </span>
             </div>

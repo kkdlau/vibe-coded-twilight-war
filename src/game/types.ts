@@ -121,6 +121,7 @@ export type PlatformStyle =
   | 'default'
   | 'shrine_floor'
   | 'hill'
+  | 'mud_pit'
   | 'pyramid'
   | 'castle_dais'
   | 'wooden_plank'
@@ -128,7 +129,7 @@ export type PlatformStyle =
   | 'rail_track';
 
 export interface StairRect extends Rect {
-  elevation: number; // 所在底層高度 +0.5（例：0.0 -> 0.5、1.0 -> 1.5、2.0 -> 2.5）
+  elevation: number; // 所在底層高度 +0.5（例：-1.0 -> -0.5、0.0 -> 0.5、1.0 -> 1.5、2.0 -> 2.5）
   direction: 'north' | 'south' | 'east' | 'west';
   style?: PlatformStyle;
 }
@@ -143,11 +144,16 @@ export type ObstacleStyle =
   | 'house'
   | 'stone_wall_tan'
   | 'stone_wall_green'
+  | 'stone_wall_red'
+  | 'stone_wall_blue'
+  | 'railing'
+  | 'rock_small'
+  | 'rock_large'
   | 'bamboo'
   | 'train_car';
 
 export interface Obstacle extends Rect {
-  elevation: number; // 1.0 小木箱, 1.5 大木箱, 2.0 貨櫃／火車車廂, 10 實牆／房屋／竹林／石柱（子彈與視線統一依高度計算）
+  elevation: number; // 1.0 小木箱／欄杆, 1.5 大木箱／小石塊, 2.0 貨櫃／火車／大岩石, 10 實牆／房屋／竹林／石柱（子彈與視線統一依高度計算）
   kind: 'crate' | 'wall';
   style?: ObstacleStyle;
   colorVariant?: string;
@@ -157,6 +163,14 @@ export interface Obstacle extends Rect {
 export interface GridTile {
   gx: number;
   gy: number;
+}
+
+export type FarmCropType = 'empty' | 'carrot' | 'wheat' | 'cabbage';
+
+export interface FarmTileCell {
+  gx: number;
+  gy: number;
+  crop: FarmCropType;
 }
 
 export interface RailTrackCell {
@@ -172,6 +186,7 @@ export interface TerrainTileCell {
 
 export interface BridgeRect extends Rect {
   orientation: 'horizontal' | 'vertical';
+  style?: 'wood' | 'stone';
 }
 
 export interface BushProp {

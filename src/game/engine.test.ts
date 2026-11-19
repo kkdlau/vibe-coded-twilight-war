@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { sfx } from '../audio/sfx';
 import {
+  TREE_FOLIAGE_PRESETS,
   arenaMapToCustomData,
   buildArenaMapFromCustom,
   createBlankCustomMap,
@@ -2660,5 +2661,233 @@ describe('Gun magazine persistence across drop/pickup, active-hand reload & swap
     expect(unevenRes.errors.some((err) => err.includes('地形高度不一致'))).toBe(true);
   });
 });
+
+describe('Mud pits (-1.0), railings (+1.0), new themed objects, pure numeric popups, and high-ground AI', () => {
+  it('supports -1.0/-2.0 mud pits with -0.5 stairs, BFS reachability, and uninterrupted 0.0 shots across the pit', () => {
+    const pitMap = createBlankCustomMap('泥坑測試圖', 'bamboo_outdoor', 24, 18);
+    pitMap.factionSpawns.royal = [{ gx: 2, gy: 9 }];
+    pitMap.factionSpawns.shadow = [{ gx: 12, gy: 9 }]; // Inside -1.0 mud pit
+    pitMap.factionSpawns.mercenary = [{ gx: 21, gy: 9 }];
+
+    // Dig a -1.0 mud pit (10..14, 7..11) with a -2.0 core at (12, 9) and mud stairs linking layers
+    for (let gy = 7; gy <= 11; gy++) {
+      for (let gx = 10; gx <= 14; gx++) {
+        pitMap.tileGrid[gy][gx] = { elev: -1.0, style: 'mud_pit' };
+      }
+    }
+    pitMap.stairs.push({ gx: 10, gy: 9, direction: 'west', style: 'mud_pit' }); // -1.0 + 0.5 = -0.5
+    // Ground-level 1.0 small crate on the far right bank (x = 16, y = 9)
+    pitMap.obstacles.push({ gx: 16, gy: 9, gw: 1, gh: 1, elevation: 1.0, kind: 'crate', style: 'small_crate' });
+
+    const compiled = buildArenaMapFromCustom(pitMap);
+    const mudStair = compiled.stairs.find((s) => Math.round(s.x / TILE) === 10 && Math.round(s.y / TILE) === 9);
+    expect(mudStair?.elevation).toBeCloseTo(-0.5, 5);
+    expect(validateCustomMap(pitMap).valid).toBe(true);
+
+    // Without mud stair, a -1.0 isolated pit containing a spawn fails BFS validation
+    const isolatedPit = createBlankCustomMap('孤立泥坑圖', 'bamboo_outdoor', 24, 18);
+    isolatedPit.factionSpawns.royal = [{ gx: 2, gy: 9 }];
+    isolatedPit.factionSpawns.shadow = [{ gx: 12, gy: 9 }];
+    isolatedPit.factionSpawns.mercenary = [{ gx: 21, gy: 9 }];
+    for (let gy = 8; gy <= 10; gy++) {
+      for (let gx = 11; gx <= 13; gx++) {
+        isolatedPit.tileGrid[gy][gx] = { elev: -1.0, style: 'mud_pit' };
+      }
+    }
+    expect(validateCustomMap(isolatedPit).valid).toBe(false);
+
+    const engine = new TwilightEngine(
+      'royal',
+      FACTION_CHARACTERS.royal[0],
+      pitMap.id,
+      { royal: 10, shadow: 10, mercenary: 10 },
+      () => {},
+      () => {},
+      pitMap
+    );
+    const internals = engine as unknown as {
+      traceBulletSegment: (
+        x1: number,
+        y1: number,
+        angle: number,
+        maxDist: number,
+        startElev: number,
+        emitBurst?: boolean
+      ) => { x1: number; y1: number; x2: number; y2: number };
+    };
+
+    // Ground shooter (0.0) firing across the -1.0 pit must clear the 1.0 crate on the far bank (effectiveFloor >= 0 -> Δh = 1.0 <= 1.0)
+    const acrossShot = internals.traceBulletSegment(8.5 * TILE, 9.5 * TILE, 0, 10 * TILE, 0, false);
+    expect(acrossShot.x2).toBeGreaterThan(17.5 * TILE);
+
+    // Shooter inside -1.0 pit firing up at the 1.0 crate (height 1.0 - (-1.0) = 2.0 >= 2.0) IS blocked at crate edge
+    const pitShot = internals.traceBulletSegment(12.5 * TILE, 9.5 * TILE, 0, 7 * TILE, -1.0, false);
+    expect(pitShot.x2).toBeLessThanOrEqual(16.05 * TILE);
+  });
+
+  it('enforces railing (+1.0) movement block while letting 0.0 shots pass, and compiles new custom objects & palettes', () => {
+    const map = createBlankCustomMap('新物件測試圖', 'warehouse_indoor', 24, 18);
+    map.factionSpawns.royal = [{ gx: 2, gy: 9 }];
+    map.factionSpawns.shadow = [{ gx: 21, gy: 9 }];
+    map.factionSpawns.mercenary = [{ gx: 12, gy: 15 }];
+
+    const sakuraPalette = TREE_FOLIAGE_PRESETS.find((p) => p.id === 'sakura')!.palette;
+    map.tileGrid[5][5] = { elev: -1.0, style: 'mud_pit' };
+    map.waterTiles.push({ gx: 7, gy: 9 });
+    map.bridges.push({ gx: 7, gy: 9, gw: 1, gh: 1, orientation: 'horizontal', style: 'stone' });
+    map.farmTiles = [{ gx: 4, gy: 4, crop: 'carrot' }];
+    map.trees.push({ gx: 3, gy: 3, foliagePalette: sakuraPalette });
+    map.obstacles.push(
+      { gx: 10, gy: 9, gw: 1, gh: 1, elevation: 1.0, kind: 'crate', style: 'railing' },
+      { gx: 14, gy: 5, gw: 1, gh: 1, elevation: 1.5, kind: 'crate', style: 'rock_small', colorVariant: '#6B4226' },
+      { gx: 16, gy: 5, gw: 2, gh: 2, elevation: 2.0, kind: 'crate', style: 'rock_large', colorVariant: '#CBD5E1' },
+      { gx: 14, gy: 12, gw: 1, gh: 1, elevation: 10, kind: 'wall', style: 'stone_wall_red' },
+      { gx: 15, gy: 12, gw: 1, gh: 1, elevation: 10, kind: 'wall', style: 'stone_wall_blue' }
+    );
+
+    const compiled = buildArenaMapFromCustom(map);
+    expect(compiled.bridges[0].style).toBe('stone');
+    expect(compiled.farmTiles).toEqual([{ gx: 4, gy: 4, crop: 'carrot' }]);
+    expect(compiled.trees[0].foliagePalette).toEqual(sakuraPalette);
+    expect(compiled.obstacles.find((o) => o.style === 'rock_small')?.elevation).toBe(1.5);
+    expect(compiled.obstacles.find((o) => o.style === 'rock_large')?.elevation).toBe(2.0);
+    expect(compiled.obstacles.some((o) => o.style === 'stone_wall_red' && o.elevation >= 10)).toBe(true);
+    expect(compiled.obstacles.some((o) => o.style === 'stone_wall_blue' && o.elevation >= 10)).toBe(true);
+
+    const engine = new TwilightEngine(
+      'royal',
+      FACTION_CHARACTERS.royal[0],
+      map.id,
+      { royal: 10, shadow: 10, mercenary: 10 },
+      () => {},
+      () => {},
+      map
+    );
+    const internals = engine as unknown as {
+      moveCharacterWithElevation: (x: number, y: number, e: number, dx: number, dy: number, r: number) => { x: number; y: number };
+      traceBulletSegment: (x1: number, y1: number, a: number, d: number, e: number, b?: boolean) => { x2: number; y2: number };
+      hasLineOfSight: (ax: number, ay: number, ae: number, bx: number, by: number, be: number, r: number) => boolean;
+    };
+
+    // Player at (9.2, 9.5) cannot walk east into railing at (10..11, 9..10)
+    const blockedMove = internals.moveCharacterWithElevation(9.2 * TILE, 9.5 * TILE, 0, 30, 0, engine.player.radius);
+    expect(blockedMove.x).toBeLessThan(9.55 * TILE);
+
+    // Ground 0.0 bullet & LoS pass cleanly over +1.0 railing
+    const overShot = internals.traceBulletSegment(8.5 * TILE, 9.5 * TILE, 0, 5 * TILE, 0, false);
+    expect(overShot.x2).toBeGreaterThan(13.0 * TILE);
+    expect(internals.hasLineOfSight(8.5 * TILE, 9.5 * TILE, 0, 12.5 * TILE, 9.5 * TILE, 0, 8 * TILE)).toBe(true);
+  });
+
+  it('renders strictly numeric white/red floating deduction texts (-XX) on shield shatter and HP damage', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+
+    engine.player.activeHand = 1;
+    meleeInHand(engine).def = MELEES.find((m) => m.kind === 'shield')!;
+    meleeInHand(engine).durability = 15;
+    engine.player.angle = Math.atan2(enemy.y - engine.player.y, enemy.x - engine.player.x);
+    engine.player.invulnTimer = 0;
+    engine.floatingTexts = [];
+
+    const damagePlayer = (engine as unknown as {
+      damagePlayer: (rawDmg: number, isMelee: boolean, attackerId?: string, ox?: number, oy?: number) => void;
+    }).damagePlayer.bind(engine);
+
+    // Shield shatter with 15 remaining vs 20 ranged damage -> white -15 (plus -5 leaked HP), zero shatter/core text
+    damagePlayer(20, false, enemy.id, enemy.x, enemy.y);
+    expect(engine.floatingTexts.some((ft) => ft.text === '-15' && ft.color === '#FFFFFF')).toBe(true);
+    expect(engine.floatingTexts.some((ft) => ft.text === '-5' && ft.color === '#EF4444')).toBe(true);
+    expect(engine.floatingTexts.some((ft) => ft.text.includes('碎裂') || ft.text.includes('核心'))).toBe(false);
+
+    // Direct HP hit -> red -22 only (no '核心' label)
+    engine.player.invulnTimer = 0;
+    engine.floatingTexts = [];
+    damagePlayer(22, false, enemy.id, enemy.x, enemy.y);
+    expect(engine.floatingTexts.some((ft) => ft.text === '-22' && ft.color === '#EF4444')).toBe(true);
+    expect(engine.floatingTexts.some((ft) => ft.text.includes('核心'))).toBe(false);
+  });
+
+  it('keeps ranged AI on high ground while engaging lower-ground enemies and picks elevated one-way cover spots', () => {
+    const hgMap = createBlankCustomMap('高地AI測試', 'desert_outdoor', 24, 18);
+    hgMap.factionSpawns.royal = [{ gx: 2, gy: 9 }];
+    hgMap.factionSpawns.shadow = [{ gx: 14, gy: 9 }];
+    hgMap.factionSpawns.mercenary = [{ gx: 21, gy: 15 }];
+
+    // Shadow plateau (12..15, 7..11) at 1.0 with stairs at (11, 9) and low crate edge for one-way cover
+    for (let gy = 7; gy <= 11; gy++) {
+      for (let gx = 12; gx <= 15; gx++) {
+        hgMap.tileGrid[gy][gx] = { elev: 1.0, style: 'pyramid' };
+      }
+    }
+    hgMap.stairs.push({ gx: 11, gy: 9, direction: 'west', style: 'pyramid' });
+    // Small crate at (10, 9) with ground height 1.0: 1.0 AI shoots cleanly over (Δh = 0.0) while 0.0 target shooting slightly behind or up stays disadvantaged
+    hgMap.obstacles.push({ gx: 11, gy: 8, gw: 1, gh: 1, elevation: 1.0, kind: 'crate', style: 'small_crate' });
+
+    const engine = new TwilightEngine(
+      'royal',
+      FACTION_CHARACTERS.royal[0],
+      hgMap.id,
+      { royal: 10, shadow: 10, mercenary: 10 },
+      () => {},
+      () => {},
+      hgMap
+    );
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    (engine as unknown as { deploymentQueue: Record<FactionId, number> }).deploymentQueue = {
+      royal: 0,
+      shadow: 0,
+      mercenary: 0,
+    };
+
+    // Place Shadow AI at (13.5, 9.5) on 1.0 plateau with rifle, Player below at (8.5, 9.5) on 0.0 ground
+    enemy.x = 13.5 * TILE;
+    enemy.y = 9.5 * TILE;
+    enemy.elevation = 1.0;
+    enemy.activeHand = 0;
+    const rifle = GUNS.find((g) => g.kind === 'rifle')!;
+    enemy.weapons[0] = { type: 'gun', def: rifle, ammoInMag: rifle.magSize, reloadTimer: 0 };
+    enemy.stunTimer = 0;
+    enemy.blindTimer = 0;
+
+    engine.player.x = 8.5 * TILE;
+    engine.player.y = 9.5 * TILE;
+    engine.player.elevation = 0;
+
+    // Step AI for 1.5s: AI must NOT descend the stair onto 0.0 ground when holding 1.0 high ground with clear shots
+    for (let i = 0; i < 45; i++) {
+      engine.update(1 / 30, 1280, 720);
+    }
+    expect(enemy.elevation).toBeGreaterThanOrEqual(1.0);
+    expect(enemy.x).toBeGreaterThanOrEqual(11.9 * TILE);
+
+    // Tactical spot evaluation respects holdingHighGround=true by never selecting lower elevation tiles
+    const tactical = (
+      engine as unknown as {
+        findBestTacticalSpot: (
+          ai: EnemyEntity,
+          target: { x: number; y: number; elev: number },
+          sight: number,
+          desired: number,
+          holdingHighGround: boolean,
+          reloading: boolean
+        ) => { x: number; y: number } | null;
+      }
+    ).findBestTacticalSpot(
+      enemy,
+      { x: engine.player.x, y: engine.player.y, elev: 0 },
+      8 * TILE,
+      200,
+      true,
+      false
+    );
+    if (tactical) {
+      expect(tactical.x).toBeGreaterThanOrEqual(11.9 * TILE);
+    }
+  });
+});
+
 
 

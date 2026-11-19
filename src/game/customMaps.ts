@@ -5,6 +5,8 @@ import {
   BridgeRect,
   BushProp,
   FactionId,
+  FarmCropType,
+  FarmTileCell,
   FloorStyle,
   GridTile,
   Obstacle,
@@ -34,6 +36,7 @@ export interface CustomBridgeEntry {
   gw: number;
   gh: number;
   orientation: 'horizontal' | 'vertical';
+  style?: 'wood' | 'stone';
 }
 
 export interface CustomObstacleEntry {
@@ -41,7 +44,7 @@ export interface CustomObstacleEntry {
   gy: number;
   gw: number;
   gh: number;
-  elevation: number; // 物件自身高度（1.0 小箱 / 1.5 大箱 / 2.0 貨櫃火車 / 10 實牆），編譯時自動疊加所在地形高度
+  elevation: number; // 物件自身高度（1.0 小箱／欄杆 / 1.5 大箱／小石 / 2.0 貨櫃火車／大岩 / 10 實牆），編譯時自動疊加所在地形高度
   kind: 'crate' | 'wall';
   style?: ObstacleStyle;
   colorVariant?: string;
@@ -72,6 +75,7 @@ export interface CustomMapData {
   bridges: CustomBridgeEntry[];
   stoneRoads: GridTile[];
   railTracks: RailTrackCell[];
+  farmTiles?: FarmTileCell[];
   obstacles: CustomObstacleEntry[];
   bushes: CustomSpawnCoord[];
   trees: (CustomSpawnCoord & { canopyRadius?: number; foliagePalette?: [string, string, string, string] })[];
@@ -120,16 +124,51 @@ export function floorStyleToBiome(floor: FloorStyle): MapBiome {
   }
 }
 
+export interface TreeFoliagePreset {
+  id: string;
+  label: string;
+  palette: [string, string, string, string];
+}
+
+export const TREE_FOLIAGE_PRESETS: TreeFoliagePreset[] = [
+  { id: 'evergreen', label: '翠綠常青', palette: ['#14532D', '#166534', '#15803D', '#22C55E'] },
+  { id: 'sakura', label: '櫻花粉嫩', palette: ['#831843', '#BE185D', '#F472B6', '#FBCFE8'] },
+  { id: 'maple', label: '秋楓赤紅', palette: ['#7F1D1D', '#991B1B', '#DC2626', '#F97316'] },
+  { id: 'ginkgo', label: '金黃銀杏', palette: ['#713F12', '#A16207', '#CA8A04', '#FACC15'] },
+  { id: 'bamboo_jade', label: '嵐山翡翠', palette: ['#064E3B', '#047857', '#059669', '#34D399'] },
+  { id: 'snow_pine', label: '蒼雪冷杉', palette: ['#0F4C5C', '#1E607A', '#3891A6', '#BAE6FD'] },
+];
+
+export const ROCK_COLOR_OPTIONS: { id: 'black' | 'brown' | 'white'; label: string; swatch: string }[] = [
+  { id: 'black', label: '黑石', swatch: '#334155' },
+  { id: 'brown', label: '棕石', swatch: '#78350F' },
+  { id: 'white', label: '白石', swatch: '#CBD5E1' },
+];
+
+export const HOUSE_STYLE_OPTIONS: { id: string; label: string; swatch: string }[] = [
+  { id: 'moss_stone', label: '青苔石瓦屋', swatch: '#52525B' },
+  { id: 'edo_wood', label: '和風朱簷屋', swatch: '#991B1B' },
+  { id: 'royal_manor', label: '歐式紅頂屋', swatch: '#7C2D12' },
+  { id: 'desert_adobe', label: '荒野土坯屋', swatch: '#B45309' },
+  { id: 'brick_workshop', label: '紅磚工坊屋', swatch: '#9A3412' },
+];
+
+export const FARM_CROP_OPTIONS: { id: FarmCropType; label: string; swatch: string }[] = [
+  { id: 'empty', label: '空田（耕土）', swatch: '#78350F' },
+  { id: 'carrot', label: '紅蘿蔔田', swatch: '#EA580C' },
+  { id: 'wheat', label: '小麥金穗田', swatch: '#EAB308' },
+  { id: 'cabbage', label: '甘藍菜田', swatch: '#22C55E' },
+];
+
 export function getDefaultTreePalette(biome: MapBiome): [string, string, string, string] {
   switch (biome) {
     case 'castle_indoor':
       return ['#064E3B', '#047857', '#059669', '#34D399'];
     case 'desert_outdoor':
       return ['#14532D', '#3F6212', '#65A30D', '#84CC16'];
-    case 'warehouse_indoor':
-      return ['#1E293B', '#334155', '#475569', '#64748B'];
     case 'bamboo_outdoor':
       return ['#14532D', '#166534', '#16A34A', '#4ADE80'];
+    case 'warehouse_indoor':
     case 'shrine_outdoor':
     default:
       return ['#14532D', '#166534', '#15803D', '#22C55E'];
@@ -170,8 +209,9 @@ export function getIntrinsicObstacleHeight(
   fallbackElevation = 1.0
 ): number {
   if (kind === 'wall') return 10;
-  if (style === 'small_crate') return 1.0;
-  if (style === 'container' || style === 'train_car') return 2.0;
+  if (style === 'small_crate' || style === 'railing') return 1.0;
+  if (style === 'rock_small') return 1.5;
+  if (style === 'container' || style === 'train_car' || style === 'rock_large') return 2.0;
   if (style === 'default') return 1.5;
   return fallbackElevation;
 }
@@ -221,6 +261,7 @@ export function createBlankCustomMap(
     bridges: [],
     stoneRoads: [],
     railTracks: [],
+    farmTiles: [],
     obstacles: [],
     bushes: [],
     trees: [],
@@ -239,6 +280,7 @@ export function cloneCustomMap(data: CustomMapData): CustomMapData {
   const cloned = JSON.parse(JSON.stringify(data)) as CustomMapData;
   cloned.stoneRoads = cloned.stoneRoads || [];
   cloned.railTracks = cloned.railTracks || [];
+  cloned.farmTiles = cloned.farmTiles || [];
   cloned.floorGrid = resolveNormalizedFloorGrid(cloned);
   return cloned;
 }
@@ -275,6 +317,7 @@ export function resizeCustomMap(data: CustomMapData, nextCols: number, nextRows:
     bridges: data.bridges.filter((b) => inCell(b.gx, b.gy, b.gw, b.gh)),
     stoneRoads: (data.stoneRoads || []).filter((r) => inCell(r.gx, r.gy)),
     railTracks: (data.railTracks || []).filter((r) => inCell(r.gx, r.gy)),
+    farmTiles: (data.farmTiles || []).filter((f) => inCell(f.gx, f.gy)),
     obstacles: data.obstacles.filter((o) => inCell(o.gx, o.gy, o.gw, o.gh)),
     bushes: data.bushes.filter((b) => inCell(b.gx, b.gy)),
     trees: data.trees.filter((t) => inCell(t.gx, t.gy)),
@@ -345,6 +388,7 @@ export function buildArenaMapFromCustom(data: CustomMapData): ArenaMap {
     w: b.gw * TILE,
     h: b.gh * TILE,
     orientation: b.orientation,
+    style: b.style ?? 'wood',
   }));
 
   const stoneRoads: GridTile[] = (data.stoneRoads || []).filter(
@@ -358,6 +402,14 @@ export function buildArenaMapFromCustom(data: CustomMapData): ArenaMap {
     }
   }
   const railTracks = Array.from(railMap.values());
+
+  const farmMap = new Map<string, FarmTileCell>();
+  for (const ft of data.farmTiles || []) {
+    if (ft.gx >= 0 && ft.gx < cols && ft.gy >= 0 && ft.gy < rows) {
+      farmMap.set(`${ft.gx},${ft.gy}`, { gx: ft.gx, gy: ft.gy, crop: ft.crop });
+    }
+  }
+  const farmTiles = Array.from(farmMap.values());
 
   const obstacles: Obstacle[] = data.obstacles.map((o) => {
     const baseElev = tileGrid[clamp(o.gy, 0, rows - 1)]?.[clamp(o.gx, 0, cols - 1)]?.elev ?? 0;
@@ -438,6 +490,7 @@ export function buildArenaMapFromCustom(data: CustomMapData): ArenaMap {
     bridges,
     stoneRoads,
     railTracks,
+    farmTiles,
     obstacles,
     bushes,
     trees,
@@ -489,9 +542,11 @@ export function arenaMapToCustomData(map: ArenaMap, customName?: string): Custom
       gw: Math.max(1, Math.round(b.w / TILE)),
       gh: Math.max(1, Math.round(b.h / TILE)),
       orientation: b.orientation,
+      style: b.style ?? 'wood',
     })),
     stoneRoads: map.stoneRoads.map((r) => ({ gx: r.gx, gy: r.gy })),
     railTracks: map.railTracks.map((r) => ({ gx: r.gx, gy: r.gy, orientation: r.orientation })),
+    farmTiles: (map.farmTiles || []).map((f) => ({ gx: f.gx, gy: f.gy, crop: f.crop })),
     obstacles: map.obstacles.map((o) => {
       const gx = Math.round(o.x / TILE);
       const gy = Math.round(o.y / TILE);
@@ -597,7 +652,9 @@ function canStandAtPoint(arena: ArenaMap, x: number, y: number, curElev: number)
     if (Math.abs(getArenaWalkableElevation(arena, sx, sy) - curElev) > 0.5) return false;
   }
   for (const obs of arena.obstacles) {
-    if (obs.kind === 'wall' && resolveCircleRect(x, y, checkR, obs).hit) return false;
+    if ((obs.kind === 'wall' || obs.style === 'railing') && resolveCircleRect(x, y, checkR, obs).hit) {
+      return false;
+    }
   }
   for (const tree of arena.trees) {
     if (resolveCircleRect(x, y, checkR, tree).hit) return false;
@@ -769,6 +826,7 @@ export function loadCustomMaps(): CustomMapData[] {
         floorGrid: resolveNormalizedFloorGrid(item),
         stoneRoads: Array.isArray(item.stoneRoads) ? item.stoneRoads : [],
         railTracks: Array.isArray(item.railTracks) ? item.railTracks : [],
+        farmTiles: Array.isArray(item.farmTiles) ? item.farmTiles : [],
       }));
   } catch {
     return [];

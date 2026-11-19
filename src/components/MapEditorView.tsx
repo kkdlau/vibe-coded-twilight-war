@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Crosshair,
   Download,
@@ -25,7 +27,11 @@ import {
 import { drawPickup } from '../game/combatRenderer';
 import {
   CustomMapData,
+  FARM_CROP_OPTIONS,
   FLOOR_STYLE_OPTIONS,
+  HOUSE_STYLE_OPTIONS,
+  ROCK_COLOR_OPTIONS,
+  TREE_FOLIAGE_PRESETS,
   arenaMapToCustomData,
   buildArenaMapFromCustom,
   cloneCustomMap,
@@ -45,7 +51,15 @@ import {
   renderMapCanopies,
 } from '../game/mapRenderer';
 import { TILE, biomeToDefaultFloor, createArenaMap, createFloorGrid } from '../game/maps';
-import { FactionId, FloorStyle, MapId, ObstacleStyle, PickupItem, PlatformStyle } from '../game/types';
+import {
+  FactionId,
+  FarmCropType,
+  FloorStyle,
+  MapId,
+  ObstacleStyle,
+  PickupItem,
+  PlatformStyle,
+} from '../game/types';
 import { FactionLogoSvg, WeaponIconSvg } from './WeaponArt';
 
 interface MapEditorViewProps {
@@ -60,6 +74,9 @@ type EditorTab = 'floor' | 'terrain' | 'objects' | 'spawns';
 type CompassDir = 'north' | 'east' | 'south' | 'west';
 type RailAxis = 'horizontal' | 'vertical';
 
+type ObjectCategoryId = 'composable' | 'bridges' | 'walls' | 'covers' | 'buildings' | 'nature';
+type TerrainCategoryId = 'tier' | 'stair';
+
 type ToolId =
   | 'floor_shrine_dirt'
   | 'floor_bamboo_moss'
@@ -73,18 +90,28 @@ type ToolId =
   | 'terrain_stone_raise'
   | 'terrain_stone_stair'
   | 'terrain_plank_raise'
+  | 'terrain_plank_stair'
+  | 'terrain_mud_dig'
+  | 'terrain_mud_stair'
   | 'terrain_lower'
   | 'obj_water'
   | 'obj_bridge'
+  | 'obj_stone_bridge'
   | 'obj_stone_road'
   | 'obj_rail'
+  | 'obj_railing'
+  | 'obj_farm'
   | 'obj_stair_crate'
   | 'obj_small_crate'
   | 'obj_big_crate'
+  | 'obj_rock_small'
+  | 'obj_rock_large'
   | 'obj_container'
   | 'obj_train_car'
   | 'obj_stone_wall_tan'
   | 'obj_stone_wall_green'
+  | 'obj_stone_wall_red'
+  | 'obj_stone_wall_blue'
   | 'obj_shrine_wall'
   | 'obj_castle_pillar'
   | 'obj_house'
@@ -109,7 +136,24 @@ interface ToolMeta {
   previewId?: HelpCatalogVisualId;
   rotatable?: boolean;
   floorStyle?: FloorStyle;
+  terrainCategory?: TerrainCategoryId;
+  objectCategory?: ObjectCategoryId;
+  isEraser?: boolean;
 }
+
+const TERRAIN_CATEGORY_META: { id: TerrainCategoryId; label: string }[] = [
+  { id: 'tier', label: '層級（±1.0/層）' },
+  { id: 'stair', label: '攀爬階梯（所在層 +0.5）' },
+];
+
+const OBJECT_CATEGORY_META: { id: ObjectCategoryId; label: string }[] = [
+  { id: 'composable', label: '水域、路網與圍欄' },
+  { id: 'bridges', label: '跨河橋樑' },
+  { id: 'walls', label: '壁壘實牆（高度 10）' },
+  { id: 'covers', label: '箱體、車廂與岩石掩體' },
+  { id: 'buildings', label: '建築房屋（高度 10）' },
+  { id: 'nature', label: '植被、竹林與農田' },
+];
 
 const FLOOR_TOOL_STYLE_MAP: Partial<Record<ToolId, FloorStyle>> = {
   floor_shrine_dirt: 'shrine_dirt',
@@ -141,39 +185,49 @@ const TOOL_CATALOG: ToolMeta[] = [
     floorStyle: opt.id,
   })),
 
-  // Terrain tab (純粹地形高台與階梯，不覆蓋地板)
-  { id: 'terrain_hill_raise', tab: 'terrain', label: '土丘高地（疊加）', heightLabel: '每層 +1.0', footprint: '1×1 格', previewId: 'terrain_hill' },
-  { id: 'terrain_hill_stair', tab: 'terrain', label: '土坡階梯', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'terrain_hill_stair', rotatable: true },
-  { id: 'terrain_stone_raise', tab: 'terrain', label: '切石高台（疊加）', heightLabel: '每層 +1.0', footprint: '1×1 格', previewId: 'terrain_platform' },
-  { id: 'terrain_stone_stair', tab: 'terrain', label: '切石石階', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'terrain_platform_stair', rotatable: true },
-  { id: 'terrain_plank_raise', tab: 'terrain', label: '木板神社高台', heightLabel: '每層 +1.0', footprint: '1×1 格', previewId: 'terrain_plank' },
-  { id: 'terrain_lower', tab: 'terrain', label: '地形橡皮擦（降層／清階梯）', heightLabel: '降 -1.0／清梯', footprint: '1×1 格' },
+  // Terrain tab (層級 ±1.0 與 攀爬階梯 +0.5)
+  { id: 'terrain_hill_raise', tab: 'terrain', terrainCategory: 'tier', label: '土丘高地（疊加）', heightLabel: '每層 +1.0', footprint: '1×1 格', previewId: 'terrain_hill' },
+  { id: 'terrain_stone_raise', tab: 'terrain', terrainCategory: 'tier', label: '切石高台（疊加）', heightLabel: '每層 +1.0', footprint: '1×1 格', previewId: 'terrain_platform' },
+  { id: 'terrain_plank_raise', tab: 'terrain', terrainCategory: 'tier', label: '木板神社高台（疊加）', heightLabel: '每層 +1.0', footprint: '1×1 格', previewId: 'terrain_plank' },
+  { id: 'terrain_mud_dig', tab: 'terrain', terrainCategory: 'tier', label: '泥坑窪地（下挖）', heightLabel: '每層 -1.0', footprint: '1×1 格', previewId: 'terrain_mud' },
+  { id: 'terrain_hill_stair', tab: 'terrain', terrainCategory: 'stair', label: '土坡階梯', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'terrain_hill_stair', rotatable: true },
+  { id: 'terrain_stone_stair', tab: 'terrain', terrainCategory: 'stair', label: '切石石階', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'terrain_platform_stair', rotatable: true },
+  { id: 'terrain_plank_stair', tab: 'terrain', terrainCategory: 'stair', label: '木板神社階梯', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'terrain_plank_stair', rotatable: true },
+  { id: 'terrain_mud_stair', tab: 'terrain', terrainCategory: 'stair', label: '泥坡階梯', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'terrain_mud_stair', rotatable: true },
+  { id: 'terrain_lower', tab: 'terrain', label: '地形橡皮擦', heightLabel: '恢復 1 層／清梯', footprint: '1×1 格', isEraser: true },
 
-  // Objects tab (含水域河道及所有可疊加物件)
-  { id: 'obj_water', tab: 'objects', label: '水域河道', heightLabel: '隨地形層 0.0', footprint: '1×1 格', previewId: 'terrain_river' },
-  { id: 'obj_bridge', tab: 'objects', label: '跨河木橋', heightLabel: '所在層 +0.0', footprint: '可拉框 / 3×2', previewId: 'object_bridge', rotatable: true },
-  { id: 'obj_stone_road', tab: 'objects', label: '石板參道', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_stone_road' },
-  { id: 'obj_rail', tab: 'objects', label: '鐵道路軌', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_rail', rotatable: true },
-  { id: 'obj_stair_crate', tab: 'objects', label: '木條階梯踏台', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'object_stair_crate', rotatable: true },
-  { id: 'obj_small_crate', tab: 'objects', label: '小木箱', heightLabel: '所在層 +1.0', footprint: '1×1 格', previewId: 'object_small_crate' },
-  { id: 'obj_big_crate', tab: 'objects', label: '大木箱（斜撐）', heightLabel: '所在層 +1.5', footprint: '2×2 格', previewId: 'object_big_crate' },
-  { id: 'obj_container', tab: 'objects', label: '彩色鋼製貨櫃', heightLabel: '所在層 +2.0', footprint: '4×2 / 2×4', previewId: 'object_container', rotatable: true },
-  { id: 'obj_train_car', tab: 'objects', label: '火車頭 / 車廂', heightLabel: '所在層 +2.0', footprint: '4×2 / 2×4', previewId: 'object_train_car', rotatable: true },
-  { id: 'obj_stone_wall_tan', tab: 'objects', label: '褐沙石砌實牆', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_stone_wall' },
-  { id: 'obj_stone_wall_green', tab: 'objects', label: '苔綠石砌實牆', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_stone_wall_green' },
-  { id: 'obj_shrine_wall', tab: 'objects', label: '江戶杉木板塀', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_shrine_wall' },
-  { id: 'obj_castle_pillar', tab: 'objects', label: '聖殿雕紋石柱', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_castle_pillar' },
-  { id: 'obj_house', tab: 'objects', label: '斜頂磚石房屋', heightLabel: '高度 10', footprint: '3×2 / 2×3', previewId: 'object_house', rotatable: true },
-  { id: 'obj_bamboo', tab: 'objects', label: '竹林實牆（3 株）', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_bamboo', rotatable: true },
-  { id: 'obj_bush', tab: 'objects', label: '野生灌木草叢', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_bush' },
-  { id: 'obj_tree', tab: 'objects', label: '林間樹木', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_tree' },
-  { id: 'obj_erase', tab: 'objects', label: '移除物件／水域／橋樑', heightLabel: '清除', footprint: '1×1 格' },
+  // Objects tab (分組可折疊，含水域河道及所有可疊加物件)
+  { id: 'obj_water', tab: 'objects', objectCategory: 'composable', label: '水域河道', heightLabel: '隨地形層 0.0', footprint: '1×1 格', previewId: 'terrain_river' },
+  { id: 'obj_stone_road', tab: 'objects', objectCategory: 'composable', label: '石板參道', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_stone_road' },
+  { id: 'obj_rail', tab: 'objects', objectCategory: 'composable', label: '鐵道路軌', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_rail', rotatable: true },
+  { id: 'obj_railing', tab: 'objects', objectCategory: 'composable', label: '防護欄杆', heightLabel: '所在層 +1.0', footprint: '1×1 格', previewId: 'object_railing' },
+  { id: 'obj_bridge', tab: 'objects', objectCategory: 'bridges', label: '跨河木橋', heightLabel: '所在層 +0.0', footprint: '可拉框 / 3×2', previewId: 'object_bridge', rotatable: true },
+  { id: 'obj_stone_bridge', tab: 'objects', objectCategory: 'bridges', label: '跨河石橋', heightLabel: '所在層 +0.0', footprint: '可拉框 / 3×2', previewId: 'object_stone_bridge', rotatable: true },
+  { id: 'obj_stone_wall_tan', tab: 'objects', objectCategory: 'walls', label: '褐沙石砌實牆', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_stone_wall' },
+  { id: 'obj_stone_wall_green', tab: 'objects', objectCategory: 'walls', label: '苔綠石砌實牆', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_stone_wall_green' },
+  { id: 'obj_stone_wall_red', tab: 'objects', objectCategory: 'walls', label: '朱砂紅磚實牆', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_stone_wall_red' },
+  { id: 'obj_stone_wall_blue', tab: 'objects', objectCategory: 'walls', label: '靛青石砌實牆', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_stone_wall_blue' },
+  { id: 'obj_shrine_wall', tab: 'objects', objectCategory: 'walls', label: '江戶杉木板塀', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_shrine_wall' },
+  { id: 'obj_castle_pillar', tab: 'objects', objectCategory: 'walls', label: '聖殿雕紋石柱', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_castle_pillar' },
+  { id: 'obj_stair_crate', tab: 'objects', objectCategory: 'covers', label: '木條階梯踏台', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'object_stair_crate', rotatable: true },
+  { id: 'obj_small_crate', tab: 'objects', objectCategory: 'covers', label: '小木箱', heightLabel: '所在層 +1.0', footprint: '1×1 格', previewId: 'object_small_crate' },
+  { id: 'obj_big_crate', tab: 'objects', objectCategory: 'covers', label: '大木箱（斜撐）', heightLabel: '所在層 +1.5', footprint: '2×2 格', previewId: 'object_big_crate' },
+  { id: 'obj_rock_small', tab: 'objects', objectCategory: 'covers', label: '小石塊（黑/棕/白）', heightLabel: '所在層 +1.5', footprint: '1×1 格', previewId: 'object_rock_small' },
+  { id: 'obj_rock_large', tab: 'objects', objectCategory: 'covers', label: '大岩石（黑/棕/白）', heightLabel: '所在層 +2.0', footprint: '2×2 格', previewId: 'object_rock_large' },
+  { id: 'obj_container', tab: 'objects', objectCategory: 'covers', label: '彩色鋼製貨櫃', heightLabel: '所在層 +2.0', footprint: '4×2 / 2×4', previewId: 'object_container', rotatable: true },
+  { id: 'obj_train_car', tab: 'objects', objectCategory: 'covers', label: '火車頭 / 車廂', heightLabel: '所在層 +2.0', footprint: '4×2 / 2×4', previewId: 'object_train_car', rotatable: true },
+  { id: 'obj_house', tab: 'objects', objectCategory: 'buildings', label: '斜頂房屋（5 式）', heightLabel: '高度 10', footprint: '3×2 / 2×3', previewId: 'object_house', rotatable: true },
+  { id: 'obj_farm', tab: 'objects', objectCategory: 'nature', label: '耕作農田（4 作物）', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_farm' },
+  { id: 'obj_bamboo', tab: 'objects', objectCategory: 'nature', label: '竹林實牆（3 株）', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_bamboo', rotatable: true },
+  { id: 'obj_bush', tab: 'objects', objectCategory: 'nature', label: '野生灌木草叢', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_bush' },
+  { id: 'obj_tree', tab: 'objects', objectCategory: 'nature', label: '林間樹木（自選葉色）', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_tree' },
+  { id: 'obj_erase', tab: 'objects', label: '物件橡皮擦', heightLabel: '清除', footprint: '1×1 格', isEraser: true },
 
   // Spawns tab (陣營出生點；武器、盾牌與彈藥箱統一收編於下方「地圖武器點」按鈕群)
   { id: 'spawn_royal', tab: 'spawns', label: '皇家騎士團出生點', heightLabel: '團隊陣營', footprint: '1×1 格' },
   { id: 'spawn_shadow', tab: 'spawns', label: '天影十字軍出生點', heightLabel: '團隊陣營', footprint: '1×1 格' },
   { id: 'spawn_mercenary', tab: 'spawns', label: '第三勢力出生點', heightLabel: '孤狼陣營', footprint: '1×1 格' },
-  { id: 'spawn_erase', tab: 'spawns', label: '清除出生點／武器補給', heightLabel: '清除', footprint: '1×1 格' },
+  { id: 'spawn_erase', tab: 'spawns', label: '出生／物資橡皮擦', heightLabel: '清除', footprint: '1×1 格', isEraser: true },
 ];
 
 const CONTAINER_COLORS = [
@@ -359,6 +413,10 @@ interface ApplyContext {
   stairDir: CompassDir;
   bambooDir: CompassDir;
   houseDir: CompassDir;
+  houseStyle: string;
+  rockColor: 'black' | 'brown' | 'white';
+  farmCrop: FarmCropType;
+  treePalette: [string, string, string, string];
   railOrientation: RailAxis;
   rotated: boolean;
   containerColor: string;
@@ -375,11 +433,13 @@ function getEffectiveTool(ctxOpts: ApplyContext, forceErase: boolean): ToolId {
 }
 
 function getFootprintForTool(toolId: ToolId, ctxOpts: ApplyContext): { gw: number; gh: number } {
-  if (toolId === 'obj_big_crate') return { gw: 2, gh: 2 };
+  if (toolId === 'obj_big_crate' || toolId === 'obj_rock_large') return { gw: 2, gh: 2 };
   if (toolId === 'obj_house') {
     return ctxOpts.houseDir === 'east' || ctxOpts.houseDir === 'west' ? { gw: 2, gh: 3 } : { gw: 3, gh: 2 };
   }
-  if (toolId === 'obj_bridge') return ctxOpts.rotated ? { gw: 2, gh: 3 } : { gw: 3, gh: 2 };
+  if (toolId === 'obj_bridge' || toolId === 'obj_stone_bridge') {
+    return ctxOpts.rotated ? { gw: 2, gh: 3 } : { gw: 3, gh: 2 };
+  }
   if (toolId === 'obj_container' || toolId === 'obj_train_car') return ctxOpts.rotated ? { gw: 2, gh: 4 } : { gw: 4, gh: 2 };
   return { gw: 1, gh: 1 };
 }
@@ -397,7 +457,7 @@ function validateMultiTileUniformTerrain(data: CustomMapData): string | undefine
   }
   for (const br of data.bridges) {
     if ((br.gw > 1 || br.gh > 1) && !hasUniformCellElevation(data.tileGrid, br.gx, br.gy, br.gw, br.gh)) {
-      return `上方存在跨格木橋 (${br.gx}, ${br.gy}) ${br.gw}×${br.gh}，調整地形會造成底層高度不一致`;
+      return `上方存在跨格橋樑 (${br.gx}, ${br.gy}) ${br.gw}×${br.gh}，調整地形會造成底層高度不一致`;
     }
   }
   return undefined;
@@ -439,6 +499,7 @@ function applyToolToRect(
     next.bridges = next.bridges.filter((b) => !rectsOverlap(b.gx, b.gy, b.gw, b.gh, rx, ry, w, h));
     next.bushes = next.bushes.filter((b) => !rectsOverlap(b.gx, b.gy, 1, 1, rx, ry, w, h));
     next.trees = next.trees.filter((t) => !rectsOverlap(t.gx, t.gy, 1, 1, rx, ry, w, h));
+    next.farmTiles = (next.farmTiles || []).filter((f) => !rectsOverlap(f.gx, f.gy, 1, 1, rx, ry, w, h));
     if (includeRoadsRailsAndWater) {
       next.waterTiles = next.waterTiles.filter((wt) => !rectsOverlap(wt.gx, wt.gy, 1, 1, rx, ry, w, h));
       next.stoneRoads = (next.stoneRoads || []).filter((r) => !rectsOverlap(r.gx, r.gy, 1, 1, rx, ry, w, h));
@@ -461,7 +522,7 @@ function applyToolToRect(
     return { next };
   }
 
-  // Terrain tools (raise/lower height or place stairs — preserves floorGrid and waterTiles)
+  // Terrain tools (raise/dig height or place stairs — preserves floorGrid and waterTiles)
   if (
     effectiveTool === 'terrain_hill_raise' ||
     effectiveTool === 'terrain_stone_raise' ||
@@ -479,7 +540,23 @@ function applyToolToRect(
       for (let gx = minX; gx <= maxX; gx++) {
         const curElev = next.tileGrid[gy][gx].elev;
         const nextElev = Math.min(6, Math.floor(curElev) + 1);
-        next.tileGrid[gy][gx] = { elev: nextElev, style };
+        next.tileGrid[gy][gx] = { elev: nextElev, style: nextElev === 0 ? 'default' : nextElev < 0 ? 'mud_pit' : style };
+      }
+    }
+    const uniformErr = validateMultiTileUniformTerrain(next);
+    if (uniformErr) return { next: prev, error: uniformErr };
+    return { next };
+  }
+
+  if (effectiveTool === 'terrain_mud_dig') {
+    for (let gy = minY; gy <= maxY; gy++) {
+      for (let gx = minX; gx <= maxX; gx++) {
+        const curElev = next.tileGrid[gy][gx].elev;
+        const nextElev = Math.max(-4, Math.floor(curElev) - 1);
+        next.tileGrid[gy][gx] = {
+          elev: nextElev,
+          style: nextElev < 0 ? 'mud_pit' : nextElev === 0 ? 'default' : next.tileGrid[gy][gx].style,
+        };
       }
     }
     const uniformErr = validateMultiTileUniformTerrain(next);
@@ -498,6 +575,12 @@ function applyToolToRect(
             elev: nextElev,
             style: nextElev === 0 ? 'default' : cur.style,
           };
+        } else if (cur.elev <= -1.0) {
+          const nextElev = Math.min(0, Math.ceil(cur.elev) + 1);
+          next.tileGrid[gy][gx] = {
+            elev: nextElev,
+            style: nextElev === 0 ? 'default' : 'mud_pit',
+          };
         } else {
           next.tileGrid[gy][gx] = { elev: 0, style: 'default' };
         }
@@ -508,15 +591,24 @@ function applyToolToRect(
     return { next };
   }
 
-  if (effectiveTool === 'terrain_hill_stair' || effectiveTool === 'terrain_stone_stair') {
+  if (
+    effectiveTool === 'terrain_hill_stair' ||
+    effectiveTool === 'terrain_stone_stair' ||
+    effectiveTool === 'terrain_plank_stair' ||
+    effectiveTool === 'terrain_mud_stair'
+  ) {
     next.waterTiles = next.waterTiles.filter((w) => !rectsOverlap(w.gx, w.gy, 1, 1, minX, minY, rw, rh));
     next.stairs = next.stairs.filter((s) => !rectsOverlap(s.gx, s.gy, s.gw ?? 1, s.gh ?? 1, minX, minY, rw, rh));
     const stairStyle: PlatformStyle =
       effectiveTool === 'terrain_hill_stair'
         ? 'hill'
-        : next.biome === 'castle_indoor'
-          ? 'castle_dais'
-          : 'pyramid';
+        : effectiveTool === 'terrain_plank_stair'
+          ? 'shrine_floor'
+          : effectiveTool === 'terrain_mud_stair'
+            ? 'mud_pit'
+            : next.biome === 'castle_indoor'
+              ? 'castle_dais'
+              : 'pyramid';
     for (let gy = minY; gy <= maxY; gy++) {
       for (let gx = minX; gx <= maxX; gx++) {
         next.stairs.push({
@@ -562,6 +654,7 @@ function applyToolToRect(
     next.trees = next.trees.filter((t) => !rectsOverlap(t.gx, t.gy, 1, 1, minX, minY, rw, rh));
     next.stoneRoads = next.stoneRoads.filter((r) => !rectsOverlap(r.gx, r.gy, 1, 1, minX, minY, rw, rh));
     next.railTracks = next.railTracks.filter((r) => !rectsOverlap(r.gx, r.gy, 1, 1, minX, minY, rw, rh));
+    next.farmTiles = (next.farmTiles || []).filter((f) => !rectsOverlap(f.gx, f.gy, 1, 1, minX, minY, rw, rh));
     return { next };
   }
 
@@ -593,12 +686,25 @@ function applyToolToRect(
     return { next };
   }
 
-  if (effectiveTool === 'obj_bridge') {
-    const fp = rw === 1 && rh === 1 ? getFootprintForTool('obj_bridge', ctxOpts) : { gw: rw, gh: rh };
+  if (effectiveTool === 'obj_farm') {
+    removeObjectsInRect(minX, minY, rw, rh, false);
+    next.waterTiles = next.waterTiles.filter((w) => !rectsOverlap(w.gx, w.gy, 1, 1, minX, minY, rw, rh));
+    const existing = (next.farmTiles || []).filter((f) => !rectsOverlap(f.gx, f.gy, 1, 1, minX, minY, rw, rh));
+    for (let gy = minY; gy <= maxY; gy++) {
+      for (let gx = minX; gx <= maxX; gx++) {
+        existing.push({ gx, gy, crop: ctxOpts.farmCrop });
+      }
+    }
+    next.farmTiles = existing;
+    return { next };
+  }
+
+  if (effectiveTool === 'obj_bridge' || effectiveTool === 'obj_stone_bridge') {
+    const fp = rw === 1 && rh === 1 ? getFootprintForTool(effectiveTool, ctxOpts) : { gw: rw, gh: rh };
     const bx = rw === 1 && rh === 1 ? clamp(minX, 0, Math.max(0, next.cols - fp.gw)) : minX;
     const by = rw === 1 && rh === 1 ? clamp(minY, 0, Math.max(0, next.rows - fp.gh)) : minY;
     if ((fp.gw > 1 || fp.gh > 1) && !hasUniformCellElevation(next.tileGrid, bx, by, fp.gw, fp.gh)) {
-      return { next: prev, error: '跨格木橋所佔格位的底層地形高度必須完全一致' };
+      return { next: prev, error: '跨格橋樑所佔格位的底層地形高度必須完全一致' };
     }
     removeObjectsInRect(bx, by, fp.gw, fp.gh, false);
     next.bridges.push({
@@ -606,6 +712,7 @@ function applyToolToRect(
       gy: by,
       gw: fp.gw,
       gh: fp.gh,
+      style: effectiveTool === 'obj_stone_bridge' ? 'stone' : 'wood',
       orientation:
         rw === 1 && rh === 1
           ? ctxOpts.rotated
@@ -650,7 +757,12 @@ function applyToolToRect(
     next.waterTiles = next.waterTiles.filter((w) => !rectsOverlap(w.gx, w.gy, 1, 1, minX, minY, rw, rh));
     for (let gy = minY; gy <= maxY; gy++) {
       for (let gx = minX; gx <= maxX; gx++) {
-        next.trees.push({ gx, gy, canopyRadius: 44 });
+        next.trees.push({
+          gx,
+          gy,
+          canopyRadius: 44,
+          foliagePalette: [...ctxOpts.treePalette] as [string, string, string, string],
+        });
       }
     }
     return { next };
@@ -670,8 +782,11 @@ function applyToolToRect(
       }
     >
   > = {
+    obj_railing: { gw: 1, gh: 1, elevation: 1.0, kind: 'crate', style: 'railing' },
     obj_small_crate: { gw: 1, gh: 1, elevation: 1.0, kind: 'crate', style: 'small_crate' },
     obj_big_crate: { gw: 2, gh: 2, elevation: 1.5, kind: 'crate', style: 'default' },
+    obj_rock_small: { gw: 1, gh: 1, elevation: 1.5, kind: 'crate', style: 'rock_small', colorVariant: ctxOpts.rockColor },
+    obj_rock_large: { gw: 2, gh: 2, elevation: 2.0, kind: 'crate', style: 'rock_large', colorVariant: ctxOpts.rockColor },
     obj_container: {
       gw: ctxOpts.rotated ? 2 : 4,
       gh: ctxOpts.rotated ? 4 : 2,
@@ -690,6 +805,8 @@ function applyToolToRect(
     },
     obj_stone_wall_tan: { gw: 1, gh: 1, elevation: 10, kind: 'wall', style: 'stone_wall_tan' },
     obj_stone_wall_green: { gw: 1, gh: 1, elevation: 10, kind: 'wall', style: 'stone_wall_green' },
+    obj_stone_wall_red: { gw: 1, gh: 1, elevation: 10, kind: 'wall', style: 'stone_wall_red' },
+    obj_stone_wall_blue: { gw: 1, gh: 1, elevation: 10, kind: 'wall', style: 'stone_wall_blue' },
     obj_shrine_wall: { gw: 1, gh: 1, elevation: 10, kind: 'wall', style: 'shrine_wall' },
     obj_castle_pillar: { gw: 1, gh: 1, elevation: 10, kind: 'wall', style: 'castle_pillar' },
     obj_house: {
@@ -699,6 +816,7 @@ function applyToolToRect(
       kind: 'wall',
       style: 'house',
       direction: ctxOpts.houseDir,
+      colorVariant: ctxOpts.houseStyle,
     },
     obj_bamboo: {
       gw: 1,
@@ -836,6 +954,20 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
   const [stairDir, setStairDir] = useState<CompassDir>('east');
   const [bambooDir, setBambooDir] = useState<CompassDir>('north');
   const [houseDir, setHouseDir] = useState<CompassDir>('south');
+  const [houseStyle, setHouseStyle] = useState<string>(HOUSE_STYLE_OPTIONS[0].id);
+  const [rockColor, setRockColor] = useState<'black' | 'brown' | 'white'>('black');
+  const [farmCrop, setFarmCrop] = useState<FarmCropType>('carrot');
+  const [treePalette, setTreePalette] = useState<[string, string, string, string]>(
+    TREE_FOLIAGE_PRESETS[0].palette
+  );
+  const [expandedObjGroups, setExpandedObjGroups] = useState<Record<ObjectCategoryId, boolean>>({
+    composable: true,
+    bridges: true,
+    walls: true,
+    covers: true,
+    buildings: true,
+    nature: true,
+  });
   const [railOrientation, setRailOrientation] = useState<RailAxis>('horizontal');
   const [rotated, setRotated] = useState(false); // false = horizontal (4×2 / 3×2), true = vertical (2×4 / 2×3)
   const [containerColor, setContainerColor] = useState('#0284C7');
@@ -847,6 +979,7 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
   const [showGrid, setShowGrid] = useState(true);
   const [showElevTags, setShowElevTags] = useState(true);
   const [zoom, setZoom] = useState(0.85);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
   const [hoverCell, setHoverCell] = useState<{ gx: number; gy: number } | null>(null);
   const [dragRect, setDragRect] = useState<{
     startX: number;
@@ -857,10 +990,12 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
   } | null>(null);
   const [toast, setToast] = useState<{ text: string; tone: 'ok' | 'warn' | 'err' } | null>(null);
 
+  const viewportRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewOffscreenRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dragRectRef = useRef<typeof dragRect>(null);
+  const panKeysRef = useRef<Set<string>>(new Set());
 
   const arena = useMemo(() => buildArenaMapFromCustom(draft), [draft]);
   const validation = useMemo(() => validateCustomMap(draft), [draft]);
@@ -872,13 +1007,32 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
       stairDir,
       bambooDir,
       houseDir,
+      houseStyle,
+      rockColor,
+      farmCrop,
+      treePalette,
       railOrientation,
       rotated,
       containerColor,
       trainVariant,
       selectedWeapon,
     }),
-    [activeTab, tool, stairDir, bambooDir, houseDir, railOrientation, rotated, containerColor, trainVariant, selectedWeapon]
+    [
+      activeTab,
+      tool,
+      stairDir,
+      bambooDir,
+      houseDir,
+      houseStyle,
+      rockColor,
+      farmCrop,
+      treePalette,
+      railOrientation,
+      rotated,
+      containerColor,
+      trainVariant,
+      selectedWeapon,
+    ]
   );
   const applyContextRef = useRef(applyContext);
   applyContextRef.current = applyContext;
@@ -888,6 +1042,28 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
   }, []);
   const notifyRef = useRef(notify);
   notifyRef.current = notify;
+
+  const clampPan = useCallback(
+    (nx: number, ny: number) => {
+      const vp = viewportRef.current;
+      const vpW = vp?.clientWidth ?? 900;
+      const vpH = vp?.clientHeight ?? 650;
+      const canvasW = arena.width * zoom;
+      const canvasH = arena.height * zoom;
+      const edgePad = 5 * TILE * zoom;
+      const maxX = Math.max(edgePad, canvasW / 2 - vpW / 2 + edgePad);
+      const maxY = Math.max(edgePad, canvasH / 2 - vpH / 2 + edgePad);
+      return {
+        x: clamp(nx, -maxX, maxX),
+        y: clamp(ny, -maxY, maxY),
+      };
+    },
+    [arena.width, arena.height, zoom]
+  );
+
+  useEffect(() => {
+    setPan((prev) => clampPan(prev.x, prev.y));
+  }, [clampPan]);
 
   useEffect(() => {
     setColsInput(String(draft.cols));
@@ -946,7 +1122,13 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
   }, [draft]);
 
   const handleRotate = useCallback(() => {
-    if (tool === 'terrain_hill_stair' || tool === 'terrain_stone_stair' || tool === 'obj_stair_crate') {
+    if (
+      tool === 'terrain_hill_stair' ||
+      tool === 'terrain_stone_stair' ||
+      tool === 'terrain_plank_stair' ||
+      tool === 'terrain_mud_stair' ||
+      tool === 'obj_stair_crate'
+    ) {
       setStairDir((d) => {
         const next = COMPASS_ORDER[(COMPASS_ORDER.indexOf(d) + 1) % COMPASS_ORDER.length];
         notify(`階梯方向已旋轉為：${DIR_LABELS[next]}`);
@@ -988,6 +1170,12 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      const code = e.code;
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && (code === 'KeyW' || code === 'KeyA' || code === 'KeyS' || code === 'KeyD')) {
+        e.preventDefault();
+        panKeysRef.current.add(code);
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) handleRedo();
@@ -1000,9 +1188,45 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
         handleRotate();
       }
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      panKeysRef.current.delete(e.code);
+    };
+    const onBlur = () => {
+      panKeysRef.current.clear();
+    };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
   }, [handleUndo, handleRedo, handleRotate]);
+
+  useEffect(() => {
+    let rafId = 0;
+    let lastTs = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min(0.05, Math.max(0.001, (now - lastTs) / 1000));
+      lastTs = now;
+      const keys = panKeysRef.current;
+      let vx = 0;
+      let vy = 0;
+      if (keys.has('KeyA')) vx += 1;
+      if (keys.has('KeyD')) vx -= 1;
+      if (keys.has('KeyW')) vy += 1;
+      if (keys.has('KeyS')) vy -= 1;
+      if (vx !== 0 || vy !== 0) {
+        const len = Math.hypot(vx, vy);
+        const speed = 640;
+        setPan((prev) => clampPan(prev.x + (vx / len) * speed * dt, prev.y + (vy / len) * speed * dt));
+      }
+      rafId = window.requestAnimationFrame(tick);
+    };
+    rafId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [clampPan]);
 
   const commitDragRectangle = useCallback((rect: NonNullable<typeof dragRect>) => {
     setDraft((prev) => {
@@ -1199,11 +1423,11 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
       for (let gy = 0; gy < arena.rows; gy++) {
         for (let gx = 0; gx < arena.cols; gx++) {
           const elev = arena.tileGrid[gy][gx].elev;
-          if (elev >= 1.0) {
+          if (elev >= 1.0 || elev <= -1.0) {
             ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
-            ctx.fillRect(gx * TILE + 3, gy * TILE + 3, 22, 13);
-            ctx.fillStyle = '#FCD34D';
-            ctx.fillText(`+${elev}`, gx * TILE + 14, gy * TILE + 10);
+            ctx.fillRect(gx * TILE + 3, gy * TILE + 3, 24, 13);
+            ctx.fillStyle = elev < 0 ? '#FDBA74' : '#FCD34D';
+            ctx.fillText(elev > 0 ? `+${elev}` : `${elev}`, gx * TILE + 15, gy * TILE + 10);
           }
         }
       }
@@ -1212,7 +1436,7 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
           const ogx = clamp(Math.floor(obs.x / TILE), 0, arena.cols - 1);
           const ogy = clamp(Math.floor(obs.y / TILE), 0, arena.rows - 1);
           const baseElev = arena.tileGrid[ogy][ogx].elev;
-          if (baseElev >= 1.0) {
+          if (Math.abs(baseElev) >= 1.0) {
             const cx = obs.x + obs.w / 2;
             const cy = obs.y + obs.h / 2;
             ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
@@ -1558,21 +1782,28 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
 
       {/* BODY: LEFT CANVAS + RIGHT SIDEBAR */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
-        {/* CENTER MAP CANVAS VIEWPORT */}
-        <div className="flex-1 min-w-0 relative bg-[#070B12] flex flex-col">
-          <div className="flex-1 min-h-0 overflow-auto flex p-6">
-            <canvas
-              ref={canvasRef}
-              onMouseDown={handleCanvasMouseDown}
-              onMouseMove={handleCanvasMouseMove}
-              onMouseLeave={() => setHoverCell(null)}
-              onContextMenu={(e) => e.preventDefault()}
+        {/* CENTER MAP CANVAS VIEWPORT (WASD Panning + 5-Tile Padding + Zero Scrollbars) */}
+        <div className="flex-1 min-w-0 relative bg-[#070B12] flex flex-col overflow-hidden">
+          <div ref={viewportRef} className="flex-1 min-h-0 relative overflow-hidden">
+            <div
+              className="absolute left-1/2 top-1/2"
               style={{
-                width: `${Math.round(arena.width * zoom)}px`,
-                height: `${Math.round(arena.height * zoom)}px`,
+                transform: `translate(calc(-50% + ${Math.round(pan.x)}px), calc(-50% + ${Math.round(pan.y)}px))`,
               }}
-              className="m-auto shrink-0 rounded-lg shadow-2xl border border-slate-800 cursor-crosshair block"
-            />
+            >
+              <canvas
+                ref={canvasRef}
+                onMouseDown={handleCanvasMouseDown}
+                onMouseMove={handleCanvasMouseMove}
+                onMouseLeave={() => setHoverCell(null)}
+                onContextMenu={(e) => e.preventDefault()}
+                style={{
+                  width: `${Math.round(arena.width * zoom)}px`,
+                  height: `${Math.round(arena.height * zoom)}px`,
+                }}
+                className="shrink-0 rounded-lg shadow-2xl border border-slate-800 cursor-crosshair block"
+              />
+            </div>
           </div>
 
           {/* Floating Canvas Controls (Bottom-Left) */}
@@ -1623,6 +1854,14 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
                 <RotateCw className="w-3 h-3 text-amber-400" />
                 旋轉 (R)
               </button>
+              <button
+                type="button"
+                onClick={() => setPan({ x: 0, y: 0 })}
+                title="置中視角"
+                className="px-2 py-0.5 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-300 cursor-pointer"
+              >
+                置中
+              </button>
             </div>
 
             <div className="bg-slate-950/88 border border-slate-800 rounded-lg px-3 py-1 text-[11px] text-slate-300 font-mono-num">
@@ -1630,7 +1869,7 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
                 ? `矩形選取 (${Math.min(dragRect.startX, dragRect.endX)}, ${Math.min(dragRect.startY, dragRect.endY)}) → (${Math.max(dragRect.startX, dragRect.endX)}, ${Math.max(dragRect.startY, dragRect.endY)})`
                 : hoverCell
                   ? `(${hoverCell.gx}, ${hoverCell.gy}) · 地形高度 ${arena.tileGrid[hoverCell.gy]?.[hoverCell.gx]?.elev ?? 0}`
-                  : '按住左鍵拖曳矩形佈置 · 右鍵拖曳矩形清除 · R 旋轉方向'}
+                  : 'WASD 移動視角 · 左鍵拖曳矩形佈置 · 右鍵清除 · R 旋轉'}
             </div>
           </div>
 
@@ -1710,8 +1949,8 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
 
           {/* Contextual Options Bar */}
           <div className="shrink-0 px-3 py-2 border-b border-slate-800/80 bg-slate-900/55 space-y-2 text-[11px]">
-            <div className="flex items-center justify-between text-slate-300">
-              <span>
+            <div className="flex items-center justify-between gap-2 text-slate-300">
+              <span className="truncate">
                 已選：
                 {tool === 'spawn_weapon'
                   ? `武器點（${selectedWeaponLabel}）`
@@ -1721,11 +1960,32 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
                       ? '彈藥箱'
                       : activeToolMeta?.label}
               </span>
-              <span className="font-mono-num text-amber-300">
-                {tool === 'spawn_weapon' || tool === 'spawn_shield' || tool === 'spawn_ammo'
-                  ? '地面補給'
-                  : activeToolMeta?.heightLabel}
-              </span>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className="font-mono-num text-amber-300">
+                  {tool === 'spawn_weapon' || tool === 'spawn_shield' || tool === 'spawn_ammo'
+                    ? '地面補給'
+                    : activeToolMeta?.heightLabel}
+                </span>
+                {activeTab !== 'floor' && (
+                  <button
+                    type="button"
+                    aria-label="橡皮擦"
+                    title="橡皮擦"
+                    onClick={() => {
+                      if (activeTab === 'terrain') setTool('terrain_lower');
+                      else if (activeTab === 'objects') setTool('obj_erase');
+                      else if (activeTab === 'spawns') setTool('spawn_erase');
+                    }}
+                    className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+                      tool === 'terrain_lower' || tool === 'obj_erase' || tool === 'spawn_erase'
+                        ? 'bg-rose-500/20 border-rose-400 text-rose-300'
+                        : 'bg-slate-800/90 border-slate-700 text-slate-300 hover:border-rose-400/70 hover:text-rose-300'
+                    }`}
+                  >
+                    <Eraser className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
 
             {activeFloorStyle && (
@@ -1748,7 +2008,17 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
               </div>
             )}
 
-            {(tool === 'terrain_hill_stair' || tool === 'terrain_stone_stair' || tool === 'obj_stair_crate') && (
+            {tool === 'terrain_mud_dig' && (
+              <div className="text-slate-400">
+                點擊或拉框下挖：自動依該格既有地形高度 <span className="text-orange-300 font-mono-num font-bold">-1.0</span> 層（可續挖 -2.0…）
+              </div>
+            )}
+
+            {(tool === 'terrain_hill_stair' ||
+              tool === 'terrain_stone_stair' ||
+              tool === 'terrain_plank_stair' ||
+              tool === 'terrain_mud_stair' ||
+              tool === 'obj_stair_crate') && (
               <div className="flex items-center gap-1 flex-wrap">
                 <span className="text-slate-400 mr-1">上坡方向 (R)：</span>
                 {COMPASS_ORDER.map((dir) => (
@@ -1785,20 +2055,106 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
             )}
 
             {tool === 'obj_house' && (
-              <div className="flex items-center gap-1 flex-wrap">
-                <span className="text-slate-400 mr-1">房屋門向 (R)：</span>
-                {COMPASS_ORDER.map((dir) => (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1 flex-wrap">
+                  <span className="text-slate-400 mr-1">房屋門向 (R)：</span>
+                  {COMPASS_ORDER.map((dir) => (
+                    <button
+                      key={dir}
+                      type="button"
+                      onClick={() => setHouseDir(dir)}
+                      className={`px-2 py-0.5 rounded cursor-pointer ${
+                        houseDir === dir ? 'bg-amber-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300'
+                      }`}
+                    >
+                      {HOUSE_DIR_LABELS[dir]}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-1 flex-wrap">
+                  <span className="text-slate-400 mr-1">屋頂風格：</span>
+                  {HOUSE_STYLE_OPTIONS.map((hs) => (
+                    <button
+                      key={hs.id}
+                      type="button"
+                      onClick={() => setHouseStyle(hs.id)}
+                      className={`px-2 py-0.5 rounded border cursor-pointer flex items-center gap-1 ${
+                        houseStyle === hs.id
+                          ? 'border-amber-400 bg-slate-800 text-white font-bold'
+                          : 'border-slate-700 bg-slate-900 text-slate-300'
+                      }`}
+                    >
+                      <span className="w-2.5 h-2.5 rounded-xs shrink-0" style={{ backgroundColor: hs.swatch }} />
+                      {hs.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {(tool === 'obj_rock_small' || tool === 'obj_rock_large') && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-slate-400">岩石色調：</span>
+                {ROCK_COLOR_OPTIONS.map((rc) => (
                   <button
-                    key={dir}
+                    key={rc.id}
                     type="button"
-                    onClick={() => setHouseDir(dir)}
-                    className={`px-2 py-0.5 rounded cursor-pointer ${
-                      houseDir === dir ? 'bg-amber-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300'
+                    onClick={() => setRockColor(rc.id)}
+                    className={`px-2 py-0.5 rounded border cursor-pointer flex items-center gap-1 ${
+                      rockColor === rc.id
+                        ? 'border-amber-400 bg-slate-800 text-white font-bold'
+                        : 'border-slate-700 bg-slate-900 text-slate-300'
                     }`}
                   >
-                    {HOUSE_DIR_LABELS[dir]}
+                    <span className="w-2.5 h-2.5 rounded-full border border-white/30" style={{ backgroundColor: rc.swatch }} />
+                    {rc.label}
                   </button>
                 ))}
+              </div>
+            )}
+
+            {tool === 'obj_farm' && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-slate-400">田地作物：</span>
+                {FARM_CROP_OPTIONS.map((fc) => (
+                  <button
+                    key={fc.id}
+                    type="button"
+                    onClick={() => setFarmCrop(fc.id)}
+                    className={`px-2 py-0.5 rounded border cursor-pointer flex items-center gap-1 ${
+                      farmCrop === fc.id
+                        ? 'border-amber-400 bg-slate-800 text-white font-bold'
+                        : 'border-slate-700 bg-slate-900 text-slate-300'
+                    }`}
+                  >
+                    <span className="w-2.5 h-2.5 rounded-xs" style={{ backgroundColor: fc.swatch }} />
+                    {fc.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {tool === 'obj_tree' && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-slate-400">樹葉色調：</span>
+                {TREE_FOLIAGE_PRESETS.map((preset) => {
+                  const selected = preset.palette[2] === treePalette[2] && preset.palette[3] === treePalette[3];
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => setTreePalette(preset.palette)}
+                      className={`px-2 py-0.5 rounded border cursor-pointer flex items-center gap-1 ${
+                        selected
+                          ? 'border-amber-400 bg-slate-800 text-white font-bold'
+                          : 'border-slate-700 bg-slate-900 text-slate-300'
+                      }`}
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: preset.palette[2] }} />
+                      {preset.label}
+                    </button>
+                  );
+                })}
               </div>
             )}
 
@@ -1821,6 +2177,8 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
             {activeToolMeta?.rotatable &&
               tool !== 'terrain_hill_stair' &&
               tool !== 'terrain_stone_stair' &&
+              tool !== 'terrain_plank_stair' &&
+              tool !== 'terrain_mud_stair' &&
               tool !== 'obj_stair_crate' &&
               tool !== 'obj_bamboo' &&
               tool !== 'obj_house' &&
@@ -1878,45 +2236,145 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
 
           {/* Scrollable Tool List */}
           <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-            {currentTabTools.map((item) => {
-              const selected = tool === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setTool(item.id)}
-                  className={`w-full text-left p-2.5 rounded-xl border transition-all flex items-center gap-3 cursor-pointer ${
-                    selected
-                      ? 'bg-[#182336] border-amber-400 shadow-md shadow-amber-500/15'
-                      : 'bg-slate-900/75 border-slate-800 hover:border-slate-600'
-                  }`}
-                >
-                  {item.previewId ? (
-                    <ToolThumb visualId={item.previewId} />
-                  ) : (
-                    <div className="w-[64px] h-[42px] rounded border border-slate-700/80 bg-slate-950 flex items-center justify-center shrink-0">
-                      {item.id === 'obj_erase' || item.id === 'spawn_erase' || item.id === 'terrain_lower' ? (
-                        <Eraser className="w-5 h-5 text-rose-400" />
-                      ) : item.id === 'spawn_royal' ? (
-                        <FactionLogoSvg faction="royal" className="w-8 h-8" />
-                      ) : item.id === 'spawn_shadow' ? (
-                        <FactionLogoSvg faction="shadow" className="w-8 h-8" />
-                      ) : (
-                        <FactionLogoSvg faction="mercenary" className="w-8 h-8" />
+            {activeTab === 'terrain' ? (
+              <div className="space-y-3">
+                {TERRAIN_CATEGORY_META.map((cat) => {
+                  const items = currentTabTools.filter((t) => !t.isEraser && t.terrainCategory === cat.id);
+                  return (
+                    <div key={cat.id} className="space-y-1.5">
+                      <div className="text-[11px] font-bold text-sky-300 px-1 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+                        <span>{cat.label}</span>
+                      </div>
+                      <div className="space-y-2">
+                        {items.map((item) => {
+                          const selected = tool === item.id;
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              onClick={() => setTool(item.id)}
+                              className={`w-full text-left p-2.5 rounded-xl border transition-all flex items-center gap-3 cursor-pointer ${
+                                selected
+                                  ? 'bg-[#182336] border-amber-400 shadow-md shadow-amber-500/15'
+                                  : 'bg-slate-900/75 border-slate-800 hover:border-slate-600'
+                              }`}
+                            >
+                              {item.previewId && <ToolThumb visualId={item.previewId} />}
+                              <div className="flex-1 min-w-0">
+                                <div className="text-xs font-bold text-white truncate">{item.label}</div>
+                                <div className="mt-1 flex items-center gap-2 text-[10px] font-mono-num">
+                                  <span className="text-amber-300">{item.heightLabel}</span>
+                                  <span className="text-slate-600">·</span>
+                                  <span className="text-slate-400">{item.footprint}</span>
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : activeTab === 'objects' ? (
+              <div className="space-y-2.5">
+                {OBJECT_CATEGORY_META.map((cat) => {
+                  const items = currentTabTools.filter((t) => !t.isEraser && t.objectCategory === cat.id);
+                  const expanded = expandedObjGroups[cat.id];
+                  return (
+                    <div key={cat.id} className="border border-slate-800/90 rounded-xl bg-slate-950/35 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedObjGroups((prev) => ({ ...prev, [cat.id]: !prev[cat.id] }))
+                        }
+                        className="w-full px-3 py-2 flex items-center justify-between text-xs font-bold text-emerald-300 hover:bg-slate-900/70 cursor-pointer"
+                      >
+                        <span className="flex items-center gap-1.5">
+                          {expanded ? (
+                            <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                          ) : (
+                            <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                          )}
+                          <span>{cat.label}</span>
+                        </span>
+                        <span className="text-[10px] font-mono-num text-slate-400">{items.length}</span>
+                      </button>
+                      {expanded && (
+                        <div className="p-2 pt-0 space-y-1.5">
+                          {items.map((item) => {
+                            const selected = tool === item.id;
+                            return (
+                              <button
+                                key={item.id}
+                                type="button"
+                                onClick={() => setTool(item.id)}
+                                className={`w-full text-left p-2 rounded-xl border transition-all flex items-center gap-3 cursor-pointer ${
+                                  selected
+                                    ? 'bg-[#182336] border-amber-400 shadow-md shadow-amber-500/15'
+                                    : 'bg-slate-900/75 border-slate-800 hover:border-slate-600'
+                                }`}
+                              >
+                                {item.previewId && <ToolThumb visualId={item.previewId} />}
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-xs font-bold text-white truncate">{item.label}</div>
+                                  <div className="mt-1 flex items-center gap-2 text-[10px] font-mono-num">
+                                    <span className="text-amber-300">{item.heightLabel}</span>
+                                    <span className="text-slate-600">·</span>
+                                    <span className="text-slate-400">{item.footprint}</span>
+                                  </div>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
                       )}
                     </div>
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-bold text-white truncate">{item.label}</div>
-                    <div className="mt-1 flex items-center gap-2 text-[10px] font-mono-num">
-                      <span className="text-amber-300">{item.heightLabel}</span>
-                      <span className="text-slate-600">·</span>
-                      <span className="text-slate-400">{item.footprint}</span>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
+                  );
+                })}
+              </div>
+            ) : (
+              currentTabTools
+                .filter((item) => !item.isEraser)
+                .map((item) => {
+                  const selected = tool === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setTool(item.id)}
+                      className={`w-full text-left p-2.5 rounded-xl border transition-all flex items-center gap-3 cursor-pointer ${
+                        selected
+                          ? 'bg-[#182336] border-amber-400 shadow-md shadow-amber-500/15'
+                          : 'bg-slate-900/75 border-slate-800 hover:border-slate-600'
+                      }`}
+                    >
+                      {item.previewId ? (
+                        <ToolThumb visualId={item.previewId} />
+                      ) : (
+                        <div className="w-[64px] h-[42px] rounded border border-slate-700/80 bg-slate-950 flex items-center justify-center shrink-0">
+                          {item.id === 'spawn_royal' ? (
+                            <FactionLogoSvg faction="royal" className="w-8 h-8" />
+                          ) : item.id === 'spawn_shadow' ? (
+                            <FactionLogoSvg faction="shadow" className="w-8 h-8" />
+                          ) : (
+                            <FactionLogoSvg faction="mercenary" className="w-8 h-8" />
+                          )}
+                        </div>
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-bold text-white truncate">{item.label}</div>
+                        <div className="mt-1 flex items-center gap-2 text-[10px] font-mono-num">
+                          <span className="text-amber-300">{item.heightLabel}</span>
+                          <span className="text-slate-600">·</span>
+                          <span className="text-slate-400">{item.footprint}</span>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })
+            )}
 
             {/* 出生與物資頁籤：地圖武器點（含全遠程槍械、近戰兵器、防彈盾牌與彈藥箱，無數值干擾） */}
             {activeTab === 'spawns' && (

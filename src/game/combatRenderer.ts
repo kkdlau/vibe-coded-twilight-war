@@ -45,10 +45,11 @@ export function drawOutlinedText(
   color: string,
   size = 12,
   align: CanvasTextAlign = 'left',
-  strokeColor = 'rgba(0, 0, 0, 0.85)'
+  strokeColor = 'rgba(0, 0, 0, 0.85)',
+  fontFamily = '"Noto Sans TC", "JetBrains Mono", sans-serif'
 ) {
   ctx.save();
-  ctx.font = `700 ${size}px "Noto Sans TC", "JetBrains Mono", sans-serif`;
+  ctx.font = `700 ${size}px ${fontFamily}`;
   ctx.textAlign = align;
   ctx.lineWidth = 3.2;
   ctx.strokeStyle = strokeColor;
@@ -1301,7 +1302,17 @@ export function drawParticles(ctx: CanvasRenderingContext2D, particles: Particle
 export function drawFloatingTexts(ctx: CanvasRenderingContext2D, texts: FloatingText[]) {
   for (const ft of texts) {
     ctx.globalAlpha = clamp(ft.life / ft.maxLife, 0, 1);
-    drawOutlinedText(ctx, ft.text, ft.x, ft.y, ft.color, Math.round(13 * ft.scale), 'center');
+    drawOutlinedText(
+      ctx,
+      ft.text,
+      ft.x,
+      ft.y,
+      ft.color,
+      Math.round(13 * ft.scale),
+      'center',
+      'rgba(0, 0, 0, 0.85)',
+      '"CyrBit", "Noto Sans TC", "JetBrains Mono", sans-serif'
+    );
   }
   ctx.globalAlpha = 1;
 }

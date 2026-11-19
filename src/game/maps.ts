@@ -3,6 +3,7 @@ import {
   BridgeRect,
   BushProp,
   FactionId,
+  FarmTileCell,
   FloorStyle,
   GridTile,
   MapId,
@@ -134,6 +135,7 @@ export interface ArenaMap {
   bridges: BridgeRect[];
   stoneRoads: GridTile[];
   railTracks: RailTrackCell[];
+  farmTiles?: FarmTileCell[];
   obstacles: Obstacle[];
   bushes: BushProp[];
   trees: TreeProp[];

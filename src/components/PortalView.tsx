@@ -87,7 +87,7 @@ const FLOOR_GUIDE_ITEMS: HelpGuideEntry[] = [
   },
 ];
 
-const TERRAIN_GUIDE_ITEMS: HelpGuideEntry[] = [
+const TERRAIN_TIER_ITEMS: HelpGuideEntry[] = [
   {
     visualId: 'terrain_hill',
     name: '土丘高地（可疊加）',
@@ -95,14 +95,6 @@ const TERRAIN_GUIDE_ITEMS: HelpGuideEntry[] = [
     footprint: '逐格連通',
     widePreview: true,
     desc: '自然山丘地形，支援任意多層疊加（1.0、2.0、3.0…）；上方可繼續疊加箱體、水域或竹林，保留原有地板而不互相覆蓋。',
-  },
-  {
-    visualId: 'terrain_hill_stair',
-    name: '土坡階梯（土丘對應階梯）',
-    elev: '所在層 +0.5',
-    footprint: '1×1 格',
-    widePreview: true,
-    desc: '專為土丘高地設計的 1×1 自然土坡（可按 R 旋轉），高度永遠為「所在底層 +0.5」，銜接相鄰兩層落差。',
   },
   {
     visualId: 'terrain_platform',
@@ -113,20 +105,51 @@ const TERRAIN_GUIDE_ITEMS: HelpGuideEntry[] = [
     desc: '遺跡與古堡的切石平台，支援逐層疊加（1.0、2.0、3.0…）；上方放置大箱或房屋時需確保所跨格位底層高度一致。',
   },
   {
-    visualId: 'terrain_platform_stair',
-    name: '切石石階（切石對應階梯）',
-    elev: '所在層 +0.5',
-    footprint: '1×1／連貫石階',
-    widePreview: true,
-    desc: '專為切石高台設計的石砌階梯，高度固定為「所在底層 +0.5」，讓步兵以 |Δh| ≤ 0.5 規則平滑攀登任意高台層級。',
-  },
-  {
     visualId: 'terrain_plank',
     name: '木板神社高台（可疊加）',
     elev: '每層 +1.0',
     footprint: '逐格連通',
     widePreview: true,
-    desc: '斜面木板架高地台，支援多層疊加（1.0、2.0…），可搭配木條階梯踏台或神社板塀。',
+    desc: '斜面木板架高地台，支援多層疊加（1.0、2.0…），可搭配木板神社階梯或神社板塀。',
+  },
+  {
+    visualId: 'terrain_mud',
+    name: '泥坑窪地（可疊加負層）',
+    elev: '每層 -1.0',
+    footprint: '逐格凹陷',
+    widePreview: true,
+    desc: '向下凹陷的泥濘坑地，支援逐層深挖（-1.0、-2.0…）；平地（0.0）子彈越過泥坑不會受低窪影響，須經泥坡階梯進出。',
+  },
+];
+
+const TERRAIN_STAIR_ITEMS: HelpGuideEntry[] = [
+  {
+    visualId: 'terrain_hill_stair',
+    name: '土坡階梯（土丘對應階梯）',
+    elev: '所在層 +0.5',
+    footprint: '1×1 格（按 R 轉向）',
+    desc: '專為土丘高地設計的平滑自然土坡（無階級橫紋），高度永遠為「所在底層 +0.5」，銜接相鄰兩層落差。',
+  },
+  {
+    visualId: 'terrain_platform_stair',
+    name: '切石石階（切石對應階梯）',
+    elev: '所在層 +0.5',
+    footprint: '1×1 格（按 R 轉向）',
+    desc: '專為切石高台設計的石砌階梯，高度固定為「所在底層 +0.5」，讓步兵以 |Δh| ≤ 0.5 規則攀登任意高台層級。',
+  },
+  {
+    visualId: 'terrain_plank_stair',
+    name: '木板神社階梯（神社高台對應階梯）',
+    elev: '所在層 +0.5',
+    footprint: '1×1 格（按 R 轉向）',
+    desc: '專為木板神社高台打造的木階斜坡，高度永遠為「所在底層 +0.5」，支援按 R 切換四向登台方向。',
+  },
+  {
+    visualId: 'terrain_mud_stair',
+    name: '泥坡階梯（泥坑對應階梯）',
+    elev: '所在層 +0.5',
+    footprint: '1×1 格（按 R 轉向）',
+    desc: '置於泥坑窪地內的平滑泥坡（如 -1.0 泥坑中為 -0.5），支援四向旋轉，提供部隊進出泥坑或深挖層的緩坡通道。',
   },
 ];
 
@@ -137,7 +160,7 @@ const OBJECT_GUIDE_ITEMS: HelpGuideEntry[] = [
     elev: '0.0（隨地形層）',
     footprint: '1×1 格',
     widePreview: true,
-    desc: '疊加於地板與高台之上的流動水面物件！岸邊採透明漸層，既不會覆蓋底下的草地／沙地，也不會吃掉下方的 1.0 土丘高地；高度隨底層故 0.0 水面可穿透射擊（須架木橋通行）。',
+    desc: '疊加於地板與高台之上的流動水面物件！岸邊採透明漸層，既不會覆蓋底下的草地／沙地，也不會吃掉下方的 1.0 土丘高地；高度隨底層故 0.0 水面可穿透射擊（須架橋通行）。',
   },
   {
     visualId: 'object_bridge',
@@ -146,6 +169,14 @@ const OBJECT_GUIDE_ITEMS: HelpGuideEntry[] = [
     footprint: '多格橋段（須等高基底）',
     widePreview: true,
     desc: '架設於河道上方的木構橋樑物件，覆蓋水域阻擋判定讓雙岸兵力得以橫渡，跨多格時底層地形須保持等高。',
+  },
+  {
+    visualId: 'object_stone_bridge',
+    name: '跨河石橋',
+    elev: '所在地形 +0.0',
+    footprint: '多格橋段（須等高基底）',
+    widePreview: true,
+    desc: '堅固的石砌欄邊拱橋，跨越水面讓步兵安全通過，同樣支援 R 鍵切換直／橫擺向與等高多格鋪設。',
   },
   {
     visualId: 'object_stone_road',
@@ -161,6 +192,14 @@ const OBJECT_GUIDE_ITEMS: HelpGuideEntry[] = [
     footprint: '1×1 格',
     widePreview: true,
     desc: '支援水平、垂直（按 R 轉向）、雙排並軌，以及自動生成的 90° 轉角與 T／十字分叉軌道路網物件。',
+  },
+  {
+    visualId: 'object_railing',
+    name: '防護欄杆（自動連接）',
+    elev: '所在層 +1.0',
+    footprint: '1×1 格',
+    widePreview: true,
+    desc: '依四鄰自動串連的金屬欄杆，阻擋角色步行翻越；平地（0.0）射擊子彈與視線可越過上方，僅阻擋來自低窪泥坑（-1.0）的射線。',
   },
   {
     visualId: 'object_stair_crate',
@@ -182,6 +221,20 @@ const OBJECT_GUIDE_ITEMS: HelpGuideEntry[] = [
     elev: '所在層 +1.5',
     footprint: '2×2 格（須等高基底）',
     desc: '2×2 斜撐大型木箱，總高度為「所在地形 +1.5」；跨越多格時，底下 4 格地形高度必須完全一致。',
+  },
+  {
+    visualId: 'object_rock_small',
+    name: '小石塊（黑／棕／白）',
+    elev: '所在層 +1.5',
+    footprint: '1×1 格',
+    desc: '天然稜角岩塊掩體，提供黑石、棕石與白石三種色調，總高度「所在地形 +1.5」，透出底層地形。',
+  },
+  {
+    visualId: 'object_rock_large',
+    name: '大岩石（黑／棕／白）',
+    elev: '所在層 +2.0',
+    footprint: '2×2 格（須等高基底）',
+    desc: '大型天然巨岩掩體，支援黑、棕、白三色選擇，總高度「所在地形 +2.0」，可完全阻擋平地子彈並須置於等高格位。',
   },
   {
     visualId: 'object_container',
@@ -208,6 +261,14 @@ const OBJECT_GUIDE_ITEMS: HelpGuideEntry[] = [
     desc: '實心建築牆體（高度 10），支援 8 向轉角拼接與鄰接木箱側反光打燈；自然阻擋移動、子彈與視線並反彈黑龍波。',
   },
   {
+    visualId: 'object_stone_wall_red',
+    name: '彩砌磚石實牆（朱紅／靛青）',
+    elev: '10',
+    footprint: '1×1／連貫牆',
+    widePreview: true,
+    desc: '朱砂紅磚牆與靛青石砌牆（高度 10），具備相同 8 向轉角與光影拼接效果，適合區分陣營堡壘區域。',
+  },
+  {
     visualId: 'object_shrine_wall',
     name: '江戶杉木板塀',
     elev: '10',
@@ -223,19 +284,26 @@ const OBJECT_GUIDE_ITEMS: HelpGuideEntry[] = [
   },
   {
     visualId: 'object_house',
-    name: '斜頂磚石房屋（3×2 / 2×3）',
+    name: '斜頂房屋（5 種建築風格）',
     elev: '10',
     footprint: '3×2 / 2×3 格（須等高基底）',
     widePreview: true,
-    desc: '大型建築物件（支援 R 鍵 4 向旋轉），高度 10，放置範圍內所跨格位地形高度必須完全一致。',
+    desc: '提供青苔石瓦、和風朱簷、歐式紅頂、荒野土坯與紅磚工坊 5 種風格並支援 R 鍵 4 向旋轉，高度 10。',
   },
   {
     visualId: 'object_bamboo',
     name: '竹林實牆（4 向 3 株）',
     elev: '10',
     footprint: '1×1 格（3 株）',
-    widePreview: true,
     desc: '一格內三株翠竹（R 鍵切換四種擺法），可套用在任何地板或土丘高地上且透明縫隙清楚透出底層地形，高度 10。',
+  },
+  {
+    visualId: 'object_farm',
+    name: '耕作農田（4 種作物）',
+    elev: '所在地形 +0.0',
+    footprint: '1×1 格',
+    widePreview: true,
+    desc: '可鋪設於平地或高台上的田埂物件，提供空田、紅蘿蔔、小麥與甘藍菜 4 種作物樣式，自由通行不擋彈道。',
   },
   {
     visualId: 'object_bush',
@@ -246,10 +314,10 @@ const OBJECT_GUIDE_ITEMS: HelpGuideEntry[] = [
   },
   {
     visualId: 'object_tree',
-    name: '林間樹木（實心樹幹＋樹冠）',
+    name: '林間樹木（6 種自選葉色）',
     elev: '10',
     footprint: '1×1 格',
-    desc: '實心樹幹高度 10，阻斷角色走位、子彈與視線；角色走進樹冠範圍時上層枝葉自動半透明。',
+    desc: '實心樹幹高度 10，阻斷角色走位、子彈與視線；可自選常青／櫻花／秋楓／銀杏／翡翠／冷杉葉色，不受地板影響。',
   },
 ];
 
@@ -508,42 +576,74 @@ export const PortalView: React.FC<PortalViewProps> = ({
                     </div>
                   </section>
 
-                  {/* Category 2: 地形（Terrain Layer） */}
-                  <section className="space-y-3">
+                  {/* Category 2: 地形（Terrain Layer：層級 與 攀爬階梯 兩類） */}
+                  <section className="space-y-4">
                     <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
                       <Layers className="w-4 h-4 text-sky-400" />
-                      <h3 className="text-sm font-bold text-sky-300">二、地形（可疊加高台與對應 +0.5 階梯）</h3>
+                      <h3 className="text-sm font-bold text-sky-300">二、地形（可疊加層級與對應 +0.5 攀爬階梯）</h3>
                       <span className="text-[11px] text-slate-400">決定行走高度與攀爬斜坡，保留底層地板紋理</span>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {TERRAIN_GUIDE_ITEMS.map((item) => (
-                        <div
-                          key={item.visualId}
-                          className={`bg-slate-900/85 border border-slate-800 rounded-xl p-3.5 flex ${
-                            item.widePreview ? 'flex-col gap-3' : 'items-start gap-3.5'
-                          }`}
-                        >
+
+                    <div className="space-y-2.5">
+                      <div className="text-xs font-bold text-slate-300 flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                        <span>層級（±1.0/層 · 3×3 預覽示範疊加高層）</span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {TERRAIN_TIER_ITEMS.map((item) => (
                           <div
-                            className={`rounded-lg border border-slate-700/80 overflow-hidden bg-[#090D16] shrink-0 ${
-                              item.widePreview ? 'w-full h-28' : 'w-28 h-24'
-                            }`}
+                            key={item.visualId}
+                            className="bg-slate-900/85 border border-slate-800 rounded-xl p-3.5 flex flex-col gap-3"
                           >
-                            <TerrainObjectCanvasPreview visualId={item.visualId} wide={item.widePreview} />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center justify-between gap-2 mb-1">
-                              <span className="text-sm font-bold text-white">{item.name}</span>
-                              <span className="text-[11px] font-mono-num text-amber-300 shrink-0">
-                                高度 {item.elev}
-                              </span>
+                            <div className="rounded-lg border border-slate-700/80 overflow-hidden bg-[#090D16] shrink-0 w-full h-32">
+                              <TerrainObjectCanvasPreview visualId={item.visualId} wide={item.widePreview} />
                             </div>
-                            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] font-mono-num text-slate-400 mb-1.5">
-                              <span>佔位：{item.footprint}</span>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between gap-2 mb-1">
+                                <span className="text-sm font-bold text-white">{item.name}</span>
+                                <span className="text-[11px] font-mono-num text-amber-300 shrink-0">
+                                  高度 {item.elev}
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] font-mono-num text-slate-400 mb-1.5">
+                                <span>佔位：{item.footprint}</span>
+                              </div>
+                              <p className="text-xs text-slate-300 leading-relaxed">{item.desc}</p>
                             </div>
-                            <p className="text-xs text-slate-300 leading-relaxed">{item.desc}</p>
                           </div>
-                        </div>
-                      ))}
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-2.5 pt-1">
+                      <div className="text-xs font-bold text-slate-300 flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+                        <span>攀爬階梯（所在層 +0.5 · 左梯右台對照）</span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {TERRAIN_STAIR_ITEMS.map((item) => (
+                          <div
+                            key={item.visualId}
+                            className="bg-slate-900/85 border border-slate-800 rounded-xl p-3.5 flex items-start gap-3.5"
+                          >
+                            <div className="rounded-lg border border-slate-700/80 overflow-hidden bg-[#090D16] shrink-0 w-32 h-24">
+                              <TerrainObjectCanvasPreview visualId={item.visualId} />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between gap-2 mb-1">
+                                <span className="text-sm font-bold text-white">{item.name}</span>
+                                <span className="text-[11px] font-mono-num text-amber-300 shrink-0">
+                                  高度 {item.elev}
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] font-mono-num text-slate-400 mb-1.5">
+                                <span>佔位：{item.footprint}</span>
+                              </div>
+                              <p className="text-xs text-slate-300 leading-relaxed">{item.desc}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </section>
 

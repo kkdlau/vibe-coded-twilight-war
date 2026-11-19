@@ -80,8 +80,7 @@ function defaultWeaponForHand(hand: WeaponHand): EquippedWeapon {
 function applyFrontalShieldMitigation(
   rawDmg: number,
   shieldDurability: number,
-  isMeleeAttack: boolean,
-  shatterLabel: string
+  isMeleeAttack: boolean
 ): { finalDmg: number; nextDurability: number; banner?: { text: string; color: string } } {
   if (!isMeleeAttack) {
     const absorbed = Math.min(shieldDurability, rawDmg);
@@ -92,8 +91,8 @@ function applyFrontalShieldMitigation(
       banner:
         absorbed > 0
           ? {
-              text: nextDurability === 0 ? shatterLabel : `-${absorbed}`,
-              color: nextDurability === 0 ? '#F59E0B' : '#38BDF8',
+              text: `-${absorbed}`,
+              color: '#FFFFFF',
             }
           : undefined,
     };
@@ -105,8 +104,8 @@ function applyFrontalShieldMitigation(
     finalDmg: halfDmg,
     nextDurability,
     banner: {
-      text: nextDurability === 0 ? shatterLabel : `-${blockedAmt}`,
-      color: nextDurability === 0 ? '#F59E0B' : '#38BDF8',
+      text: `-${blockedAmt}`,
+      color: '#FFFFFF',
     },
   };
 }
@@ -560,7 +559,7 @@ export class TwilightEngine {
       if (!this.isGroundWalkable(cx, cy)) return false;
       for (const obs of this.map.obstacles) {
         if (
-          obs.kind === 'wall' &&
+          (obs.kind === 'wall' || obs.style === 'railing') &&
           cx >= obs.x - pad &&
           cx <= obs.x + obs.w + pad &&
           cy >= obs.y - pad &&
@@ -666,7 +665,7 @@ export class TwilightEngine {
       }
     }
     for (const obs of this.map.obstacles) {
-      if (obs.kind === 'wall') {
+      if (obs.kind === 'wall' || obs.style === 'railing') {
         const res = resolveCircleRect(x, y, checkR, obs);
         if (res.hit) violations += 2;
       }
@@ -743,9 +742,9 @@ export class TwilightEngine {
       ny = desiredY;
     }
 
-    // 不可跨越石牆與樹幹同樣保留通道間距
+    // 不可跨越石牆、防護欄杆與樹幹同樣保留通道間距
     for (const obs of this.map.obstacles) {
-      if (obs.kind === 'wall') {
+      if (obs.kind === 'wall' || obs.style === 'railing') {
         const res = resolveCircleRect(nx, ny, padRadius, obs);
         nx = res.x;
         ny = res.y;
@@ -817,6 +816,83 @@ export class TwilightEngine {
   }
 
   /**
+   * 搜尋附近 5×5 格內戰術優勢站位：
+   * - 優先選擇「能射到敵人但敵人打不到自己」的單向掩體／高低差位置
+   * - 佔據高地時拒絕往低層移動
+   */
+  private findBestTacticalSpot(
+    e: EnemyEntity,
+    target: { x: number; y: number; elev: number },
+    sightRange: number,
+    desiredRange: number,
+    holdingHighGround: boolean,
+    isReloading: boolean
+  ): { x: number; y: number; scoreGain: number; oneWayAdvantage: boolean; isCurrentTile: boolean } | null {
+    const { cols, rows } = this.map;
+    const curGx = clamp(Math.floor(e.x / TILE), 0, cols - 1);
+    const curGy = clamp(Math.floor(e.y / TILE), 0, rows - 1);
+
+    const evalPoint = (px: number, py: number, elev: number) => {
+      const d = dist(px, py, target.x, target.y);
+      if (d > sightRange * 0.96) return null;
+      if (!this.hasLineOfSight(px, py, elev, target.x, target.y, target.elev, sightRange)) return null;
+      const aiCanHit = this.canRangedHitTarget(px, py, elev, target.x, target.y, target.elev);
+      const targetCanHit = this.canRangedHitTarget(target.x, target.y, target.elev, px, py, elev);
+      const oneWayAdvantage = aiCanHit && !targetCanHit;
+      let score = 0;
+      if (isReloading) {
+        score += !targetCanHit ? 160 : -40;
+      } else {
+        if (!aiCanHit) return null;
+        if (oneWayAdvantage) score += 140;
+      }
+      if (elev > target.elev) {
+        score += 45 * (elev - target.elev);
+      }
+      score -= Math.abs(d - desiredRange) * 0.14;
+      score -= dist(e.x, e.y, px, py) * 0.08;
+      return { score, oneWayAdvantage };
+    };
+
+    const curEval = evalPoint(e.x, e.y, e.elevation);
+    const curScore = curEval ? curEval.score : -999;
+    let best: { x: number; y: number; score: number; oneWayAdvantage: boolean; isCurrentTile: boolean } | null = curEval
+      ? { x: e.x, y: e.y, score: curScore, oneWayAdvantage: curEval.oneWayAdvantage, isCurrentTile: true }
+      : null;
+
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const gx = curGx + dx;
+        const gy = curGy + dy;
+        if (gx < 0 || gx >= cols || gy < 0 || gy >= rows) continue;
+        const idx = this.tileIndex(gx, gy);
+        if (!this.navStandable.has(idx)) continue;
+        const cx = (gx + 0.5) * TILE;
+        const cy = (gy + 0.5) * TILE;
+        const candElev = this.getWalkableElevation(cx, cy);
+        if (holdingHighGround && candElev < e.elevation - 0.01) continue;
+        if (Math.abs(candElev - e.elevation) > 1.0) continue;
+
+        const res = evalPoint(cx, cy, candElev);
+        if (!res) continue;
+        if (!best || res.score > best.score) {
+          best = { x: cx, y: cy, score: res.score, oneWayAdvantage: res.oneWayAdvantage, isCurrentTile: false };
+        }
+      }
+    }
+
+    if (!best) return null;
+    return {
+      x: best.x,
+      y: best.y,
+      scoreGain: best.score - curScore,
+      oneWayAdvantage: best.oneWayAdvantage,
+      isCurrentTile: best.isCurrentTile,
+    };
+  }
+
+  /**
    * 子彈射線高度阻擋物理：
    * - 可由高處往低處射
    * - 高度差 1.5 格（如大箱子）：子彈會穿透至距離邊緣 0.5 格（格心）處再消失，站太外側仍會中彈
@@ -861,7 +937,8 @@ export class TwilightEngine {
       const h = this.getHeightAtPoint(curX, curY);
       if (!h.isCrate && !penetratingHalfTile) {
         leftStartCrate = true;
-        minTraversedElev = Math.min(minTraversedElev, h.terrainHeight);
+        const effectiveFloor = startElev < 0 ? h.terrainHeight : Math.max(0, h.terrainHeight);
+        minTraversedElev = Math.min(minTraversedElev, effectiveFloor);
       }
 
       const heightDiff = h.totalHeight - minTraversedElev;
@@ -1756,11 +1833,11 @@ export class TwilightEngine {
         ? this.isFrontalShieldBlock(enemy.x, enemy.y, enemy.angle, originPos.x, originPos.y)
         : true;
       if (frontalBlocked) {
-        const shieldRes = applyFrontalShieldMitigation(finalDmg, enemyActiveWeapon.durability, isMelee, '敵盾碎裂!');
+        const shieldRes = applyFrontalShieldMitigation(finalDmg, enemyActiveWeapon.durability, isMelee);
         enemyActiveWeapon.durability = shieldRes.nextDurability;
         finalDmg = shieldRes.finalDmg;
         if (shieldRes.banner) {
-          this.spawnText(enemy.x, enemy.y - 30, shieldRes.banner.text, shieldRes.banner.color, 0.9);
+          this.spawnText(enemy.x, enemy.y - 30, shieldRes.banner.text, shieldRes.banner.color, 0.95);
         }
         if (enemyActiveWeapon.durability <= 0) {
           enemy.weapons[enemy.activeHand] = { type: 'melee', def: DEFAULT_KNIFE, durability: 0 };
@@ -1826,14 +1903,14 @@ export class TwilightEngine {
       attackerEntity.hp = Math.min(attackerEntity.maxHp, attackerEntity.hp + heal);
     }
 
-    this.spawnBurst(enemy.x, enemy.y, finalDmg === 0 ? '#38BDF8' : bullseye ? '#FBBF24' : '#F87171', bullseye ? 7 : 5);
+    this.spawnBurst(enemy.x, enemy.y, finalDmg === 0 ? '#FFFFFF' : bullseye ? '#FBBF24' : '#F87171', bullseye ? 7 : 5);
     if (finalDmg > 0) {
       this.spawnText(
         enemy.x + (Math.random() - 0.5) * 16,
         enemy.y - 24,
-        bullseye ? `${finalDmg} 核心` : `${finalDmg}`,
-        bullseye ? '#FBBF24' : '#F8FAFC',
-        bullseye ? 1.15 : 0.95
+        `-${finalDmg}`,
+        '#EF4444',
+        bullseye ? 1.15 : 1.0
       );
     }
 
@@ -1935,7 +2012,7 @@ export class TwilightEngine {
         ? this.isFrontalShieldBlock(p.x, p.y, p.angle, originPos.x, originPos.y)
         : true;
       if (frontalBlocked) {
-        const shieldRes = applyFrontalShieldMitigation(finalDmg, weapon.durability, isMeleeAttack, '護盾碎裂!');
+        const shieldRes = applyFrontalShieldMitigation(finalDmg, weapon.durability, isMeleeAttack);
         weapon.durability = shieldRes.nextDurability;
         finalDmg = shieldRes.finalDmg;
         if (shieldRes.banner) {
@@ -1950,7 +2027,7 @@ export class TwilightEngine {
 
     if (finalDmg > 0) {
       p.hp -= finalDmg;
-      this.spawnText(p.x, p.y - 34, `-${finalDmg}`, '#F43F5E', 1.05);
+      this.spawnText(p.x, p.y - 34, `-${finalDmg}`, '#EF4444', 1.05);
       if (attackerId) {
         const ae = this.enemies.find((e) => e.id === attackerId);
         if (ae && ae.vampireTimer > 0) {
@@ -3126,8 +3203,67 @@ export class TwilightEngine {
                 ? AI_COMBAT.sniper.preferredRange
                 : combat.preferredRange;
 
-        const hasElevGap = Math.abs(e.elevation - losTargetPos.elev) > 0.5;
-        if (!canHitRanged || bestLosDist > desiredRange + 24 || hasElevGap) {
+        const needsClimb = losTargetPos.elev > e.elevation + 0.5;
+        const holdingHighGround = e.elevation > losTargetPos.elev + 0.25 && canHitRanged;
+        const enemyCanHitAi = this.canRangedHitTarget(
+          losTargetPos.x,
+          losTargetPos.y,
+          losTargetPos.elev,
+          e.x,
+          e.y,
+          e.elevation
+        );
+        const aiHasOneWayAdvantage = canHitRanged && !enemyCanHitAi;
+        const tacticalSpot =
+          heldGun && (canHitRanged || !needsClimb)
+            ? this.findBestTacticalSpot(
+                e,
+                losTargetPos,
+                sightRange,
+                desiredRange,
+                holdingHighGround,
+                activeGunReloading
+              )
+            : null;
+
+        if (!canHitRanged || needsClimb) {
+          if (tacticalSpot && tacticalSpot.oneWayAdvantage) {
+            astarGoal = { x: tacticalSpot.x, y: tacticalSpot.y };
+            desiredX = tacticalSpot.x;
+            desiredY = tacticalSpot.y;
+            moveFactor = 1.0;
+          } else {
+            astarGoal = { x: losTargetPos.x, y: losTargetPos.y };
+            desiredX = losTargetPos.x;
+            desiredY = losTargetPos.y;
+            moveFactor = 1.0;
+          }
+        } else if (holdingHighGround) {
+          // 佔據高地且可射擊低處目標時，嚴守高地優勢絕不下坡送頭；優先微調至單向掩體高點
+          if (tacticalSpot && !tacticalSpot.isCurrentTile && tacticalSpot.scoreGain > 16) {
+            desiredX = tacticalSpot.x;
+            desiredY = tacticalSpot.y;
+            moveFactor = 0.72;
+          } else if (bestLosDist > desiredRange + 90) {
+            // 只在高地邊緣視距拉太開時貼近邊緣但仍不降層
+            if (tacticalSpot && !tacticalSpot.isCurrentTile) {
+              desiredX = tacticalSpot.x;
+              desiredY = tacticalSpot.y;
+              moveFactor = 0.65;
+            } else {
+              moveFactor = 0;
+            }
+          } else {
+            moveFactor = 0;
+          }
+        } else if (aiHasOneWayAdvantage && !activeGunReloading && bestLosDist <= desiredRange + 65) {
+          // 已經取得「我打得到敵人、敵人打不到我」的單向優勢掩體站位，穩住架槍
+          moveFactor = 0;
+        } else if (tacticalSpot && !tacticalSpot.isCurrentTile && tacticalSpot.scoreGain > 22) {
+          desiredX = tacticalSpot.x;
+          desiredY = tacticalSpot.y;
+          moveFactor = 0.85;
+        } else if (bestLosDist > desiredRange + 24) {
           astarGoal = { x: losTargetPos.x, y: losTargetPos.y };
           desiredX = losTargetPos.x;
           desiredY = losTargetPos.y;
@@ -3212,6 +3348,7 @@ export class TwilightEngine {
 
       const prevEX = e.x;
       const prevEY = e.y;
+      const avoidDropOff = Boolean(losTargetPos && e.elevation > losTargetPos.elev + 0.25 && canHitRanged);
       if (moveFactor > 0) {
         const weaponSpeedMult = activeWeapon.def.moveSpeedMult;
         const moveAng = Math.atan2(desiredY - e.y, desiredX - e.x);
@@ -3224,7 +3361,8 @@ export class TwilightEngine {
           Math.sin(moveAng) * stepDist,
           e.radius
         );
-        if (dist(e.x, e.y, moved.x, moved.y) < stepDist * 0.25) {
+        const dropBlocked = avoidDropOff && moved.elevation < e.elevation - 0.01;
+        if (dropBlocked || dist(e.x, e.y, moved.x, moved.y) < stepDist * 0.25) {
           const alt1 = this.moveCharacterWithElevation(
             e.x,
             e.y,
@@ -3241,10 +3379,16 @@ export class TwilightEngine {
             Math.sin(moveAng - 1.1) * stepDist,
             e.radius
           );
-          const pick = dist(e.x, e.y, alt1.x, alt1.y) >= dist(e.x, e.y, alt2.x, alt2.y) ? alt1 : alt2;
-          e.x = pick.x;
-          e.y = pick.y;
-          e.elevation = pick.elevation;
+          const valid1 = !avoidDropOff || alt1.elevation >= e.elevation - 0.01;
+          const valid2 = !avoidDropOff || alt2.elevation >= e.elevation - 0.01;
+          const d1 = valid1 ? dist(e.x, e.y, alt1.x, alt1.y) : -1;
+          const d2 = valid2 ? dist(e.x, e.y, alt2.x, alt2.y) : -1;
+          if (d1 > 0 || d2 > 0) {
+            const pick = d1 >= d2 ? alt1 : alt2;
+            e.x = pick.x;
+            e.y = pick.y;
+            e.elevation = pick.elevation;
+          }
         } else {
           e.x = moved.x;
           e.y = moved.y;
@@ -3476,7 +3620,8 @@ export class TwilightEngine {
 
         const h = this.getHeightAtPoint(proj.x, proj.y);
         if (!h.isCrate) {
-          proj.minTraversedElevation = Math.min(proj.minTraversedElevation, h.terrainHeight);
+          const effectiveFloor = proj.startElevation < 0 ? h.terrainHeight : Math.max(0, h.terrainHeight);
+          proj.minTraversedElevation = Math.min(proj.minTraversedElevation, effectiveFloor);
         }
         const crateBlocks = h.isCrate && proj.minTraversedElevation < 1.5 && h.totalHeight - proj.minTraversedElevation > 1.0;
         const cliffBlocks = !h.isCrate && h.totalHeight > proj.startElevation && h.totalHeight - proj.minTraversedElevation > 1.0;
