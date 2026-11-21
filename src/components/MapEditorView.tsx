@@ -29,16 +29,22 @@ import {
   CustomMapData,
   FARM_CROP_OPTIONS,
   FLOOR_STYLE_OPTIONS,
+  FLOOR_TERRAIN_BINDINGS,
   HOUSE_STYLE_OPTIONS,
   ROCK_COLOR_OPTIONS,
+  STANDALONE_TERRAIN_SPECS,
   TREE_FOLIAGE_PRESETS,
   arenaMapToCustomData,
   buildArenaMapFromCustom,
+  canPlaceTerrainStairAt,
   cloneCustomMap,
   createBlankCustomMap,
   createCustomMapId,
+  findMatchingStairDirection,
   floorStyleToBiome,
   hasUniformCellElevation,
+  hasUniformIglooElevation,
+  normalizeTerrainStyle,
   resizeCustomMap,
   validateCustomMap,
 } from '../game/customMaps';
@@ -50,7 +56,7 @@ import {
   renderMapBaseLayer,
   renderMapCanopies,
 } from '../game/mapRenderer';
-import { TILE, biomeToDefaultFloor, createArenaMap, createFloorGrid } from '../game/maps';
+import { TILE, biomeToDefaultFloor, createArenaMap, createFloorGrid, getIglooCellMask } from '../game/maps';
 import {
   FactionId,
   FarmCropType,
@@ -84,17 +90,31 @@ type ToolId =
   | 'floor_castle_stone'
   | 'floor_warehouse_steel'
   | 'floor_grass'
+  | 'floor_glacier_ice'
   | 'floor_reset'
   | 'terrain_hill_raise'
   | 'terrain_hill_stair'
+  | 'terrain_shrine_dirt_raise'
+  | 'terrain_shrine_dirt_stair'
+  | 'terrain_bamboo_moss_raise'
+  | 'terrain_bamboo_moss_stair'
   | 'terrain_stone_raise'
   | 'terrain_stone_stair'
+  | 'terrain_castle_dais_raise'
+  | 'terrain_castle_dais_stair'
+  | 'terrain_warehouse_steel_raise'
+  | 'terrain_warehouse_steel_stair'
+  | 'terrain_glacier_raise'
+  | 'terrain_glacier_stair'
   | 'terrain_plank_raise'
   | 'terrain_plank_stair'
   | 'terrain_mud_dig'
   | 'terrain_mud_stair'
   | 'terrain_lower'
   | 'obj_water'
+  | 'obj_floating_ice'
+  | 'obj_ice_vent'
+  | 'obj_campfire'
   | 'obj_bridge'
   | 'obj_stone_bridge'
   | 'obj_stone_road'
@@ -104,6 +124,7 @@ type ToolId =
   | 'obj_stair_crate'
   | 'obj_small_crate'
   | 'obj_big_crate'
+  | 'obj_pushable_ice'
   | 'obj_rock_small'
   | 'obj_rock_large'
   | 'obj_container'
@@ -115,6 +136,7 @@ type ToolId =
   | 'obj_shrine_wall'
   | 'obj_castle_pillar'
   | 'obj_house'
+  | 'obj_igloo'
   | 'obj_bamboo'
   | 'obj_bush'
   | 'obj_tree'
@@ -143,15 +165,15 @@ interface ToolMeta {
 
 const TERRAIN_CATEGORY_META: { id: TerrainCategoryId; label: string }[] = [
   { id: 'tier', label: '層級（±1.0/層）' },
-  { id: 'stair', label: '攀爬階梯（所在層 +0.5）' },
+  { id: 'stair', label: '攀爬階梯（所在層 +0.5 · 須貼合對應地形）' },
 ];
 
 const OBJECT_CATEGORY_META: { id: ObjectCategoryId; label: string }[] = [
-  { id: 'composable', label: '水域、路網與圍欄' },
+  { id: 'composable', label: '水域、浮冰、路網與環境火氣' },
   { id: 'bridges', label: '跨河橋樑' },
   { id: 'walls', label: '壁壘實牆（高度 10）' },
-  { id: 'covers', label: '箱體、車廂與岩石掩體' },
-  { id: 'buildings', label: '建築房屋（高度 10）' },
+  { id: 'covers', label: '箱體、車廂、推冰與岩石掩體' },
+  { id: 'buildings', label: '建築屋舍（高度 10）' },
   { id: 'nature', label: '植被、竹林與農田' },
 ];
 
@@ -162,6 +184,7 @@ const FLOOR_TOOL_STYLE_MAP: Partial<Record<ToolId, FloorStyle>> = {
   floor_castle_stone: 'castle_stone',
   floor_warehouse_steel: 'warehouse_steel',
   floor_grass: 'grass_ground',
+  floor_glacier_ice: 'glacier_ice',
 };
 
 const FLOOR_PREVIEW_BY_STYLE: Record<FloorStyle, HelpCatalogVisualId> = {
@@ -171,10 +194,110 @@ const FLOOR_PREVIEW_BY_STYLE: Record<FloorStyle, HelpCatalogVisualId> = {
   castle_stone: 'floor_castle_stone',
   warehouse_steel: 'floor_warehouse_steel',
   grass_ground: 'terrain_grass',
+  glacier_ice: 'floor_glacier_ice',
+};
+
+const TERRAIN_RAISE_TOOL_TO_STYLE: Partial<Record<ToolId, PlatformStyle>> = {
+  terrain_hill_raise: 'hill',
+  terrain_shrine_dirt_raise: 'shrine_dirt',
+  terrain_bamboo_moss_raise: 'bamboo_moss',
+  terrain_stone_raise: 'pyramid',
+  terrain_castle_dais_raise: 'castle_dais',
+  terrain_warehouse_steel_raise: 'warehouse_steel',
+  terrain_glacier_raise: 'glacier_ice',
+  terrain_plank_raise: 'shrine_floor',
+};
+
+const TERRAIN_STAIR_TOOL_TO_STYLE: Partial<Record<ToolId, PlatformStyle>> = {
+  terrain_hill_stair: 'hill',
+  terrain_shrine_dirt_stair: 'shrine_dirt',
+  terrain_bamboo_moss_stair: 'bamboo_moss',
+  terrain_stone_stair: 'pyramid',
+  terrain_castle_dais_stair: 'castle_dais',
+  terrain_warehouse_steel_stair: 'warehouse_steel',
+  terrain_glacier_stair: 'glacier_ice',
+  terrain_plank_stair: 'shrine_floor',
+  terrain_mud_stair: 'mud_pit',
+};
+
+const TERRAIN_TOOLS_BY_FLOOR: Record<
+  FloorStyle,
+  {
+    raiseId: ToolId;
+    raisePreview: HelpCatalogVisualId;
+    stairId: ToolId;
+    stairPreview: HelpCatalogVisualId;
+  }
+> = {
+  grass_ground: {
+    raiseId: 'terrain_hill_raise',
+    raisePreview: 'terrain_hill',
+    stairId: 'terrain_hill_stair',
+    stairPreview: 'terrain_hill_stair',
+  },
+  shrine_dirt: {
+    raiseId: 'terrain_shrine_dirt_raise',
+    raisePreview: 'terrain_shrine_dirt',
+    stairId: 'terrain_shrine_dirt_stair',
+    stairPreview: 'terrain_shrine_dirt_stair',
+  },
+  bamboo_moss: {
+    raiseId: 'terrain_bamboo_moss_raise',
+    raisePreview: 'terrain_bamboo_moss',
+    stairId: 'terrain_bamboo_moss_stair',
+    stairPreview: 'terrain_bamboo_moss_stair',
+  },
+  desert_sand: {
+    raiseId: 'terrain_stone_raise',
+    raisePreview: 'terrain_platform',
+    stairId: 'terrain_stone_stair',
+    stairPreview: 'terrain_platform_stair',
+  },
+  castle_stone: {
+    raiseId: 'terrain_castle_dais_raise',
+    raisePreview: 'terrain_castle_dais',
+    stairId: 'terrain_castle_dais_stair',
+    stairPreview: 'terrain_castle_dais_stair',
+  },
+  warehouse_steel: {
+    raiseId: 'terrain_warehouse_steel_raise',
+    raisePreview: 'terrain_warehouse_steel',
+    stairId: 'terrain_warehouse_steel_stair',
+    stairPreview: 'terrain_warehouse_steel_stair',
+  },
+  glacier_ice: {
+    raiseId: 'terrain_glacier_raise',
+    raisePreview: 'terrain_glacier',
+    stairId: 'terrain_glacier_stair',
+    stairPreview: 'terrain_glacier_stair',
+  },
+};
+
+const STANDALONE_TERRAIN_TOOL_PAIRS: Record<
+  'shrine_floor' | 'mud_pit',
+  {
+    tierId: ToolId;
+    tierPreview: HelpCatalogVisualId;
+    stairId: ToolId;
+    stairPreview: HelpCatalogVisualId;
+  }
+> = {
+  shrine_floor: {
+    tierId: 'terrain_plank_raise',
+    tierPreview: 'terrain_plank',
+    stairId: 'terrain_plank_stair',
+    stairPreview: 'terrain_plank_stair',
+  },
+  mud_pit: {
+    tierId: 'terrain_mud_dig',
+    tierPreview: 'terrain_mud',
+    stairId: 'terrain_mud_stair',
+    stairPreview: 'terrain_mud_stair',
+  },
 };
 
 const TOOL_CATALOG: ToolMeta[] = [
-  // Floor tab (6 種獨立可混搭地板，無「一般地板」)
+  // Floor tab (7 種完全平權地板，均自 FLOOR_STYLE_OPTIONS 派生)
   ...FLOOR_STYLE_OPTIONS.map((opt) => ({
     id: (opt.id === 'grass_ground' ? 'floor_grass' : `floor_${opt.id}`) as ToolId,
     tab: 'floor' as const,
@@ -185,19 +308,54 @@ const TOOL_CATALOG: ToolMeta[] = [
     floorStyle: opt.id,
   })),
 
-  // Terrain tab (層級 ±1.0 與 攀爬階梯 +0.5)
-  { id: 'terrain_hill_raise', tab: 'terrain', terrainCategory: 'tier', label: '土丘高地（疊加）', heightLabel: '每層 +1.0', footprint: '1×1 格', previewId: 'terrain_hill' },
-  { id: 'terrain_stone_raise', tab: 'terrain', terrainCategory: 'tier', label: '切石高台（疊加）', heightLabel: '每層 +1.0', footprint: '1×1 格', previewId: 'terrain_platform' },
-  { id: 'terrain_plank_raise', tab: 'terrain', terrainCategory: 'tier', label: '木板神社高台（疊加）', heightLabel: '每層 +1.0', footprint: '1×1 格', previewId: 'terrain_plank' },
-  { id: 'terrain_mud_dig', tab: 'terrain', terrainCategory: 'tier', label: '泥坑窪地（下挖）', heightLabel: '每層 -1.0', footprint: '1×1 格', previewId: 'terrain_mud' },
-  { id: 'terrain_hill_stair', tab: 'terrain', terrainCategory: 'stair', label: '土坡階梯', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'terrain_hill_stair', rotatable: true },
-  { id: 'terrain_stone_stair', tab: 'terrain', terrainCategory: 'stair', label: '切石石階', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'terrain_platform_stair', rotatable: true },
-  { id: 'terrain_plank_stair', tab: 'terrain', terrainCategory: 'stair', label: '木板神社階梯', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'terrain_plank_stair', rotatable: true },
-  { id: 'terrain_mud_stair', tab: 'terrain', terrainCategory: 'stair', label: '泥坡階梯', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'terrain_mud_stair', rotatable: true },
+  // Terrain tab — 層級 ±1.0（每種地板對應高地 + 獨立木板神社高台／泥坑窪地）
+  ...(Object.keys(FLOOR_TERRAIN_BINDINGS) as FloorStyle[]).map((fs) => ({
+    id: TERRAIN_TOOLS_BY_FLOOR[fs].raiseId,
+    tab: 'terrain' as const,
+    terrainCategory: 'tier' as const,
+    label: FLOOR_TERRAIN_BINDINGS[fs].terrainLabel,
+    heightLabel: '每層 +1.0',
+    footprint: '1×1 格',
+    previewId: TERRAIN_TOOLS_BY_FLOOR[fs].raisePreview,
+  })),
+  ...STANDALONE_TERRAIN_SPECS.map((sp) => ({
+    id: STANDALONE_TERRAIN_TOOL_PAIRS[sp.id].tierId,
+    tab: 'terrain' as const,
+    terrainCategory: 'tier' as const,
+    label: sp.terrainLabel,
+    heightLabel: sp.heightLabel,
+    footprint: '1×1 格',
+    previewId: STANDALONE_TERRAIN_TOOL_PAIRS[sp.id].tierPreview,
+  })),
+
+  // Terrain tab — 攀爬階梯 +0.5（僅可放置於對應樣式高台／泥坑邊緣）
+  ...(Object.keys(FLOOR_TERRAIN_BINDINGS) as FloorStyle[]).map((fs) => ({
+    id: TERRAIN_TOOLS_BY_FLOOR[fs].stairId,
+    tab: 'terrain' as const,
+    terrainCategory: 'stair' as const,
+    label: FLOOR_TERRAIN_BINDINGS[fs].stairLabel,
+    heightLabel: '所在層 +0.5',
+    footprint: '1×1 格',
+    previewId: TERRAIN_TOOLS_BY_FLOOR[fs].stairPreview,
+    rotatable: true,
+  })),
+  ...STANDALONE_TERRAIN_SPECS.map((sp) => ({
+    id: STANDALONE_TERRAIN_TOOL_PAIRS[sp.id].stairId,
+    tab: 'terrain' as const,
+    terrainCategory: 'stair' as const,
+    label: sp.stairLabel,
+    heightLabel: '所在層 +0.5',
+    footprint: '1×1 格',
+    previewId: STANDALONE_TERRAIN_TOOL_PAIRS[sp.id].stairPreview,
+    rotatable: true,
+  })),
   { id: 'terrain_lower', tab: 'terrain', label: '地形橡皮擦', heightLabel: '恢復 1 層／清梯', footprint: '1×1 格', isEraser: true },
 
-  // Objects tab (分組可折疊，含水域河道及所有可疊加物件)
+  // Objects tab (分組可折疊，含水域河道、浮冰、冰氣孔、篝火、冰屋、推冰及所有可疊加物件)
   { id: 'obj_water', tab: 'objects', objectCategory: 'composable', label: '水域河道', heightLabel: '隨地形層 0.0', footprint: '1×1 格', previewId: 'terrain_river' },
+  { id: 'obj_floating_ice', tab: 'objects', objectCategory: 'composable', label: '浮冰（僅水域）', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_floating_ice' },
+  { id: 'obj_ice_vent', tab: 'objects', objectCategory: 'composable', label: '冰氣孔', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_ice_vent' },
+  { id: 'obj_campfire', tab: 'objects', objectCategory: 'composable', label: '篝火', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_campfire' },
   { id: 'obj_stone_road', tab: 'objects', objectCategory: 'composable', label: '石板參道', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_stone_road' },
   { id: 'obj_rail', tab: 'objects', objectCategory: 'composable', label: '鐵道路軌', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_rail', rotatable: true },
   { id: 'obj_railing', tab: 'objects', objectCategory: 'composable', label: '防護欄杆', heightLabel: '所在層 +1.0', footprint: '1×1 格', previewId: 'object_railing' },
@@ -212,11 +370,13 @@ const TOOL_CATALOG: ToolMeta[] = [
   { id: 'obj_stair_crate', tab: 'objects', objectCategory: 'covers', label: '木條階梯踏台', heightLabel: '所在層 +0.5', footprint: '1×1 格', previewId: 'object_stair_crate', rotatable: true },
   { id: 'obj_small_crate', tab: 'objects', objectCategory: 'covers', label: '小木箱', heightLabel: '所在層 +1.0', footprint: '1×1 格', previewId: 'object_small_crate' },
   { id: 'obj_big_crate', tab: 'objects', objectCategory: 'covers', label: '大木箱（斜撐）', heightLabel: '所在層 +1.5', footprint: '2×2 格', previewId: 'object_big_crate' },
+  { id: 'obj_pushable_ice', tab: 'objects', objectCategory: 'covers', label: '可推動寒冰塊', heightLabel: '所在層 +1.5', footprint: '2×2 格', previewId: 'object_pushable_ice' },
   { id: 'obj_rock_small', tab: 'objects', objectCategory: 'covers', label: '小石塊（黑/棕/白）', heightLabel: '所在層 +1.5', footprint: '1×1 格', previewId: 'object_rock_small' },
   { id: 'obj_rock_large', tab: 'objects', objectCategory: 'covers', label: '大岩石（黑/棕/白）', heightLabel: '所在層 +2.0', footprint: '2×2 格', previewId: 'object_rock_large' },
   { id: 'obj_container', tab: 'objects', objectCategory: 'covers', label: '彩色鋼製貨櫃', heightLabel: '所在層 +2.0', footprint: '4×2 / 2×4', previewId: 'object_container', rotatable: true },
   { id: 'obj_train_car', tab: 'objects', objectCategory: 'covers', label: '火車頭 / 車廂', heightLabel: '所在層 +2.0', footprint: '4×2 / 2×4', previewId: 'object_train_car', rotatable: true },
   { id: 'obj_house', tab: 'objects', objectCategory: 'buildings', label: '斜頂房屋（5 式）', heightLabel: '高度 10', footprint: '3×2 / 2×3', previewId: 'object_house', rotatable: true },
+  { id: 'obj_igloo', tab: 'objects', objectCategory: 'buildings', label: '極地冰屋', heightLabel: '10 (內+0.0)', footprint: '3/5/5/5/3 格', previewId: 'object_igloo', rotatable: true },
   { id: 'obj_farm', tab: 'objects', objectCategory: 'nature', label: '耕作農田（4 作物）', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_farm' },
   { id: 'obj_bamboo', tab: 'objects', objectCategory: 'nature', label: '竹林實牆（3 株）', heightLabel: '高度 10', footprint: '1×1 格', previewId: 'object_bamboo', rotatable: true },
   { id: 'obj_bush', tab: 'objects', objectCategory: 'nature', label: '野生灌木草叢', heightLabel: '所在層 +0.0', footprint: '1×1 格', previewId: 'object_bush' },
@@ -301,6 +461,13 @@ const HOUSE_DIR_LABELS: Record<CompassDir, string> = {
   east: '直 2×3 東門',
   south: '橫 3×2 南門',
   west: '直 2×3 西門',
+};
+
+const IGLOO_DIR_LABELS: Record<CompassDir, string> = {
+  north: '朝北出口 ↑',
+  east: '朝東出口 →',
+  south: '朝南出口 ↓',
+  west: '朝西出口 ←',
 };
 
 const COMPASS_ORDER: CompassDir[] = ['north', 'east', 'south', 'west'];
@@ -413,6 +580,7 @@ interface ApplyContext {
   stairDir: CompassDir;
   bambooDir: CompassDir;
   houseDir: CompassDir;
+  iglooDir: CompassDir;
   houseStyle: string;
   rockColor: 'black' | 'brown' | 'white';
   farmCrop: FarmCropType;
@@ -433,7 +601,8 @@ function getEffectiveTool(ctxOpts: ApplyContext, forceErase: boolean): ToolId {
 }
 
 function getFootprintForTool(toolId: ToolId, ctxOpts: ApplyContext): { gw: number; gh: number } {
-  if (toolId === 'obj_big_crate' || toolId === 'obj_rock_large') return { gw: 2, gh: 2 };
+  if (toolId === 'obj_big_crate' || toolId === 'obj_rock_large' || toolId === 'obj_pushable_ice') return { gw: 2, gh: 2 };
+  if (toolId === 'obj_igloo') return { gw: 5, gh: 5 };
   if (toolId === 'obj_house') {
     return ctxOpts.houseDir === 'east' || ctxOpts.houseDir === 'west' ? { gw: 2, gh: 3 } : { gw: 3, gh: 2 };
   }
@@ -453,6 +622,16 @@ function validateMultiTileUniformTerrain(data: CustomMapData): string | undefine
   for (const obs of data.obstacles) {
     if ((obs.gw > 1 || obs.gh > 1) && !hasUniformCellElevation(data.tileGrid, obs.gx, obs.gy, obs.gw, obs.gh)) {
       return `上方存在跨格物件 (${obs.gx}, ${obs.gy}) ${obs.gw}×${obs.gh}，請整塊一併升降或先移除後再調整高度`;
+    }
+  }
+  for (const pb of data.pushableIceBlocks || []) {
+    if (!hasUniformCellElevation(data.tileGrid, pb.gx, pb.gy, 2, 2)) {
+      return `上方存在可推動寒冰塊 (${pb.gx}, ${pb.gy}) 2×2，調整地形會造成底層高度不一致`;
+    }
+  }
+  for (const ig of data.igloos || []) {
+    if (!hasUniformIglooElevation(data.tileGrid, ig.gx, ig.gy, ig.direction)) {
+      return `上方存在極地冰屋 (${ig.gx}, ${ig.gy}) 3/5/5/5/3，調整地形會造成底層高度不一致`;
     }
   }
   for (const br of data.bridges) {
@@ -493,6 +672,11 @@ function applyToolToRect(
     next.factionSpawns.mercenary = next.factionSpawns.mercenary.filter((it) => out(it.gx, it.gy));
   };
 
+  const removeWaterInRect = (rx: number, ry: number, w: number, h: number) => {
+    next.waterTiles = next.waterTiles.filter((wt) => !rectsOverlap(wt.gx, wt.gy, 1, 1, rx, ry, w, h));
+    next.floatingIceTiles = (next.floatingIceTiles || []).filter((ft) => !rectsOverlap(ft.gx, ft.gy, 1, 1, rx, ry, w, h));
+  };
+
   const removeObjectsInRect = (rx: number, ry: number, w: number, h: number, includeRoadsRailsAndWater = true) => {
     next.obstacles = next.obstacles.filter((o) => !rectsOverlap(o.gx, o.gy, o.gw, o.gh, rx, ry, w, h));
     next.stairs = next.stairs.filter((s) => !rectsOverlap(s.gx, s.gy, s.gw ?? 1, s.gh ?? 1, rx, ry, w, h));
@@ -500,11 +684,27 @@ function applyToolToRect(
     next.bushes = next.bushes.filter((b) => !rectsOverlap(b.gx, b.gy, 1, 1, rx, ry, w, h));
     next.trees = next.trees.filter((t) => !rectsOverlap(t.gx, t.gy, 1, 1, rx, ry, w, h));
     next.farmTiles = (next.farmTiles || []).filter((f) => !rectsOverlap(f.gx, f.gy, 1, 1, rx, ry, w, h));
+    next.iceVents = (next.iceVents || []).filter((iv) => !rectsOverlap(iv.gx, iv.gy, 1, 1, rx, ry, w, h));
+    next.campfires = (next.campfires || []).filter((cf) => !rectsOverlap(cf.gx, cf.gy, 1, 1, rx, ry, w, h));
+    next.pushableIceBlocks = (next.pushableIceBlocks || []).filter(
+      (pb) => !rectsOverlap(pb.gx, pb.gy, 2, 2, rx, ry, w, h)
+    );
+    next.igloos = (next.igloos || []).filter((ig) => {
+      const mask = getIglooCellMask(ig.gx, ig.gy, ig.direction);
+      return !mask.occupied.some((c) => rectsOverlap(c.gx, c.gy, 1, 1, rx, ry, w, h));
+    });
     if (includeRoadsRailsAndWater) {
-      next.waterTiles = next.waterTiles.filter((wt) => !rectsOverlap(wt.gx, wt.gy, 1, 1, rx, ry, w, h));
+      removeWaterInRect(rx, ry, w, h);
       next.stoneRoads = (next.stoneRoads || []).filter((r) => !rectsOverlap(r.gx, r.gy, 1, 1, rx, ry, w, h));
       next.railTracks = (next.railTracks || []).filter((r) => !rectsOverlap(r.gx, r.gy, 1, 1, rx, ry, w, h));
     }
+  };
+
+  const pruneMismatchedStairs = () => {
+    next.stairs = next.stairs.filter((s) => {
+      if (!normalizeTerrainStyle(s.style)) return true;
+      return canPlaceTerrainStairAt(next.tileGrid, s.gx, s.gy, s.style, s.direction);
+    });
   };
 
   // Floor tools (pure 0.0 surface style layer — never alters terrain height, stairs, water, or objects)
@@ -523,28 +723,18 @@ function applyToolToRect(
   }
 
   // Terrain tools (raise/dig height or place stairs — preserves floorGrid and waterTiles)
-  if (
-    effectiveTool === 'terrain_hill_raise' ||
-    effectiveTool === 'terrain_stone_raise' ||
-    effectiveTool === 'terrain_plank_raise'
-  ) {
-    const style: PlatformStyle =
-      effectiveTool === 'terrain_hill_raise'
-        ? 'hill'
-        : effectiveTool === 'terrain_plank_raise'
-          ? 'shrine_floor'
-          : next.biome === 'castle_indoor'
-            ? 'castle_dais'
-            : 'pyramid';
+  const raiseStyle = TERRAIN_RAISE_TOOL_TO_STYLE[effectiveTool];
+  if (raiseStyle) {
     for (let gy = minY; gy <= maxY; gy++) {
       for (let gx = minX; gx <= maxX; gx++) {
         const curElev = next.tileGrid[gy][gx].elev;
         const nextElev = Math.min(6, Math.floor(curElev) + 1);
-        next.tileGrid[gy][gx] = { elev: nextElev, style: nextElev === 0 ? 'default' : nextElev < 0 ? 'mud_pit' : style };
+        next.tileGrid[gy][gx] = { elev: nextElev, style: nextElev === 0 ? 'default' : nextElev < 0 ? 'mud_pit' : raiseStyle };
       }
     }
     const uniformErr = validateMultiTileUniformTerrain(next);
     if (uniformErr) return { next: prev, error: uniformErr };
+    pruneMismatchedStairs();
     return { next };
   }
 
@@ -561,6 +751,7 @@ function applyToolToRect(
     }
     const uniformErr = validateMultiTileUniformTerrain(next);
     if (uniformErr) return { next: prev, error: uniformErr };
+    pruneMismatchedStairs();
     return { next };
   }
 
@@ -588,38 +779,37 @@ function applyToolToRect(
     }
     const uniformErr = validateMultiTileUniformTerrain(next);
     if (uniformErr) return { next: prev, error: uniformErr };
+    pruneMismatchedStairs();
     return { next };
   }
 
-  if (
-    effectiveTool === 'terrain_hill_stair' ||
-    effectiveTool === 'terrain_stone_stair' ||
-    effectiveTool === 'terrain_plank_stair' ||
-    effectiveTool === 'terrain_mud_stair'
-  ) {
-    next.waterTiles = next.waterTiles.filter((w) => !rectsOverlap(w.gx, w.gy, 1, 1, minX, minY, rw, rh));
-    next.stairs = next.stairs.filter((s) => !rectsOverlap(s.gx, s.gy, s.gw ?? 1, s.gh ?? 1, minX, minY, rw, rh));
-    const stairStyle: PlatformStyle =
-      effectiveTool === 'terrain_hill_stair'
-        ? 'hill'
-        : effectiveTool === 'terrain_plank_stair'
-          ? 'shrine_floor'
-          : effectiveTool === 'terrain_mud_stair'
-            ? 'mud_pit'
-            : next.biome === 'castle_indoor'
-              ? 'castle_dais'
-              : 'pyramid';
+  const terrainStairStyle = TERRAIN_STAIR_TOOL_TO_STYLE[effectiveTool];
+  if (terrainStairStyle) {
+    let placedCount = 0;
     for (let gy = minY; gy <= maxY; gy++) {
       for (let gx = minX; gx <= maxX; gx++) {
+        const matchedDir = canPlaceTerrainStairAt(next.tileGrid, gx, gy, terrainStairStyle, ctxOpts.stairDir)
+          ? ctxOpts.stairDir
+          : findMatchingStairDirection(next.tileGrid, gx, gy, terrainStairStyle, ctxOpts.stairDir);
+        if (!matchedDir) continue;
+        removeWaterInRect(gx, gy, 1, 1);
+        next.stairs = next.stairs.filter((s) => !rectsOverlap(s.gx, s.gy, s.gw ?? 1, s.gh ?? 1, gx, gy, 1, 1));
         next.stairs.push({
           gx,
           gy,
           gw: 1,
           gh: 1,
-          direction: ctxOpts.stairDir,
-          style: stairStyle,
+          direction: matchedDir,
+          style: terrainStairStyle,
         });
+        placedCount += 1;
       }
+    }
+    if (placedCount === 0) {
+      return {
+        next: prev,
+        error: '階梯必須貼合並指向對應樣式之高台／泥坑上層',
+      };
     }
     return { next };
   }
@@ -655,11 +845,85 @@ function applyToolToRect(
     next.stoneRoads = next.stoneRoads.filter((r) => !rectsOverlap(r.gx, r.gy, 1, 1, minX, minY, rw, rh));
     next.railTracks = next.railTracks.filter((r) => !rectsOverlap(r.gx, r.gy, 1, 1, minX, minY, rw, rh));
     next.farmTiles = (next.farmTiles || []).filter((f) => !rectsOverlap(f.gx, f.gy, 1, 1, minX, minY, rw, rh));
+    next.iceVents = (next.iceVents || []).filter((iv) => !rectsOverlap(iv.gx, iv.gy, 1, 1, minX, minY, rw, rh));
+    next.campfires = (next.campfires || []).filter((cf) => !rectsOverlap(cf.gx, cf.gy, 1, 1, minX, minY, rw, rh));
+    next.pushableIceBlocks = (next.pushableIceBlocks || []).filter(
+      (pb) => !rectsOverlap(pb.gx, pb.gy, 2, 2, minX, minY, rw, rh)
+    );
+    next.igloos = (next.igloos || []).filter((ig) => {
+      const mask = getIglooCellMask(ig.gx, ig.gy, ig.direction);
+      return !mask.occupied.some((c) => rectsOverlap(c.gx, c.gy, 1, 1, minX, minY, rw, rh));
+    });
+    return { next };
+  }
+
+  // 浮冰（僅可放置於水域格位之上，單格獨立、相鄰自動接合並於外側留出水面邊緣）
+  if (effectiveTool === 'obj_floating_ice') {
+    const waterSet = new Set(next.waterTiles.map((w) => `${w.gx},${w.gy}`));
+    const iceList = [...(next.floatingIceTiles || [])];
+    const iceSet = new Set(iceList.map((f) => `${f.gx},${f.gy}`));
+    let waterHitCount = 0;
+    let skippedNonWater = false;
+    for (let gy = minY; gy <= maxY; gy++) {
+      for (let gx = minX; gx <= maxX; gx++) {
+        const key = `${gx},${gy}`;
+        if (!waterSet.has(key)) {
+          skippedNonWater = true;
+          continue;
+        }
+        waterHitCount += 1;
+        if (!iceSet.has(key)) {
+          iceList.push({ gx, gy });
+          iceSet.add(key);
+        }
+      }
+    }
+    if (waterHitCount === 0) {
+      return { next: prev, error: '浮冰只能放置於水域格位之上' };
+    }
+    next.floatingIceTiles = iceList;
+    return {
+      next,
+      error: skippedNonWater ? '僅於水域格位放置浮冰，非水域格位已略過' : undefined,
+    };
+  }
+
+  if (effectiveTool === 'obj_ice_vent') {
+    removeObjectsInRect(minX, minY, rw, rh, false);
+    removeWaterInRect(minX, minY, rw, rh);
+    const vents = [...(next.iceVents || [])];
+    const ventSet = new Set(vents.map((v) => `${v.gx},${v.gy}`));
+    for (let gy = minY; gy <= maxY; gy++) {
+      for (let gx = minX; gx <= maxX; gx++) {
+        if (!ventSet.has(`${gx},${gy}`)) {
+          vents.push({ gx, gy });
+          ventSet.add(`${gx},${gy}`);
+        }
+      }
+    }
+    next.iceVents = vents;
+    return { next };
+  }
+
+  if (effectiveTool === 'obj_campfire') {
+    removeObjectsInRect(minX, minY, rw, rh, false);
+    removeWaterInRect(minX, minY, rw, rh);
+    const fires = [...(next.campfires || [])];
+    const fireSet = new Set(fires.map((cf) => `${cf.gx},${cf.gy}`));
+    for (let gy = minY; gy <= maxY; gy++) {
+      for (let gx = minX; gx <= maxX; gx++) {
+        if (!fireSet.has(`${gx},${gy}`)) {
+          fires.push({ gx, gy });
+          fireSet.add(`${gx},${gy}`);
+        }
+      }
+    }
+    next.campfires = fires;
     return { next };
   }
 
   if (effectiveTool === 'obj_stone_road') {
-    next.waterTiles = next.waterTiles.filter((w) => !rectsOverlap(w.gx, w.gy, 1, 1, minX, minY, rw, rh));
+    removeWaterInRect(minX, minY, rw, rh);
     const roadSet = new Set(next.stoneRoads.map((r) => `${r.gx},${r.gy}`));
     for (let gy = minY; gy <= maxY; gy++) {
       for (let gx = minX; gx <= maxX; gx++) {
@@ -673,7 +937,7 @@ function applyToolToRect(
   }
 
   if (effectiveTool === 'obj_rail') {
-    next.waterTiles = next.waterTiles.filter((w) => !rectsOverlap(w.gx, w.gy, 1, 1, minX, minY, rw, rh));
+    removeWaterInRect(minX, minY, rw, rh);
     next.railTracks = next.railTracks.filter((r) => !rectsOverlap(r.gx, r.gy, 1, 1, minX, minY, rw, rh));
     for (let gy = minY; gy <= maxY; gy++) {
       for (let gx = minX; gx <= maxX; gx++) {
@@ -688,7 +952,7 @@ function applyToolToRect(
 
   if (effectiveTool === 'obj_farm') {
     removeObjectsInRect(minX, minY, rw, rh, false);
-    next.waterTiles = next.waterTiles.filter((w) => !rectsOverlap(w.gx, w.gy, 1, 1, minX, minY, rw, rh));
+    removeWaterInRect(minX, minY, rw, rh);
     const existing = (next.farmTiles || []).filter((f) => !rectsOverlap(f.gx, f.gy, 1, 1, minX, minY, rw, rh));
     for (let gy = minY; gy <= maxY; gy++) {
       for (let gx = minX; gx <= maxX; gx++) {
@@ -731,7 +995,7 @@ function applyToolToRect(
 
   if (effectiveTool === 'obj_stair_crate') {
     removeObjectsInRect(minX, minY, rw, rh, false);
-    next.waterTiles = next.waterTiles.filter((w) => !rectsOverlap(w.gx, w.gy, 1, 1, minX, minY, rw, rh));
+    removeWaterInRect(minX, minY, rw, rh);
     for (let gy = minY; gy <= maxY; gy++) {
       for (let gx = minX; gx <= maxX; gx++) {
         next.stairs.push({ gx, gy, gw: 1, gh: 1, direction: ctxOpts.stairDir, style: 'default' });
@@ -742,7 +1006,7 @@ function applyToolToRect(
 
   if (effectiveTool === 'obj_bush') {
     removeObjectsInRect(minX, minY, rw, rh, false);
-    next.waterTiles = next.waterTiles.filter((w) => !rectsOverlap(w.gx, w.gy, 1, 1, minX, minY, rw, rh));
+    removeWaterInRect(minX, minY, rw, rh);
     for (let gy = minY; gy <= maxY; gy++) {
       for (let gx = minX; gx <= maxX; gx++) {
         next.bushes.push({ gx, gy });
@@ -754,7 +1018,7 @@ function applyToolToRect(
   if (effectiveTool === 'obj_tree') {
     removeObjectsInRect(minX, minY, rw, rh, false);
     removeSpawnsInRect(minX, minY, rw, rh);
-    next.waterTiles = next.waterTiles.filter((w) => !rectsOverlap(w.gx, w.gy, 1, 1, minX, minY, rw, rh));
+    removeWaterInRect(minX, minY, rw, rh);
     for (let gy = minY; gy <= maxY; gy++) {
       for (let gx = minX; gx <= maxX; gx++) {
         next.trees.push({
@@ -765,6 +1029,72 @@ function applyToolToRect(
         });
       }
     }
+    return { next };
+  }
+
+  if (effectiveTool === 'obj_pushable_ice') {
+    let placedAny = false;
+    let blockedByUneven = false;
+
+    const tryPlaceBlockAt = (gx: number, gy: number) => {
+      const ox = clamp(gx, 0, Math.max(0, next.cols - 2));
+      const oy = clamp(gy, 0, Math.max(0, next.rows - 2));
+      if (!hasUniformCellElevation(next.tileGrid, ox, oy, 2, 2)) {
+        blockedByUneven = true;
+        return;
+      }
+      removeObjectsInRect(ox, oy, 2, 2, false);
+      removeSpawnsInRect(ox, oy, 2, 2);
+      removeWaterInRect(ox, oy, 2, 2);
+      next.pushableIceBlocks = next.pushableIceBlocks || [];
+      next.pushableIceBlocks.push({ gx: ox, gy: oy });
+      placedAny = true;
+    };
+
+    if (rw === 1 && rh === 1) {
+      tryPlaceBlockAt(minX, minY);
+    } else {
+      for (let gy = minY; gy <= maxY; gy += 2) {
+        for (let gx = minX; gx <= maxX; gx += 2) {
+          tryPlaceBlockAt(gx, gy);
+        }
+      }
+    }
+
+    if (!placedAny && blockedByUneven) {
+      return {
+        next: prev,
+        error: '可推動寒冰塊 (2×2) 無法跨越不同地形高度，底層 4 格高度必須完全一致',
+      };
+    }
+    return {
+      next,
+      error: blockedByUneven ? '部分跨格位置底層高度不一致已略過，僅放置於等高區域' : undefined,
+    };
+  }
+
+  if (effectiveTool === 'obj_igloo') {
+    if (next.cols < 5 || next.rows < 5) {
+      return { next: prev, error: '地圖尺寸小於 5×5，無法放置極地冰屋' };
+    }
+    const ox = clamp(minX, 0, next.cols - 5);
+    const oy = clamp(minY, 0, next.rows - 5);
+    if (!hasUniformIglooElevation(next.tileGrid, ox, oy, ctxOpts.iglooDir)) {
+      return {
+        next: prev,
+        error: '極地冰屋 (3/5/5/5/3) 所佔 21 格之底層地形高度必須完全一致',
+      };
+    }
+    const mask = getIglooCellMask(ox, oy, ctxOpts.iglooDir);
+    for (const c of mask.occupied) {
+      removeObjectsInRect(c.gx, c.gy, 1, 1, false);
+      removeWaterInRect(c.gx, c.gy, 1, 1);
+    }
+    for (const w of mask.walls) {
+      removeSpawnsInRect(w.gx, w.gy, 1, 1);
+    }
+    next.igloos = next.igloos || [];
+    next.igloos.push({ gx: ox, gy: oy, direction: ctxOpts.iglooDir });
     return { next };
   }
 
@@ -843,7 +1173,7 @@ function applyToolToRect(
       }
       removeObjectsInRect(ox, oy, spec.gw, spec.gh, false);
       if (spec.kind === 'wall') removeSpawnsInRect(ox, oy, spec.gw, spec.gh);
-      next.waterTiles = next.waterTiles.filter((w) => !rectsOverlap(w.gx, w.gy, 1, 1, ox, oy, spec.gw, spec.gh));
+      removeWaterInRect(ox, oy, spec.gw, spec.gh);
       next.obstacles.push({
         gx: ox,
         gy: oy,
@@ -954,6 +1284,7 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
   const [stairDir, setStairDir] = useState<CompassDir>('east');
   const [bambooDir, setBambooDir] = useState<CompassDir>('north');
   const [houseDir, setHouseDir] = useState<CompassDir>('south');
+  const [iglooDir, setIglooDir] = useState<CompassDir>('south');
   const [houseStyle, setHouseStyle] = useState<string>(HOUSE_STYLE_OPTIONS[0].id);
   const [rockColor, setRockColor] = useState<'black' | 'brown' | 'white'>('black');
   const [farmCrop, setFarmCrop] = useState<FarmCropType>('carrot');
@@ -1007,6 +1338,7 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
       stairDir,
       bambooDir,
       houseDir,
+      iglooDir,
       houseStyle,
       rockColor,
       farmCrop,
@@ -1023,6 +1355,7 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
       stairDir,
       bambooDir,
       houseDir,
+      iglooDir,
       houseStyle,
       rockColor,
       farmCrop,
@@ -1122,13 +1455,7 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
   }, [draft]);
 
   const handleRotate = useCallback(() => {
-    if (
-      tool === 'terrain_hill_stair' ||
-      tool === 'terrain_stone_stair' ||
-      tool === 'terrain_plank_stair' ||
-      tool === 'terrain_mud_stair' ||
-      tool === 'obj_stair_crate'
-    ) {
+    if (Boolean(TERRAIN_STAIR_TOOL_TO_STYLE[tool]) || tool === 'obj_stair_crate') {
       setStairDir((d) => {
         const next = COMPASS_ORDER[(COMPASS_ORDER.indexOf(d) + 1) % COMPASS_ORDER.length];
         notify(`階梯方向已旋轉為：${DIR_LABELS[next]}`);
@@ -1144,6 +1471,12 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
       setHouseDir((d) => {
         const next = COMPASS_ORDER[(COMPASS_ORDER.indexOf(d) + 1) % COMPASS_ORDER.length];
         notify(`房屋朝向：${HOUSE_DIR_LABELS[next]}`);
+        return next;
+      });
+    } else if (tool === 'obj_igloo') {
+      setIglooDir((d) => {
+        const next = COMPASS_ORDER[(COMPASS_ORDER.indexOf(d) + 1) % COMPASS_ORDER.length];
+        notify(`冰屋朝向：${IGLOO_DIR_LABELS[next]}`);
         return next;
       });
     } else if (tool === 'obj_rail') {
@@ -1379,7 +1712,15 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
 
       // Live dimension / error badge
       if (previewRejected || rw > 1 || rh > 1) {
-        const badgeText = previewRejected ? '底層高度不一致' : `${rw}×${rh} 格`;
+        const badgeText = previewRejected
+          ? previewError?.includes('階梯')
+            ? '階梯須貼合對應高台'
+            : previewError?.includes('浮冰')
+              ? '浮冰僅限放置於水域'
+              : '底層高度不一致'
+          : effectiveTool === 'obj_igloo'
+            ? '3/5/5/5/3 格'
+            : `${rw}×${rh} 格`;
         ctx.font = '700 11px "JetBrains Mono", monospace';
         const tw = ctx.measureText(badgeText).width + 12;
         const bx = Math.min(arena.width - tw - 4, rx0 * TILE + 4);
@@ -1444,6 +1785,16 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
             ctx.fillStyle = '#34D399';
             ctx.fillText(`${obs.elevation}`, cx, cy + 0.5);
           }
+        }
+      }
+      for (const pb of arena.pushableIceBlocks || []) {
+        if (Math.abs(pb.baseElev) >= 1.0) {
+          const cx = pb.x + pb.w / 2;
+          const cy = pb.y + pb.h / 2;
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+          ctx.fillRect(cx - 15, cy - 8, 30, 16);
+          ctx.fillStyle = '#34D399';
+          ctx.fillText(`${pb.elevation}`, cx, cy + 0.5);
         }
       }
       const arrowByDir: Record<CompassDir, string> = { north: '↑', east: '→', south: '↓', west: '←' };
@@ -1551,8 +1902,14 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
         }
         const imported: CustomMapData = {
           ...parsed,
+          floatingIceTiles: Array.isArray(parsed.floatingIceTiles) ? parsed.floatingIceTiles : [],
           stoneRoads: Array.isArray(parsed.stoneRoads) ? parsed.stoneRoads : [],
           railTracks: Array.isArray(parsed.railTracks) ? parsed.railTracks : [],
+          farmTiles: Array.isArray(parsed.farmTiles) ? parsed.farmTiles : [],
+          iceVents: Array.isArray(parsed.iceVents) ? parsed.iceVents : [],
+          campfires: Array.isArray(parsed.campfires) ? parsed.campfires : [],
+          igloos: Array.isArray(parsed.igloos) ? parsed.igloos : [],
+          pushableIceBlocks: Array.isArray(parsed.pushableIceBlocks) ? parsed.pushableIceBlocks : [],
           id: createCustomMapId(),
           updatedAt: Date.now(),
         };
@@ -2002,7 +2359,7 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
               </div>
             )}
 
-            {(tool === 'terrain_hill_raise' || tool === 'terrain_stone_raise' || tool === 'terrain_plank_raise') && (
+            {Boolean(TERRAIN_RAISE_TOOL_TO_STYLE[tool]) && (
               <div className="text-slate-400">
                 點擊或拉框疊加：自動依該格既有地形高度 <span className="text-amber-300 font-mono-num font-bold">+1.0</span> 層（保留底層地板與水面）
               </div>
@@ -2014,25 +2371,26 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
               </div>
             )}
 
-            {(tool === 'terrain_hill_stair' ||
-              tool === 'terrain_stone_stair' ||
-              tool === 'terrain_plank_stair' ||
-              tool === 'terrain_mud_stair' ||
-              tool === 'obj_stair_crate') && (
-              <div className="flex items-center gap-1 flex-wrap">
-                <span className="text-slate-400 mr-1">上坡方向 (R)：</span>
-                {COMPASS_ORDER.map((dir) => (
-                  <button
-                    key={dir}
-                    type="button"
-                    onClick={() => setStairDir(dir)}
-                    className={`px-2 py-0.5 rounded cursor-pointer ${
-                      stairDir === dir ? 'bg-amber-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300'
-                    }`}
-                  >
-                    {DIR_LABELS[dir]}
-                  </button>
-                ))}
+            {(Boolean(TERRAIN_STAIR_TOOL_TO_STYLE[tool]) || tool === 'obj_stair_crate') && (
+              <div className="space-y-1">
+                {Boolean(TERRAIN_STAIR_TOOL_TO_STYLE[tool]) && (
+                  <div className="text-slate-400">須貼合並指向對應樣式之高台／泥坑上層，放置時將自動融接接觸邊緣</div>
+                )}
+                <div className="flex items-center gap-1 flex-wrap">
+                  <span className="text-slate-400 mr-1">上坡方向 (R)：</span>
+                  {COMPASS_ORDER.map((dir) => (
+                    <button
+                      key={dir}
+                      type="button"
+                      onClick={() => setStairDir(dir)}
+                      className={`px-2 py-0.5 rounded cursor-pointer ${
+                        stairDir === dir ? 'bg-amber-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300'
+                      }`}
+                    >
+                      {DIR_LABELS[dir]}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
 
@@ -2174,14 +2532,33 @@ export const MapEditorView: React.FC<MapEditorViewProps> = ({
               </div>
             )}
 
+            {tool === 'obj_igloo' && (
+              <div className="space-y-1">
+                <div className="text-slate-400">3/5/5/5/3 佔格（外牆 11 格＋內部 3×3 與中央入口），須置於等高地形</div>
+                <div className="flex items-center gap-1 flex-wrap">
+                  <span className="text-slate-400 mr-1">冰屋出口 (R)：</span>
+                  {COMPASS_ORDER.map((dir) => (
+                    <button
+                      key={dir}
+                      type="button"
+                      onClick={() => setIglooDir(dir)}
+                      className={`px-2 py-0.5 rounded cursor-pointer ${
+                        iglooDir === dir ? 'bg-amber-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300'
+                      }`}
+                    >
+                      {IGLOO_DIR_LABELS[dir]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {activeToolMeta?.rotatable &&
-              tool !== 'terrain_hill_stair' &&
-              tool !== 'terrain_stone_stair' &&
-              tool !== 'terrain_plank_stair' &&
-              tool !== 'terrain_mud_stair' &&
+              !TERRAIN_STAIR_TOOL_TO_STYLE[tool] &&
               tool !== 'obj_stair_crate' &&
               tool !== 'obj_bamboo' &&
               tool !== 'obj_house' &&
+              tool !== 'obj_igloo' &&
               tool !== 'obj_rail' && (
                 <div className="flex items-center justify-between">
                   <span className="text-slate-400">擺放方向：{rotated ? '直向' : '橫向'}</span>

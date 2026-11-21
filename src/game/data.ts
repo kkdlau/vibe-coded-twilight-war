@@ -404,6 +404,16 @@ export const MAP_CATALOG: MapMeta[] = [
     highlight: '34×44 縱向大型不規則雙環海島 · 無箱繁林與自然山丘 · 雙橋連通內湖細島',
     accentColor: '#06B6D4',
   },
+  {
+    id: 'glacier_rift',
+    name: '極地・裂隙冰川',
+    region: '北境冰原',
+    environment: '野外',
+    era: '永凍紀元',
+    description: '非對稱極地裂隙戰場！西北雙層冰川高台與東南鋸齒冰脊對峙，中央蜿蜒冰河裂隙由錯位石木雙橋跨越，通道與高地埋伏持續噴發寒氣的冰氣孔，踏入將觸發 5 秒冰凍並中斷持續技能。',
+    highlight: '雙層冰川高地與無縫冰階 · 非對稱冰河雙橋 · 冰氣孔 5s 冰凍斷招',
+    accentColor: '#38BDF8',
+  },
 ];
 
 // 槍械基礎準心搭配 tuning.ts 距離曲線計算實際散布；子彈碰人即止，不可穿透多人

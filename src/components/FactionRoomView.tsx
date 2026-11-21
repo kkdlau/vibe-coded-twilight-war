@@ -194,7 +194,7 @@ export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
                   onChange={(e) => setSelectedMapChoice(e.target.value)}
                   className="w-full appearance-none bg-slate-900 border border-slate-700 hover:border-amber-400/70 focus:border-amber-400 focus:outline-none rounded-xl pl-3.5 pr-9 py-2 text-xs font-semibold text-white cursor-pointer"
                 >
-                  <option value="random">隨機地圖（7 張戰場隨機抽取）</option>
+                  <option value="random">隨機地圖（{MAP_CATALOG.length} 張戰場隨機抽取）</option>
                   <optgroup label="內建戰場">
                     {MAP_CATALOG.map((m) => (
                       <option key={m.id} value={m.id}>
@@ -229,7 +229,7 @@ export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
                 </div>
                 <h3 className="text-xl font-black text-white tracking-tight mb-2">隨機戰場抽選</h3>
                 <p className="text-xs text-slate-300 leading-relaxed">
-                  已選擇「隨機地圖」，開戰後將從 7 張戰場中隨機抽取一張出戰，進入戰場前不會事先揭露地形與出生點位置。
+                  已選擇「隨機地圖」，開戰後將從 {MAP_CATALOG.length} 張戰場中隨機抽取一張出戰，進入戰場前不會事先揭露地形與出生點位置。
                 </p>
                 <div className="mt-4 text-[11px] font-mono-num text-amber-300/90">
                   如需指定地形並預覽出生點，請於上方選單切換特定地圖
@@ -272,7 +272,7 @@ export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
                   ? `${selectedCustomMap.cols}×${selectedCustomMap.rows} 玩家創作戰場 · 支援全高台疊加與自訂出生點`
                   : selectedMapMeta
                     ? selectedMapMeta.highlight
-                    : '7 張不對稱實戰戰場 · 地形與出生點開戰揭曉'}
+                    : `${MAP_CATALOG.length} 張不對稱實戰戰場 · 地形與出生點開戰揭曉`}
               </div>
             </div>
 

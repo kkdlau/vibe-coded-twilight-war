@@ -22,6 +22,7 @@ import {
   pointInRect,
   resolveCircleRect,
   segmentCircleHit,
+  segmentIntersectsRect,
   snapToEightDirections,
   uid,
 } from './geometry';
@@ -29,6 +30,7 @@ import { renderMapBaseLayer, renderMapCanopies } from './mapRenderer';
 import { ArenaMap, TILE, createArenaMap } from './maps';
 import {
   AI_COMBAT,
+  AI_GUN_AIM,
   AI_PATROL,
   GUN_AIM,
   GUNFIRE_ANIMATION_SECONDS,
@@ -40,6 +42,7 @@ import {
 import { CustomMapData, buildArenaMapFromCustom } from './customMaps';
 import {
   BeamTracer,
+  CardinalDir,
   CharacterSkin,
   EnemyArchetype,
   EnemyEntity,
@@ -54,6 +57,7 @@ import {
   PickupItem,
   PlayerState,
   Projectile,
+  PushableIceBlock,
   SlashEffect,
   WeaponHand,
 } from './types';
@@ -167,6 +171,18 @@ export class TwilightEngine {
   private hudEmitTimer = 0;
   private navStandable = new Set<number>();
   private navAdj = new Map<number, number[]>();
+  private wallCellKeys = new Set<string>();
+  private framePushInputs: {
+    id: string;
+    isPlayer: boolean;
+    faction: FactionId;
+    x: number;
+    y: number;
+    radius: number;
+    elevation: number;
+    dirX: number;
+    dirY: number;
+  }[] = [];
   private onHudUpdate: (snap: HudSnapshot) => void;
   private onReputationChange?: (reps: Record<FactionId, number>) => void;
 
@@ -248,6 +264,7 @@ export class TwilightEngine {
       giantTimer: 0,
       blindTimer: 0,
       blindDuration: 0,
+      freezeTimer: 0,
       invulnTimer: 1.5,
       delayCancelBonus: 0.25,
     };
@@ -296,6 +313,25 @@ export class TwilightEngine {
     const elevByTile = new Map<number, number>();
     this.navStandable.clear();
     this.navAdj.clear();
+    this.wallCellKeys.clear();
+
+    const markRectWalls = (rect: { x: number; y: number; w: number; h: number }) => {
+      const gx0 = clamp(Math.floor(rect.x / TILE), 0, cols - 1);
+      const gy0 = clamp(Math.floor(rect.y / TILE), 0, rows - 1);
+      const gx1 = clamp(Math.floor((rect.x + rect.w - 0.01) / TILE), 0, cols - 1);
+      const gy1 = clamp(Math.floor((rect.y + rect.h - 0.01) / TILE), 0, rows - 1);
+      for (let gy = gy0; gy <= gy1; gy++) {
+        for (let gx = gx0; gx <= gx1; gx++) {
+          this.wallCellKeys.add(`${gx},${gy}`);
+        }
+      }
+    };
+    for (const obs of this.map.obstacles) {
+      if (obs.kind === 'wall') markRectWalls(obs);
+    }
+    for (const tree of this.map.trees) {
+      markRectWalls(tree);
+    }
 
     for (let gy = 0; gy < rows; gy++) {
       for (let gx = 0; gx < cols; gx++) {
@@ -531,6 +567,9 @@ export class TwilightEngine {
     for (const obs of this.map.obstacles) {
       if (pointInRect(x, y, obs) && obs.elevation > best) best = obs.elevation;
     }
+    for (const blk of this.map.pushableIceBlocks || []) {
+      if (pointInRect(x, y, blk) && blk.elevation > best) best = blk.elevation;
+    }
     return best;
   }
 
@@ -541,7 +580,10 @@ export class TwilightEngine {
     }
     const gx = Math.floor(x / TILE);
     const gy = Math.floor(y / TILE);
-    return !this.map.waterTileKeys.has(`${gx},${gy}`);
+    const key = `${gx},${gy}`;
+    if (!this.map.waterTileKeys.has(key)) return true;
+    if (this.map.floatingIceTileKeys?.has(key)) return true;
+    return Boolean(this.map.floatingIceTiles?.some((f) => f.gx === gx && f.gy === gy));
   }
 
   private findSafeTeleportSpot(
@@ -598,6 +640,16 @@ export class TwilightEngine {
     const gy = clamp(Math.floor(y / TILE), 0, this.map.rows - 1);
     const tileElev = this.map.tileGrid[gy][gx].elev;
 
+    for (const blk of this.map.pushableIceBlocks || []) {
+      if (pointInRect(x, y, blk)) {
+        return {
+          totalHeight: blk.elevation,
+          terrainHeight: tileElev,
+          isWall: false,
+          isCrate: true,
+        };
+      }
+    }
     for (const obs of this.map.obstacles) {
       if (pointInRect(x, y, obs)) {
         return {
@@ -767,9 +819,37 @@ export class TwilightEngine {
     return { x: nx, y: ny, elevation: finalElev };
   }
 
+  private isSolidWallCell(gx: number, gy: number): boolean {
+    if (gx < 0 || gx >= this.map.cols || gy < 0 || gy >= this.map.rows) return false;
+    return this.wallCellKeys.has(`${gx},${gy}`);
+  }
+
+  private findEarliestWallHit(
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number
+  ): { t: number; x: number; y: number } | null {
+    let best: { t: number; x: number; y: number } | null = null;
+    for (const obs of this.map.obstacles) {
+      if (obs.kind !== 'wall') continue;
+      const res = segmentIntersectsRect(x1, y1, x2, y2, obs);
+      if (res.hit && (!best || res.t < best.t)) {
+        best = { t: res.t, x: res.hitX, y: res.hitY };
+      }
+    }
+    for (const tree of this.map.trees) {
+      const res = segmentIntersectsRect(x1, y1, x2, y2, tree);
+      if (res.hit && (!best || res.t < best.t)) {
+        best = { t: res.t, x: res.hitX, y: res.hitY };
+      }
+    }
+    return best;
+  }
+
   /**
-   * 視線檢查 (LoS)：視野半徑 ~8 格，若隔實心牆或中間遮蔽物高於雙方 > 1 格則看不到；
-   * 站在高台上的敵人仍可被看見，再由 canRangedHitTarget 判斷高低差能否射中！
+   * 視線檢查 (LoS)：視野半徑 ~8 格，若隔實心牆（含對角相接牆縫）或離開較高一方自身站台後被遮蔽物擋住 3D 直線視線則看不到；
+   * 統一由較高一端往較低一端步進，保證雙方視線對稱且不會因站得高而無視空地後方的大箱／高台。
    */
   private hasLineOfSight(
     ax: number,
@@ -782,22 +862,53 @@ export class TwilightEngine {
   ): boolean {
     const totalD = dist(ax, ay, bx, by);
     if (totalD > maxRange) return false;
+    if (this.findEarliestWallHit(ax, ay, bx, by)) return false;
 
-    const topSeenElev = Math.max(aElev, bElev);
-    const steps = Math.max(2, Math.ceil(totalD / 14));
+    const aIsHigher = aElev >= bElev;
+    const sx = aIsHigher ? ax : bx;
+    const sy = aIsHigher ? ay : by;
+    const sElev = aIsHigher ? aElev : bElev;
+    const ex = aIsHigher ? bx : ax;
+    const ey = aIsHigher ? by : ay;
+    const eElev = aIsHigher ? bElev : aElev;
+
+    const steps = Math.max(2, Math.ceil(totalD / 6));
+    let prevGx = clamp(Math.floor(sx / TILE), 0, this.map.cols - 1);
+    let prevGy = clamp(Math.floor(sy / TILE), 0, this.map.rows - 1);
+    let leftHighPlatform = false;
+
     for (let i = 1; i < steps; i++) {
       const t = i / steps;
-      const px = ax + (bx - ax) * t;
-      const py = ay + (by - ay) * t;
+      const px = sx + (ex - sx) * t;
+      const py = sy + (ey - sy) * t;
+      const curGx = clamp(Math.floor(px / TILE), 0, this.map.cols - 1);
+      const curGy = clamp(Math.floor(py / TILE), 0, this.map.rows - 1);
+      if (
+        curGx !== prevGx &&
+        curGy !== prevGy &&
+        this.isSolidWallCell(curGx, prevGy) &&
+        this.isSolidWallCell(prevGx, curGy)
+      ) {
+        return false;
+      }
+      prevGx = curGx;
+      prevGy = curGy;
       const h = this.getHeightAtPoint(px, py);
       if (h.isWall) return false;
-      if (h.totalHeight > topSeenElev + 1.0) return false;
+      if (h.totalHeight < sElev - 0.01) {
+        leftHighPlatform = true;
+      }
+      if (h.totalHeight > sElev + 1.0) return false;
+      if (leftHighPlatform) {
+        const rayElev = sElev + (eElev - sElev) * t;
+        if (h.totalHeight > rayElev + 1.0) return false;
+      }
     }
     return true;
   }
 
   /**
-   * 檢查目前站位與高低差下，遠程子彈是否確實射得到目標（而非被 > 1 格高低差或箱體擋住）
+   * 檢查目前站位與高低差下，遠程子彈是否確實射得到目標（而非被 > 1 格高低差或途中遮蔽箱體擋住）
    */
   private canRangedHitTarget(
     ax: number,
@@ -810,7 +921,10 @@ export class TwilightEngine {
     if (bElev - aElev >= 2.0) return false;
     const totalD = dist(ax, ay, bx, by);
     if (totalD <= 18) return true;
-    const seg = this.traceBulletSegment(ax, ay, Math.atan2(by - ay, bx - ax), totalD, aElev, false);
+    const seg = this.traceBulletSegment(ax, ay, Math.atan2(by - ay, bx - ax), totalD, aElev, false, {
+      elev: bElev,
+      dist: totalD,
+    });
     const reachedDist = dist(ax, ay, seg.x2, seg.y2);
     return reachedDist >= totalD - 20;
   }
@@ -892,10 +1006,70 @@ export class TwilightEngine {
     };
   }
 
+  private findWallOrPinchEndpoint(
+    x1: number,
+    y1: number,
+    angle: number,
+    maxDist: number
+  ): { x2: number; y2: number; hitWall: boolean } {
+    const vx = Math.cos(angle);
+    const vy = Math.sin(angle);
+    const wallHit = this.findEarliestWallHit(x1, y1, x1 + vx * maxDist, y1 + vy * maxDist);
+    const wallDist = wallHit ? dist(x1, y1, wallHit.x, wallHit.y) : maxDist;
+    let remaining = Math.min(maxDist, wallDist);
+    let curX = x1;
+    let curY = y1;
+    const stepSize = 4;
+    while (remaining > 0) {
+      const prevX = curX;
+      const prevY = curY;
+      const prevGx = clamp(Math.floor(prevX / TILE), 0, this.map.cols - 1);
+      const prevGy = clamp(Math.floor(prevY / TILE), 0, this.map.rows - 1);
+      const step = Math.min(stepSize, remaining);
+      curX += vx * step;
+      curY += vy * step;
+      remaining -= step;
+      if (curX < 0 || curX > this.map.width || curY < 0 || curY > this.map.height) {
+        return { x2: clamp(curX, 0, this.map.width), y2: clamp(curY, 0, this.map.height), hitWall: false };
+      }
+      const curGx = clamp(Math.floor(curX / TILE), 0, this.map.cols - 1);
+      const curGy = clamp(Math.floor(curY / TILE), 0, this.map.rows - 1);
+      if (
+        curGx !== prevGx &&
+        curGy !== prevGy &&
+        this.isSolidWallCell(curGx, prevGy) &&
+        this.isSolidWallCell(prevGx, curGy)
+      ) {
+        return { x2: prevX, y2: prevY, hitWall: true };
+      }
+    }
+    if (wallHit && wallDist <= maxDist) {
+      return { x2: wallHit.x, y2: wallHit.y, hitWall: true };
+    }
+    return { x2: curX, y2: curY, hitWall: false };
+  }
+
+  private canBulletReachPoint(
+    ax: number,
+    ay: number,
+    aElev: number,
+    bx: number,
+    by: number,
+    bElev: number
+  ): boolean {
+    const totalD = dist(ax, ay, bx, by);
+    if (totalD <= 2) return true;
+    const seg = this.traceBulletSegment(ax, ay, Math.atan2(by - ay, bx - ax), totalD, aElev, false, {
+      elev: bElev,
+      dist: totalD,
+    });
+    return dist(ax, ay, seg.x2, seg.y2) >= totalD - 2;
+  }
+
   /**
    * 子彈射線高度阻擋物理：
-   * - 可由高處往低處射
-   * - 高度差 1.5 格（如大箱子）：子彈會穿透至距離邊緣 0.5 格（格心）處再消失，站太外側仍會中彈
+   * - 可由高處往低處射，但經過低處空地後再遇大箱／高台仍會依 3D 射線高度與最小經過地形受阻
+   * - 高度差 > 1.0 且 < 2.0（如大箱子）：子彈深入邊緣約 0.5 格處停止
    * - 高度差 >= 2.0 格（如貨櫃、2層山、實牆）：子彈在邊緣即停止（0 穿透）
    */
   private traceBulletSegment(
@@ -904,26 +1078,35 @@ export class TwilightEngine {
     angle: number,
     maxDist: number,
     startElev: number,
-    emitBurst = true
+    emitBurst = true,
+    targetAim?: { elev: number; dist: number }
   ): { x1: number; y1: number; x2: number; y2: number } {
     const stepSize = 4;
     let curX = x1;
     let curY = y1;
     const vx = Math.cos(angle);
     const vy = Math.sin(angle);
+    const wallHit = this.findEarliestWallHit(x1, y1, x1 + vx * maxDist, y1 + vy * maxDist);
+    const wallDist = wallHit ? dist(x1, y1, wallHit.x, wallHit.y) : maxDist;
+    const effectiveMaxDist = Math.min(maxDist, wallDist);
     let minTraversedElev = startElev;
     let leftStartCrate = startElev < 1.0;
-    let remaining = maxDist;
+    let leftStartPlatform = false;
+    let remaining = effectiveMaxDist;
+    let traveled = 0;
     let penetratingHalfTile = false;
     let penetrationLeft = TILE * 0.49;
 
     while (remaining > 0) {
       const prevX = curX;
       const prevY = curY;
+      const prevGx = clamp(Math.floor(prevX / TILE), 0, this.map.cols - 1);
+      const prevGy = clamp(Math.floor(prevY / TILE), 0, this.map.rows - 1);
       const step = Math.min(stepSize, remaining);
       curX += vx * step;
       curY += vy * step;
       remaining -= step;
+      traveled += step;
 
       if (curX < 0 || curX > this.map.width || curY < 0 || curY > this.map.height) {
         return {
@@ -934,20 +1117,50 @@ export class TwilightEngine {
         };
       }
 
+      const curGx = clamp(Math.floor(curX / TILE), 0, this.map.cols - 1);
+      const curGy = clamp(Math.floor(curY / TILE), 0, this.map.rows - 1);
+      if (
+        curGx !== prevGx &&
+        curGy !== prevGy &&
+        this.isSolidWallCell(curGx, prevGy) &&
+        this.isSolidWallCell(prevGx, curGy)
+      ) {
+        if (emitBurst) this.spawnBurst(prevX, prevY, '#E2E8F0', 4);
+        return { x1, y1, x2: prevX, y2: prevY };
+      }
+
       const h = this.getHeightAtPoint(curX, curY);
       if (!h.isCrate && !penetratingHalfTile) {
         leftStartCrate = true;
         const effectiveFloor = startElev < 0 ? h.terrainHeight : Math.max(0, h.terrainHeight);
         minTraversedElev = Math.min(minTraversedElev, effectiveFloor);
       }
+      if (h.totalHeight < startElev - 0.01) {
+        leftStartPlatform = true;
+        leftStartCrate = true;
+      }
 
-      const heightDiff = h.totalHeight - minTraversedElev;
-      const crateBlocks =
-        h.isCrate && leftStartCrate && h.totalHeight > startElev && heightDiff > 1.0;
-      const cliffBlocks =
-        !h.isCrate && h.totalHeight > startElev && heightDiff > 1.0;
+      let refElev = minTraversedElev;
+      if (targetAim) {
+        if (targetAim.elev > startElev) {
+          // 仰射時子彈不可憑空抬升越障，仍受起點與經過最低地形約束
+          refElev = minTraversedElev;
+        } else if (!leftStartPlatform) {
+          // 尚在射擊者自身站台範圍內，不自我遮擋
+          refElev = startElev;
+        } else {
+          // 離開高處站台並越過低地後，依 3D 彈道斜率線性下降至目標高度
+          const frac = targetAim.dist > 0 ? clamp(traveled / targetAim.dist, 0, 1) : 1;
+          refElev = startElev + (targetAim.elev - startElev) * frac;
+        }
+      }
 
-      if (h.isWall || (h.totalHeight > startElev && heightDiff >= 2.0)) {
+      const heightDiff = h.totalHeight - refElev;
+      const crateBlocks = h.isCrate && (leftStartCrate || h.totalHeight > startElev) && heightDiff > 1.0;
+      const cliffBlocks = !h.isCrate && heightDiff > 1.0;
+      const immediateElevBlock = (!h.isCrate || leftStartCrate || h.totalHeight > startElev) && heightDiff >= 2.0;
+
+      if (h.isWall || immediateElevBlock) {
         if (emitBurst) this.spawnBurst(prevX, prevY, '#E2E8F0', 4);
         return { x1, y1, x2: prevX, y2: prevY };
       }
@@ -972,6 +1185,11 @@ export class TwilightEngine {
           return { x1, y1, x2: curX, y2: curY };
         }
       }
+    }
+
+    if (wallHit && wallDist <= maxDist) {
+      if (emitBurst) this.spawnBurst(wallHit.x, wallHit.y, '#E2E8F0', 4);
+      return { x1, y1, x2: wallHit.x, y2: wallHit.y };
     }
 
     return { x1, y1, x2: curX, y2: curY };
@@ -1105,10 +1323,17 @@ export class TwilightEngine {
     if (down && !this.mouseDown) {
       this.mouseDown = true;
       if (weapon.type === 'melee') {
-        this.player.chargingMelee = true;
-        this.chargeSessionAllowed = this.player.qi >= this.player.maxQi - 0.5;
-        this.player.chargeReady = false;
-        if (this.chargeSessionAllowed) sfx.setMeleeCharge(0);
+        if (this.player.freezeTimer > 0) {
+          this.player.chargingMelee = false;
+          this.chargeSessionAllowed = false;
+          this.player.chargeReady = false;
+          this.releaseMeleeAttack();
+        } else {
+          this.player.chargingMelee = true;
+          this.chargeSessionAllowed = this.player.qi >= this.player.maxQi - 0.5;
+          this.player.chargeReady = false;
+          if (this.chargeSessionAllowed) sfx.setMeleeCharge(0);
+        }
       } else {
         if (this.player.swapTimer <= 0 && weapon.ammoInMag <= 0 && weapon.reloadTimer === 0) {
           this.startReload();
@@ -1142,10 +1367,6 @@ export class TwilightEngine {
 
     if (code === 'Escape') {
       this.dropActiveWeapon();
-    } else if (code === 'Digit1') {
-      this.equipHand(0);
-    } else if (code === 'Digit2') {
-      this.equipHand(1);
     } else if (code === 'KeyQ') {
       this.switchWeapon();
     } else if (code === 'KeyR') {
@@ -1153,10 +1374,6 @@ export class TwilightEngine {
     } else if (code === 'Space') {
       this.tryPickup();
     }
-  }
-
-  public equipHand(hand: WeaponHand) {
-    if (this.player.activeHand !== hand) this.switchWeapon();
   }
 
   private dropWeapon(weapon: EquippedWeapon, x: number, y: number): boolean {
@@ -1377,25 +1594,37 @@ export class TwilightEngine {
       const comboMult = p.comboEmpowerTimer > 0 ? 1 + p.delayCancelBonus : 1.0;
       if (p.comboEmpowerTimer > 0) p.comboEmpowerTimer = 0;
 
-      const muzzleX = p.x + Math.cos(p.angle) * (p.radius + 4);
-      const muzzleY = p.y + Math.sin(p.angle) * (p.radius + 4);
+      const muzzleDist = p.radius + 4;
       const spreadRad = this.getPlayerGunSpread(gun);
       const infiniteRange = Math.hypot(this.map.width, this.map.height) + TILE * 2;
 
       for (let i = 0; i < pelletsToFire; i++) {
         const spreadOffset = (Math.random() - 0.5) * spreadRad;
         const a = p.angle + spreadOffset;
-        const seg = this.traceBulletSegment(muzzleX, muzzleY, a, infiniteRange, p.elevation);
+        const muzzleX = p.x + Math.cos(a) * muzzleDist;
+        const muzzleY = p.y + Math.sin(a) * muzzleDist;
+        const preSeg = this.traceBulletSegment(p.x, p.y, a, muzzleDist, p.elevation, false);
+        const reachedMuzzle = dist(p.x, p.y, preSeg.x2, preSeg.y2) >= muzzleDist - 0.5;
+        const seg = reachedMuzzle
+          ? this.traceBulletSegment(muzzleX, muzzleY, a, infiniteRange, p.elevation, false)
+          : preSeg;
+        const wallEnd = reachedMuzzle
+          ? this.findWallOrPinchEndpoint(muzzleX, muzzleY, a, infiniteRange)
+          : { x2: preSeg.x2, y2: preSeg.y2, hitWall: true };
 
         let segEndX = seg.x2;
         let segEndY = seg.y2;
 
-        // 槍械子彈碰人即止，不可一子彈攻擊兩人！
+        // 槍械子彈碰人即止，不可一子彈攻擊兩人，且不得隔實牆、對角牆縫或地形高箱遮擋擦邊命中！
         const candidates: { enemy: EnemyEntity; t: number; perpDist: number; hitX: number; hitY: number }[] = [];
         for (const e of this.enemies) {
           if (e.elevation - p.elevation >= 2.0) continue;
-          const res = segmentCircleHit(seg.x1, seg.y1, seg.x2, seg.y2, e.x, e.y, e.radius);
-          if (res.hit) {
+          const res = segmentCircleHit(seg.x1, seg.y1, wallEnd.x2, wallEnd.y2, e.x, e.y, e.radius);
+          if (
+            res.hit &&
+            !this.findEarliestWallHit(res.hitX, res.hitY, e.x, e.y) &&
+            this.canBulletReachPoint(seg.x1, seg.y1, p.elevation, res.hitX, res.hitY, e.elevation)
+          ) {
             candidates.push({ enemy: e, ...res });
           }
         }
@@ -1424,6 +1653,8 @@ export class TwilightEngine {
 
           segEndX = hitInfo.hitX;
           segEndY = hitInfo.hitY;
+        } else if (reachedMuzzle && dist(muzzleX, muzzleY, seg.x2, seg.y2) < infiniteRange - 1) {
+          this.spawnBurst(seg.x2, seg.y2, '#E2E8F0', 4);
         }
 
         this.beams.push({
@@ -1442,7 +1673,11 @@ export class TwilightEngine {
 
       this.camera.shake = Math.min(8, this.camera.shake + (gun.kind === 'shotgun' || gun.kind === 'sniper' ? 4.5 : 1.4));
       sfx.gunshot(gun.kind);
-      this.spawnBurst(muzzleX, muzzleY, gun.color, gun.kind === 'shotgun' ? 7 : 3);
+      const fxMuzzleX = p.x + Math.cos(p.angle) * muzzleDist;
+      const fxMuzzleY = p.y + Math.sin(p.angle) * muzzleDist;
+      if (!this.findEarliestWallHit(p.x, p.y, fxMuzzleX, fxMuzzleY)) {
+        this.spawnBurst(fxMuzzleX, fxMuzzleY, gun.color, gun.kind === 'shotgun' ? 7 : 3);
+      }
     }
   }
 
@@ -1455,7 +1690,7 @@ export class TwilightEngine {
     const melee = weapon.def;
     const comboMult = p.comboEmpowerTimer > 0 ? 1 + p.delayCancelBonus : 1.0;
 
-    if (p.chargeReady) {
+    if (p.chargeReady && p.freezeTimer <= 0) {
       p.chargeReady = false;
       p.attackCooldown = 0.25;
       p.lastAttackAt = this.time;
@@ -1470,7 +1705,7 @@ export class TwilightEngine {
       return;
     }
 
-    p.attackCooldown = 1 / melee.swingRate;
+    p.attackCooldown = 1 / (melee.swingRate * (p.freezeTimer > 0 ? 0.9 : 1));
     p.lastAttackAt = this.time;
     p.delayCancelReady = true;
     p.attackAnimDuration = melee.kind === 'greatsword' ? 0.24 : 0.16;
@@ -2102,6 +2337,7 @@ export class TwilightEngine {
     p.giantTimer = 0;
     p.blindTimer = 0;
     p.blindDuration = 0;
+    p.freezeTimer = 0;
     p.sizeScale = 1;
     p.radius = p.baseRadius;
     p.hp = p.maxHp;
@@ -2216,8 +2452,11 @@ export class TwilightEngine {
       giantTimer: 0,
       blindTimer: 0,
       stunTimer: 0,
+      freezeTimer: 0,
       hitFlash: 0,
       gunfireTimer: 0,
+      crosshairBloom: 0,
+      lastAimAngle: 0,
       attackAnimTimer: 0,
       attackAnimDuration: 0,
       attackAnimKind: null,
@@ -2257,6 +2496,7 @@ export class TwilightEngine {
       prevWeapon.reloadTimer = 0;
     }
     e.activeHand = targetHand;
+    e.crosshairBloom = 0;
     e.chargingMelee = false;
     e.chargeReady = false;
     const swapDur = getWeaponSwapDuration(e.weapons[targetHand].def.kind);
@@ -2302,6 +2542,7 @@ export class TwilightEngine {
           this.dropWeapon(e.weapons[targetHand], pk.x, pk.y);
           e.weapons[targetHand] = equipGun(pk.gunDef, pk.ammoInMag ?? pk.gunDef.magSize);
           if (e.activeHand === targetHand) {
+            e.crosshairBloom = 0;
             e.chargingMelee = false;
             e.chargeReady = false;
           }
@@ -2378,6 +2619,75 @@ export class TwilightEngine {
     this.emitHud();
   }
 
+  private clearTimedSkillsOnFreeze(unit: {
+    royalShieldTimer: number;
+    eagleEyeTimer: number;
+    shadowCloneTimer: number;
+    vampireTimer: number;
+    shrinkTimer: number;
+    giantTimer: number;
+    chargingMelee: boolean;
+    chargeReady: boolean;
+    sizeScale: number;
+    radius: number;
+    baseRadius: number;
+  }) {
+    unit.royalShieldTimer = 0;
+    unit.eagleEyeTimer = 0;
+    unit.shadowCloneTimer = 0;
+    unit.vampireTimer = 0;
+    unit.shrinkTimer = 0;
+    unit.giantTimer = 0;
+    unit.chargingMelee = false;
+    unit.chargeReady = false;
+    unit.sizeScale = 1;
+    unit.radius = unit.baseRadius;
+  }
+
+  private applyIceVentFreezeCheck(
+    unit: {
+      x: number;
+      y: number;
+      elevation: number;
+      freezeTimer: number;
+      royalShieldTimer: number;
+      eagleEyeTimer: number;
+      shadowCloneTimer: number;
+      vampireTimer: number;
+      shrinkTimer: number;
+      giantTimer: number;
+      chargingMelee: boolean;
+      chargeReady: boolean;
+      sizeScale: number;
+      radius: number;
+      baseRadius: number;
+    },
+    isPlayer: boolean
+  ) {
+    const vents = this.map.iceVents;
+    if (!vents || vents.length === 0) return;
+    for (const iv of vents) {
+      const vx = (iv.gx + 0.5) * TILE;
+      const vy = (iv.gy + 0.5) * TILE;
+      const ventElev = this.map.tileGrid[iv.gy]?.[iv.gx]?.elev ?? 0;
+      if (dist(unit.x, unit.y, vx, vy) <= TILE * 0.46 && Math.abs(unit.elevation - ventElev) <= 0.5) {
+        const wasFrozen = unit.freezeTimer > 0;
+        unit.freezeTimer = 5.0;
+        this.clearTimedSkillsOnFreeze(unit);
+        if (isPlayer) {
+          this.cancelMeleeCharge();
+          if (!wasFrozen) {
+            this.spawnText(unit.x, unit.y - 38, '冰凍 5s', '#38BDF8', 1.15);
+            this.emitHud();
+          }
+        } else if (!wasFrozen) {
+          this.spawnText(unit.x, unit.y - 34, '冰凍 5s', '#38BDF8', 1.05);
+        }
+        return;
+      }
+    }
+  }
+
   private updatePlayer(dt: number) {
     const p = this.player;
     p.attackCooldown = Math.max(0, p.attackCooldown - dt);
@@ -2385,6 +2695,7 @@ export class TwilightEngine {
     p.swapTimer = Math.max(0, p.swapTimer - dt);
     p.attackAnimTimer = Math.max(0, p.attackAnimTimer - dt);
     if (p.attackAnimTimer === 0) p.attackAnimKind = null;
+    p.freezeTimer = Math.max(0, p.freezeTimer - dt);
     p.royalShieldTimer = Math.max(0, p.royalShieldTimer - dt);
     p.eagleEyeTimer = Math.max(0, p.eagleEyeTimer - dt);
     p.shadowCloneTimer = Math.max(0, p.shadowCloneTimer - dt);
@@ -2400,6 +2711,11 @@ export class TwilightEngine {
       if (p.comboTimer <= 0) p.comboCount = 0;
     }
 
+    if (p.freezeTimer > 0) {
+      this.clearTimedSkillsOnFreeze(p);
+      this.cancelMeleeCharge();
+    }
+
     p.sizeScale = p.shrinkTimer > 0 ? 0.62 : p.giantTimer > 0 ? 1.32 : 1.0;
     p.radius = p.baseRadius * p.sizeScale;
 
@@ -2408,11 +2724,13 @@ export class TwilightEngine {
     const targetZoom = baseZoom;
     this.camera.zoom += (targetZoom - this.camera.zoom) * Math.min(1, dt * 6);
 
-    // 聲望越高，集氣與回氣速度越快（依當前出戰陣營之獨立聲望計算）
+    // 聲望越高，集氣與回氣速度越快（依當前出戰陣營之獨立聲望計算；冰凍期間無法集氣）
     const activeRep = p.reputations[p.faction];
     p.reputation = activeRep;
     const repSpeedMult = getReputationQiMultiplier(activeRep);
-    if (p.chargingMelee && this.chargeSessionAllowed) {
+    if (p.freezeTimer > 0) {
+      this.cancelMeleeCharge();
+    } else if (p.chargingMelee && this.chargeSessionAllowed) {
       if (p.qi > 0) {
         p.qi = Math.max(0, p.qi - 115 * repSpeedMult * dt);
         if (p.qi === 0) {
@@ -2435,8 +2753,22 @@ export class TwilightEngine {
     this.updateReloads(dt);
 
     const mv = this.getMoveVector();
+    if (Math.hypot(mv.x, mv.y) > 0.1) {
+      this.framePushInputs.push({
+        id: 'player',
+        isPlayer: true,
+        faction: p.faction,
+        x: p.x,
+        y: p.y,
+        radius: p.radius,
+        elevation: p.elevation,
+        dirX: mv.x,
+        dirY: mv.y,
+      });
+    }
     const weaponSpeedMult = weapon.def.moveSpeedMult;
-    const baseSpeed = PLAYER_MOVEMENT.speed * weaponSpeedMult;
+    const freezeSpeedMult = p.freezeTimer > 0 ? 0.9 : 1.0;
+    const baseSpeed = PLAYER_MOVEMENT.speed * weaponSpeedMult * freezeSpeedMult;
     const prevPlayerX = p.x;
     const prevPlayerY = p.y;
     const moved = this.moveCharacterWithElevation(
@@ -2450,6 +2782,8 @@ export class TwilightEngine {
     p.x = moved.x;
     p.y = moved.y;
     p.elevation = moved.elevation;
+
+    this.applyIceVentFreezeCheck(p, true);
 
     const { x: worldMouseX, y: worldMouseY } = this.getWorldPointer();
     p.angle = Math.atan2(worldMouseY - p.y, worldMouseX - p.x);
@@ -2478,6 +2812,7 @@ export class TwilightEngine {
 
     const respawningAtFrameStart = this.status === 'RESPAWNING';
     this.time += dt;
+    this.framePushInputs = [];
     if (this.bannerTimer > 0) this.bannerTimer = Math.max(0, this.bannerTimer - dt);
     if (this.activeSkillBannerTimer > 0) this.activeSkillBannerTimer = Math.max(0, this.activeSkillBannerTimer - dt);
     if (this.camera.shake > 0) this.camera.shake = Math.max(0, this.camera.shake - dt * 26);
@@ -2514,6 +2849,8 @@ export class TwilightEngine {
 
     this.updateEnemies(dt);
     if (!this.isBattleActive()) return;
+    this.updatePushableIceBlocks(dt);
+    if (!this.isBattleActive()) return;
     this.updateProjectiles(dt);
     if (!this.isBattleActive()) return;
     this.checkVictoryCondition();
@@ -2522,6 +2859,46 @@ export class TwilightEngine {
       b.life -= dt;
       return b.life > 0;
     });
+    const iceVents = this.map.iceVents;
+    if (iceVents && iceVents.length > 0) {
+      for (const iv of iceVents) {
+        if (Math.random() < dt * 7.5 && this.particles.length < 220) {
+          const vx = (iv.gx + 0.5) * TILE + (Math.random() - 0.5) * 14;
+          const vy = (iv.gy + 0.5) * TILE + (Math.random() - 0.5) * 10;
+          const ang = -Math.PI / 2 + (Math.random() - 0.5) * 1.6;
+          const spd = 22 + Math.random() * 34;
+          this.particles.push({
+            x: vx,
+            y: vy,
+            vx: Math.cos(ang) * spd,
+            vy: Math.sin(ang) * spd,
+            size: 2.2 + Math.random() * 2.8,
+            color: Math.random() < 0.5 ? '#E0F2FE' : '#7DD3FC',
+            life: 0.45 + Math.random() * 0.35,
+            maxLife: 0.8,
+          });
+        }
+      }
+    }
+    const campfires = this.map.campfires;
+    if (campfires && campfires.length > 0) {
+      for (const cf of campfires) {
+        if (Math.random() < dt * 6.5 && this.particles.length < 220) {
+          const fx = (cf.gx + 0.5) * TILE + (Math.random() - 0.5) * 10;
+          const fy = (cf.gy + 0.5) * TILE + (Math.random() - 0.5) * 8;
+          this.particles.push({
+            x: fx,
+            y: fy,
+            vx: (Math.random() - 0.5) * 16,
+            vy: -(24 + Math.random() * 28),
+            size: 1.8 + Math.random() * 2.2,
+            color: Math.random() < 0.5 ? '#FBBF24' : '#F97316',
+            life: 0.4 + Math.random() * 0.3,
+            maxLife: 0.7,
+          });
+        }
+      }
+    }
     this.slashes = this.slashes.filter((s) => {
       s.life -= dt;
       return s.life > 0;
@@ -2598,6 +2975,9 @@ export class TwilightEngine {
     ) {
       return 'wood';
     }
+    if (this.map.floatingIceTileKeys?.has(`${gx},${gy}`) || this.map.floatingIceTiles?.some((f) => f.gx === gx && f.gy === gy)) {
+      return 'hard';
+    }
     if (tile?.style === 'hill') return 'soft';
     if (tile?.elev === 0) {
       if (
@@ -2609,16 +2989,329 @@ export class TwilightEngine {
       ) {
         return 'soft';
       }
-      if (floor === 'castle_stone' || floor === 'warehouse_steel') return 'hard';
+      if (floor === 'castle_stone' || floor === 'warehouse_steel' || floor === 'glacier_ice') return 'hard';
     }
+    if (tile?.style === 'glacier_ice') return 'hard';
     if (tile?.style && tile.style !== 'default') return 'hard';
     return this.map.biome.endsWith('_outdoor') ? 'soft' : 'hard';
   }
 
+  private canSlidePushableIceBlock(blk: PushableIceBlock, dir: CardinalDir): boolean {
+    const delta: Record<CardinalDir, [number, number]> = {
+      north: [0, -1],
+      south: [0, 1],
+      east: [1, 0],
+      west: [-1, 0],
+    };
+    const [dx, dy] = delta[dir];
+    const nextX = blk.x + dx * TILE;
+    const nextY = blk.y + dy * TILE;
+    const nextGx = Math.round(nextX / TILE);
+    const nextGy = Math.round(nextY / TILE);
+    if (nextGx < 0 || nextGy < 0 || nextGx + 2 > this.map.cols || nextGy + 2 > this.map.rows) {
+      return false;
+    }
+
+    const nextRect = { x: nextX + 2, y: nextY + 2, w: blk.w - 4, h: blk.h - 4 };
+    for (let gy = nextGy; gy < nextGy + 2; gy++) {
+      for (let gx = nextGx; gx < nextGx + 2; gx++) {
+        const cell = this.map.tileGrid[gy]?.[gx];
+        if (!cell || Math.abs(cell.elev - blk.baseElev) > 0.01) {
+          return false; // 不可推上高台、階梯差層或深坑
+        }
+        const cx = (gx + 0.5) * TILE;
+        const cy = (gy + 0.5) * TILE;
+        if (!this.isGroundWalkable(cx, cy)) return false;
+        for (const st of this.map.stairs) {
+          if (pointInRect(cx, cy, st)) return false;
+        }
+      }
+    }
+
+    const rectsOverlapLoose = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) =>
+      a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+    for (const obs of this.map.obstacles) {
+      if (rectsOverlapLoose(nextRect, obs)) return false;
+    }
+    for (const tree of this.map.trees) {
+      if (rectsOverlapLoose(nextRect, tree)) return false;
+    }
+    for (const other of this.map.pushableIceBlocks || []) {
+      if (other.id === blk.id) continue;
+      if (rectsOverlapLoose(nextRect, other)) return false;
+    }
+    return true;
+  }
+
+  private crushUnitByIceBlock(
+    target: { isPlayer: boolean; enemy?: EnemyEntity },
+    pusherId: string | null,
+    pusherFaction: FactionId | null
+  ) {
+    const p = this.player;
+    if (target.isPlayer) {
+      if (p.hp <= 0) return;
+      const fatalDmg = Math.max(1, Math.ceil(p.hp));
+      this.spawnBurst(p.x, p.y, '#7DD3FC', 18);
+      this.spawnText(p.x, p.y - 34, `-${fatalDmg}`, '#EF4444', 1.25);
+      p.hp = 0;
+      this.camera.shake = Math.min(14, this.camera.shake + 8);
+      this.handlePlayerDeath();
+      return;
+    }
+    const enemy = target.enemy;
+    if (!enemy || enemy.hp <= 0) return;
+    const fatalDmg = Math.max(1, Math.ceil(enemy.hp));
+    this.spawnBurst(enemy.x, enemy.y, '#7DD3FC', 18);
+    this.spawnText(enemy.x, enemy.y - 28, `-${fatalDmg}`, '#EF4444', 1.25);
+    enemy.hp = 0;
+    enemy.hitFlash = 0.16;
+
+    const pushedByPlayer = pusherId === 'player';
+    if (pushedByPlayer && pusherFaction) {
+      if (!areHostile(pusherFaction, 'player', enemy.faction, enemy.id)) {
+        p.reputations[p.faction] -= 1;
+        p.reputation = p.reputations[p.faction];
+        this.onReputationChange?.({ ...p.reputations });
+        this.removeEnemy(enemy, false);
+      } else {
+        p.totalDamage += fatalDmg;
+        p.score += fatalDmg;
+        sfx.hit(true);
+        this.removeEnemy(enemy, true);
+      }
+    } else {
+      this.removeEnemy(enemy, false);
+    }
+  }
+
+  private updatePushableIceBlocks(dt: number) {
+    const blocks = this.map.pushableIceBlocks;
+    if (!blocks || blocks.length === 0) return;
+
+    const dirDelta: Record<CardinalDir, [number, number]> = {
+      north: [0, -1],
+      south: [0, 1],
+      east: [1, 0],
+      west: [-1, 0],
+    };
+    const PUSH_HOLD_THRESHOLD = 0.28;
+    let navDirty = false;
+
+    for (const blk of blocks) {
+      if (blk.slideTimer > 0 && blk.slideDir) {
+        blk.slideTimer = Math.max(0, blk.slideTimer - dt);
+        const progress = 1 - blk.slideTimer / Math.max(0.01, blk.slideDuration);
+        blk.x = blk.slideStartX + (blk.slideEndX - blk.slideStartX) * progress;
+        blk.y = blk.slideStartY + (blk.slideEndY - blk.slideStartY) * progress;
+
+        const [dx, dy] = dirDelta[blk.slideDir];
+        const shoveUnit = (
+          u: { x: number; y: number; radius: number; elevation: number },
+          applyPos: (nx: number, ny: number, ne: number) => void,
+          crushTarget: { isPlayer: boolean; enemy?: EnemyEntity }
+        ) => {
+          if (Math.abs(u.elevation - blk.baseElev) > 0.5) return;
+          const padR = getMoveCheckRadius(u.radius);
+          if (!resolveCircleRect(u.x, u.y, padR, blk).hit) return;
+
+          // 計算不被冰塊重合的前緣安全位置，並檢查前方是否有牆壁／懸崖／障礙物阻擋
+          let desiredOffset = 0;
+          if (blk.slideDir === 'east') {
+            desiredOffset = Math.max(0, blk.x + blk.w + padR + 1.5 - u.x);
+          } else if (blk.slideDir === 'west') {
+            desiredOffset = Math.max(0, u.x - (blk.x - padR - 1.5));
+          } else if (blk.slideDir === 'south') {
+            desiredOffset = Math.max(0, blk.y + blk.h + padR + 1.5 - u.y);
+          } else if (blk.slideDir === 'north') {
+            desiredOffset = Math.max(0, u.y - (blk.y - padR - 1.5));
+          }
+
+          const targetX = u.x + dx * desiredOffset;
+          const targetY = u.y + dy * desiredOffset;
+          if (this.canStandWithPadding(targetX, targetY, u.elevation, u.radius)) {
+            applyPos(targetX, targetY, this.getWalkableElevation(targetX, targetY));
+            return;
+          }
+
+          // 若目標點受牆壁或高地阻擋，僅盡可能貼近障礙物前緣
+          let bestX = u.x;
+          let bestY = u.y;
+          const maxSteps = Math.max(1, Math.ceil(desiredOffset / 2));
+          for (let s = 1; s <= maxSteps; s++) {
+            const frac = s / maxSteps;
+            const cx = u.x + dx * desiredOffset * frac;
+            const cy = u.y + dy * desiredOffset * frac;
+            let hitsTerrainCliff = !pointInRect(cx, cy, blk) && Math.abs(this.getWalkableElevation(cx, cy) - u.elevation) > 0.5;
+            if (!hitsTerrainCliff) {
+              for (let i = 0; i < 8; i++) {
+                const a = (i / 8) * Math.PI * 2;
+                const sx = cx + Math.cos(a) * padR;
+                const sy = cy + Math.sin(a) * padR;
+                if (!pointInRect(sx, sy, blk) && Math.abs(this.getWalkableElevation(sx, sy) - u.elevation) > 0.5) {
+                  hitsTerrainCliff = true;
+                  break;
+                }
+              }
+            }
+            // 僅檢查非本冰塊之地形／實牆阻擋，模擬抵牆位置
+            const hitOtherWall =
+              cx < padR ||
+              cx > this.map.width - padR ||
+              cy < padR ||
+              cy > this.map.height - padR ||
+              !this.isGroundWalkable(cx, cy) ||
+              hitsTerrainCliff ||
+              this.map.obstacles.some((obs) => (obs.kind === 'wall' || obs.style === 'railing') && resolveCircleRect(cx, cy, padR, obs).hit) ||
+              this.map.trees.some((t) => resolveCircleRect(cx, cy, padR, t).hit) ||
+              (this.map.pushableIceBlocks || []).some((ob) => ob.id !== blk.id && resolveCircleRect(cx, cy, padR, ob).hit);
+            if (hitOtherWall) break;
+            bestX = cx;
+            bestY = cy;
+          }
+          applyPos(bestX, bestY, u.elevation);
+
+          const crushRadius = blk.slideTimer === 0 ? Math.max(4, padR - 2) : Math.max(4, padR - 6);
+          if (resolveCircleRect(bestX, bestY, crushRadius, blk).hit) {
+            this.crushUnitByIceBlock(crushTarget, blk.pusherId, blk.pusherFaction);
+          }
+        };
+
+        if (this.status === 'PLAYING' && this.player.hp > 0) {
+          const p = this.player;
+          shoveUnit(
+            p,
+            (nx, ny, ne) => {
+              p.x = nx;
+              p.y = ny;
+              p.elevation = ne;
+            },
+            { isPlayer: true }
+          );
+        }
+
+        for (const e of [...this.enemies]) {
+          if (e.hp <= 0) continue;
+          shoveUnit(
+            e,
+            (nx, ny, ne) => {
+              e.x = nx;
+              e.y = ny;
+              e.elevation = ne;
+            },
+            { isPlayer: false, enemy: e }
+          );
+        }
+
+        if (blk.slideTimer === 0) {
+          blk.x = blk.slideEndX;
+          blk.y = blk.slideEndY;
+          blk.slideDir = null;
+          blk.pusherId = null;
+          blk.pusherFaction = null;
+          navDirty = true;
+        }
+        continue;
+      }
+
+      // 靜止狀態：偵測貼齊冰塊某一側持續推動之角色
+      let detectedDir: CardinalDir | null = null;
+      let detectedPusher: { id: string; faction: FactionId } | null = null;
+
+      for (const u of this.framePushInputs) {
+        if (Math.abs(u.elevation - blk.baseElev) > 0.5) continue;
+        const contactPad = u.radius + 10;
+        let candDir: CardinalDir | null = null;
+
+        if (
+          u.dirX > 0.35 &&
+          Math.abs(u.dirX) >= Math.abs(u.dirY) * 0.7 &&
+          u.x < blk.x &&
+          blk.x - u.x <= contactPad &&
+          u.y >= blk.y + 4 &&
+          u.y <= blk.y + blk.h - 4
+        ) {
+          candDir = 'east';
+        } else if (
+          u.dirX < -0.35 &&
+          Math.abs(u.dirX) >= Math.abs(u.dirY) * 0.7 &&
+          u.x > blk.x + blk.w &&
+          u.x - (blk.x + blk.w) <= contactPad &&
+          u.y >= blk.y + 4 &&
+          u.y <= blk.y + blk.h - 4
+        ) {
+          candDir = 'west';
+        } else if (
+          u.dirY > 0.35 &&
+          Math.abs(u.dirY) >= Math.abs(u.dirX) * 0.7 &&
+          u.y < blk.y &&
+          blk.y - u.y <= contactPad &&
+          u.x >= blk.x + 4 &&
+          u.x <= blk.x + blk.w - 4
+        ) {
+          candDir = 'south';
+        } else if (
+          u.dirY < -0.35 &&
+          Math.abs(u.dirY) >= Math.abs(u.dirX) * 0.7 &&
+          u.y > blk.y + blk.h &&
+          u.y - (blk.y + blk.h) <= contactPad &&
+          u.x >= blk.x + 4 &&
+          u.x <= blk.x + blk.w - 4
+        ) {
+          candDir = 'north';
+        }
+
+        if (candDir && this.canSlidePushableIceBlock(blk, candDir)) {
+          detectedDir = candDir;
+          detectedPusher = { id: u.id, faction: u.faction };
+          break;
+        }
+      }
+
+      if (detectedDir && detectedPusher) {
+        if (blk.pushDir === detectedDir) {
+          blk.pushTimer += dt;
+        } else {
+          blk.pushDir = detectedDir;
+          blk.pushTimer = dt;
+        }
+        blk.pusherId = detectedPusher.id;
+        blk.pusherFaction = detectedPusher.faction;
+
+        if (blk.pushTimer >= PUSH_HOLD_THRESHOLD) {
+          const [dx, dy] = dirDelta[detectedDir];
+          blk.pushTimer = 0;
+          blk.pushDir = null;
+          blk.slideDir = detectedDir;
+          blk.slideDuration = 0.16;
+          blk.slideTimer = 0.16;
+          blk.slideStartX = blk.x;
+          blk.slideStartY = blk.y;
+          blk.slideEndX = blk.x + dx * TILE;
+          blk.slideEndY = blk.y + dy * TILE;
+          this.spawnBurst(blk.x + blk.w * 0.5, blk.y + blk.h * 0.5, '#BAE6FD', 8);
+        }
+      } else {
+        blk.pushTimer = Math.max(0, blk.pushTimer - dt * 3);
+        if (blk.pushTimer === 0) blk.pushDir = null;
+      }
+    }
+
+    if (navDirty) {
+      this.buildNavigationGraph();
+    }
+  }
+
   /**
-   * 電腦士兵直線槍線射擊（即時顯示直線，碰到第一個角色或地形停止，絕不穿透多人）
+   * 電腦士兵直線槍線射擊（套用與玩家相同之動態準心擴散、距離曲線與牆縫阻擋）
    */
-  private fireEnemyGunHitscan(e: EnemyEntity, aimAngle: number, gunWeapon: Extract<EquippedWeapon, { type: 'gun' }>) {
+  private fireEnemyGunHitscan(
+    e: EnemyEntity,
+    aimAngle: number,
+    gunWeapon: Extract<EquippedWeapon, { type: 'gun' }>,
+    targetDist = 200
+  ) {
     const gunDef = gunWeapon.def;
     e.gunfireTimer = GUNFIRE_ANIMATION_SECONDS;
     sfx.gunshot(gunDef.kind, this.nearbySoundVolume(e.x, e.y) * 0.45);
@@ -2627,16 +3320,26 @@ export class TwilightEngine {
       this.spawnText(e.x, e.y - 26, '遠程開火破盾', '#38BDF8', 0.9);
     }
 
-    const muzzleX = e.x + Math.cos(aimAngle) * (e.radius + 4);
-    const muzzleY = e.y + Math.sin(aimAngle) * (e.radius + 4);
+    const muzzleDist = e.radius + 4;
     const pellets = gunDef.kind === 'shotgun' ? gunDef.pellets : 1;
-    const spreadBase = e.eagleEyeTimer > 0 ? 0.025 : gunDef.kind === 'sniper' ? 0.03 : 0.09;
+    const focus = (e.eagleEyeTimer > 0 ? 0.45 : 1) * AI_GUN_AIM.spreadMult;
+    const clampedBloom = clamp(e.crosshairBloom, 0, gunDef.maxCrosshair - gunDef.baseCrosshair);
+    const spreadRad = getGunSpread(gunDef.kind, gunDef.baseCrosshair + clampedBloom, targetDist, focus);
     const maxRange = Math.hypot(this.map.width, this.map.height) + TILE * 2;
     const p = this.player;
 
     for (let i = 0; i < pellets; i++) {
-      const a = aimAngle + (Math.random() - 0.5) * (spreadBase + (pellets > 1 ? 0.14 : 0));
-      const seg = this.traceBulletSegment(muzzleX, muzzleY, a, maxRange, e.elevation);
+      const a = aimAngle + (Math.random() - 0.5) * spreadRad;
+      const muzzleX = e.x + Math.cos(a) * muzzleDist;
+      const muzzleY = e.y + Math.sin(a) * muzzleDist;
+      const preSeg = this.traceBulletSegment(e.x, e.y, a, muzzleDist, e.elevation, false);
+      const reachedMuzzle = dist(e.x, e.y, preSeg.x2, preSeg.y2) >= muzzleDist - 0.5;
+      const seg = reachedMuzzle
+        ? this.traceBulletSegment(muzzleX, muzzleY, a, maxRange, e.elevation, false)
+        : preSeg;
+      const wallEnd = reachedMuzzle
+        ? this.findWallOrPinchEndpoint(muzzleX, muzzleY, a, maxRange)
+        : { x2: preSeg.x2, y2: preSeg.y2, hitWall: true };
 
       let segEndX = seg.x2;
       let segEndY = seg.y2;
@@ -2648,8 +3351,12 @@ export class TwilightEngine {
       const candidates: Candidate[] = [];
 
       if (p.hp > 0 && areHostile(e.faction, e.id, p.faction, 'player') && p.elevation - e.elevation < 2.0) {
-        const res = segmentCircleHit(seg.x1, seg.y1, seg.x2, seg.y2, p.x, p.y, p.radius);
-        if (res.hit) {
+        const res = segmentCircleHit(seg.x1, seg.y1, wallEnd.x2, wallEnd.y2, p.x, p.y, p.radius);
+        if (
+          res.hit &&
+          !this.findEarliestWallHit(res.hitX, res.hitY, p.x, p.y) &&
+          this.canBulletReachPoint(seg.x1, seg.y1, e.elevation, res.hitX, res.hitY, p.elevation)
+        ) {
           candidates.push({ kind: 'player', ...res });
         }
       }
@@ -2658,8 +3365,12 @@ export class TwilightEngine {
         if (other.id === e.id) continue;
         if (!areHostile(e.faction, e.id, other.faction, other.id)) continue;
         if (other.elevation - e.elevation >= 2.0) continue;
-        const res = segmentCircleHit(seg.x1, seg.y1, seg.x2, seg.y2, other.x, other.y, other.radius);
-        if (res.hit) {
+        const res = segmentCircleHit(seg.x1, seg.y1, wallEnd.x2, wallEnd.y2, other.x, other.y, other.radius);
+        if (
+          res.hit &&
+          !this.findEarliestWallHit(res.hitX, res.hitY, other.x, other.y) &&
+          this.canBulletReachPoint(seg.x1, seg.y1, e.elevation, res.hitX, res.hitY, other.elevation)
+        ) {
           candidates.push({ kind: 'enemy', enemy: other, ...res });
         }
       }
@@ -2691,6 +3402,8 @@ export class TwilightEngine {
             e.y
           );
         }
+      } else if (reachedMuzzle && dist(muzzleX, muzzleY, seg.x2, seg.y2) < maxRange - 1) {
+        this.spawnBurst(seg.x2, seg.y2, '#E2E8F0', 4);
       }
 
       this.beams.push({
@@ -2704,6 +3417,8 @@ export class TwilightEngine {
         width: gunDef.kind === 'sniper' ? 2.6 : 1.9,
       });
     }
+
+    e.crosshairBloom = Math.min(gunDef.maxCrosshair - gunDef.baseCrosshair, clampedBloom + gunDef.bloomPerShot);
   }
 
   /**
@@ -2957,11 +3672,13 @@ export class TwilightEngine {
       if (e.hp <= 0) continue;
       const combat = AI_COMBAT[e.archetype];
       e.gunfireTimer = Math.max(0, e.gunfireTimer - dt);
+      e.crosshairBloom = Math.max(0, e.crosshairBloom - GUN_AIM.bloomRecovery * dt);
       e.hitFlash = Math.max(0, e.hitFlash - dt);
       e.swapTimer = Math.max(0, e.swapTimer - dt);
       e.attackAnimTimer = Math.max(0, e.attackAnimTimer - dt);
       if (e.attackAnimTimer === 0) e.attackAnimKind = null;
       e.attackCooldown = Math.max(0, e.attackCooldown - dt);
+      e.freezeTimer = Math.max(0, e.freezeTimer - dt);
       e.royalShieldTimer = Math.max(0, e.royalShieldTimer - dt);
       e.eagleEyeTimer = Math.max(0, e.eagleEyeTimer - dt);
       e.shadowCloneTimer = Math.max(0, e.shadowCloneTimer - dt);
@@ -2972,6 +3689,10 @@ export class TwilightEngine {
       e.alertTimer = Math.max(0, e.alertTimer - dt);
       e.aggroLockTimer = Math.max(0, e.aggroLockTimer - dt);
       e.pathTimer = Math.max(0, e.pathTimer - dt);
+
+      if (e.freezeTimer > 0) {
+        this.clearTimedSkillsOnFreeze(e);
+      }
 
       // 電腦與玩家共用彈匣裝填計時（僅在當前持握槍械手位上進行，惟電腦備用彈藥無限）
       const activeReloadWeapon = e.weapons[e.activeHand];
@@ -2986,22 +3707,30 @@ export class TwilightEngine {
       e.radius = e.baseRadius * e.sizeScale;
 
       if (e.stunTimer > 0) {
+        this.applyIceVentFreezeCheck(e, false);
         e.stunTimer = Math.max(0, e.stunTimer - dt);
         e.visibleTargetId = null;
         e.chargingMelee = false;
         e.chargeReady = false;
-        e.qi = Math.min(e.maxQi, e.qi + 24 * aiRepMult * dt);
+        if (e.freezeTimer <= 0) {
+          e.qi = Math.min(e.maxQi, e.qi + 24 * aiRepMult * dt);
+        }
+        e.lastAimAngle = e.angle;
         continue;
       }
 
       if (e.blindTimer > 0) {
+        this.applyIceVentFreezeCheck(e, false);
         e.blindTimer = Math.max(0, e.blindTimer - dt);
         e.angle += dt * 7;
+        e.lastAimAngle = e.angle;
         e.hasLosToTarget = false;
         e.visibleTargetId = null;
         e.chargingMelee = false;
         e.chargeReady = false;
-        e.qi = Math.min(e.maxQi, e.qi + 24 * aiRepMult * dt);
+        if (e.freezeTimer <= 0) {
+          e.qi = Math.min(e.maxQi, e.qi + 24 * aiRepMult * dt);
+        }
         continue;
       }
 
@@ -3150,9 +3879,12 @@ export class TwilightEngine {
       }
       this.switchEnemyHand(e, desiredHand);
 
-      // 與玩家對齊之氣條集氣／回氣規則（電腦固定以 100 聲望之 1.5x 倍率運作，移動不減速）
+      // 與玩家對齊之氣條集氣／回氣規則（電腦固定以 100 聲望之 1.5x 倍率運作，冰凍期間不能集氣）
       const activeWeapon = e.weapons[e.activeHand];
-      if (activeWeapon.type !== 'melee') {
+      if (e.freezeTimer > 0) {
+        e.chargingMelee = false;
+        e.chargeReady = false;
+      } else if (activeWeapon.type !== 'melee') {
         e.chargingMelee = false;
         e.chargeReady = false;
         e.qi = Math.min(e.maxQi, e.qi + 24 * aiRepMult * dt);
@@ -3191,8 +3923,16 @@ export class TwilightEngine {
       const desiredPickup = this.findNearestEligibleWeaponPickup(e);
 
       if (losTargetPos) {
-        const aimAngle = Math.atan2(losTargetPos.y - e.y, losTargetPos.x - e.x);
-        e.angle = aimAngle;
+        const rawTargetAngle = Math.atan2(losTargetPos.y - e.y, losTargetPos.x - e.x);
+        // 模擬玩家手持滑鼠手部微幅追蹤偏擺與有限轉向角速度
+        const idSeed = (e.id.charCodeAt(e.id.length - 1) || 1) * 1.37;
+        const wobble =
+          Math.sin(e.aiTimer * 2.9 + idSeed) * (AI_GUN_AIM.aimWobbleRad * 0.65) +
+          Math.cos(e.aiTimer * 5.3 + idSeed * 1.7) * (AI_GUN_AIM.aimWobbleRad * 0.35);
+        const desiredAimAngle = rawTargetAngle + wobble;
+        const maxTurn = combat.aimTurnSpeed * dt;
+        e.angle += clamp(angleDiff(e.angle, desiredAimAngle), -maxTurn, maxTurn);
+        const aimAngle = rawTargetAngle;
 
         const desiredRange =
           !canHitRanged
@@ -3282,20 +4022,23 @@ export class TwilightEngine {
         astarGoal = e.lastSeenTargetPos;
         desiredX = astarGoal.x;
         desiredY = astarGoal.y;
-        e.angle = Math.atan2(desiredY - e.y, desiredX - e.x);
+        const maxTurn = combat.aimTurnSpeed * dt;
+        e.angle += clamp(angleDiff(e.angle, Math.atan2(desiredY - e.y, desiredX - e.x)), -maxTurn, maxTurn);
         moveFactor = 1.05;
       } else if (desiredPickup) {
         // 主動利用 A* 尋路前往地圖武器位置拾取升級裝備
         astarGoal = { x: desiredPickup.x, y: desiredPickup.y };
         desiredX = desiredPickup.x;
         desiredY = desiredPickup.y;
-        e.angle = Math.atan2(desiredY - e.y, desiredX - e.x);
+        const maxTurn = combat.aimTurnSpeed * dt;
+        e.angle += clamp(angleDiff(e.angle, Math.atan2(desiredY - e.y, desiredX - e.x)), -maxTurn, maxTurn);
         moveFactor = 0.95;
       } else if (e.isAlly && p.hp > 0 && dist(e.x, e.y, p.x, p.y) > 130) {
         astarGoal = { x: p.x, y: p.y };
         desiredX = p.x;
         desiredY = p.y;
-        e.angle = Math.atan2(desiredY - e.y, desiredX - e.x);
+        const maxTurn = combat.aimTurnSpeed * dt;
+        e.angle += clamp(angleDiff(e.angle, Math.atan2(desiredY - e.y, desiredX - e.x)), -maxTurn, maxTurn);
         moveFactor = 0.85;
       } else {
         const patrolGoal = this.getPatrolGoal(e, dt);
@@ -3334,7 +4077,8 @@ export class TwilightEngine {
           desiredX = (nextWp.gx + 0.5) * TILE;
           desiredY = (nextWp.gy + 0.5) * TILE;
           if (!losTargetPos && !patrolling) {
-            e.angle = Math.atan2(desiredY - e.y, desiredX - e.x);
+            const maxTurn = combat.aimTurnSpeed * dt;
+            e.angle += clamp(angleDiff(e.angle, Math.atan2(desiredY - e.y, desiredX - e.x)), -maxTurn, maxTurn);
           }
         }
       }
@@ -3346,13 +4090,36 @@ export class TwilightEngine {
         e.angle += clamp(angleDiff(e.angle, scanAngle), -turn, turn);
       }
 
+      if (activeWeapon.type === 'gun') {
+        const aimDelta = Math.abs(angleDiff(e.lastAimAngle, e.angle));
+        const sweepRefDist = losTargetPos ? clamp(bestLosDist, GUN_AIM.nearDistance, 400) : 220;
+        const equivMoveDist = aimDelta * sweepRefDist;
+        e.crosshairBloom = Math.min(
+          activeWeapon.def.maxCrosshair - activeWeapon.def.baseCrosshair,
+          e.crosshairBloom + Math.min(18, Math.max(0, equivMoveDist - 2) * 0.09)
+        );
+      }
+      e.lastAimAngle = e.angle;
+
       const prevEX = e.x;
       const prevEY = e.y;
       const avoidDropOff = Boolean(losTargetPos && e.elevation > losTargetPos.elev + 0.25 && canHitRanged);
       if (moveFactor > 0) {
         const weaponSpeedMult = activeWeapon.def.moveSpeedMult;
         const moveAng = Math.atan2(desiredY - e.y, desiredX - e.x);
-        const stepDist = e.speed * weaponSpeedMult * moveFactor * dt;
+        this.framePushInputs.push({
+          id: e.id,
+          isPlayer: false,
+          faction: e.faction,
+          x: e.x,
+          y: e.y,
+          radius: e.radius,
+          elevation: e.elevation,
+          dirX: Math.cos(moveAng),
+          dirY: Math.sin(moveAng),
+        });
+        const freezeSpeedMult = e.freezeTimer > 0 ? 0.9 : 1.0;
+        const stepDist = e.speed * weaponSpeedMult * freezeSpeedMult * moveFactor * dt;
         const moved = this.moveCharacterWithElevation(
           e.x,
           e.y,
@@ -3409,16 +4176,18 @@ export class TwilightEngine {
         e.moveIntensity = Math.max(0, e.moveIntensity - dt * 10);
       }
 
-      // 路過或抵達地面武器點時自動拾取
+      // 路過或抵達地面武器點時自動拾取，並檢查是否踩踏冰氣孔
       this.enemyTryPickupWeapon(e);
+      this.applyIceVentFreezeCheck(e, false);
 
       const postPickupWeapon = e.weapons[e.activeHand];
       if (!e.chargingMelee && e.swapTimer <= 0 && readyToAttack && losTargetPos && e.attackCooldown <= 0 && (targetIsPlayer || targetEntity)) {
-        const aimAngle = Math.atan2(losTargetPos.y - e.y, losTargetPos.x - e.x);
-        if (postPickupWeapon.type === 'melee' && isCloseMeleeRange) {
+        const targetAngle = Math.atan2(losTargetPos.y - e.y, losTargetPos.x - e.x);
+        const angleErr = Math.abs(angleDiff(e.angle, targetAngle));
+        if (postPickupWeapon.type === 'melee' && isCloseMeleeRange && angleErr <= 0.75) {
           const heldMeleeDef = postPickupWeapon.def;
           const meleeKind = heldMeleeDef.kind;
-          e.attackCooldown = 1 / heldMeleeDef.swingRate;
+          e.attackCooldown = 1 / (heldMeleeDef.swingRate * (e.freezeTimer > 0 ? 0.9 : 1));
           const animDur = meleeKind === 'greatsword' ? 0.24 : 0.16;
           e.attackAnimDuration = animDur;
           e.attackAnimTimer = animDur;
@@ -3428,7 +4197,7 @@ export class TwilightEngine {
           this.slashes.push({
             x: e.x,
             y: e.y,
-            angle: aimAngle,
+            angle: e.angle,
             arc: heldMeleeDef.arc,
             reach: heldMeleeDef.reach,
             color: e.color,
@@ -3443,8 +4212,8 @@ export class TwilightEngine {
                 p.x,
                 p.y,
                 p.elevation,
-                Math.cos(aimAngle) * 36,
-                Math.sin(aimAngle) * 36,
+                Math.cos(e.angle) * 36,
+                Math.sin(e.angle) * 36,
                 p.radius
               );
               p.x = pushed.x;
@@ -3458,8 +4227,8 @@ export class TwilightEngine {
               targetEntity,
               meleeDmg,
               true,
-              Math.cos(aimAngle) * knockPower,
-              Math.sin(aimAngle) * knockPower,
+              Math.cos(e.angle) * knockPower,
+              Math.sin(e.angle) * knockPower,
               false,
               false,
               e.id,
@@ -3474,9 +4243,11 @@ export class TwilightEngine {
         } else if (postPickupWeapon.type === 'gun' && canHitRanged && postPickupWeapon.reloadTimer <= 0) {
           if (postPickupWeapon.ammoInMag <= 0) {
             postPickupWeapon.reloadTimer = postPickupWeapon.def.reloadTime;
-          } else {
-            e.attackCooldown = 1 / postPickupWeapon.def.fireRate;
-            this.fireEnemyGunHitscan(e, aimAngle, postPickupWeapon);
+          } else if (angleErr <= AI_GUN_AIM.fireAngleToleranceRad) {
+            e.attackCooldown =
+              (1 / postPickupWeapon.def.fireRate) *
+              AI_GUN_AIM.fireIntervalMultByKind[postPickupWeapon.def.kind];
+            this.fireEnemyGunHitscan(e, e.angle, postPickupWeapon, bestLosDist);
             const spent = postPickupWeapon.def.kind === 'shotgun' ? postPickupWeapon.def.pellets : 1;
             postPickupWeapon.ammoInMag = Math.max(0, postPickupWeapon.ammoInMag - spent);
             if (postPickupWeapon.ammoInMag <= 0) {
@@ -3609,11 +4380,20 @@ export class TwilightEngine {
       let destroyed = false;
 
       for (let s = 0; s < subSteps; s++) {
+        const prevSubX = proj.x;
+        const prevSubY = proj.y;
         const subDt = dt / subSteps;
         proj.x += proj.vx * subDt;
         proj.y += proj.vy * subDt;
 
         if (proj.x < 0 || proj.x > this.map.width || proj.y < 0 || proj.y > this.map.height) {
+          destroyed = true;
+          break;
+        }
+
+        const wallHit = this.findEarliestWallHit(prevSubX, prevSubY, proj.x, proj.y);
+        if (wallHit) {
+          this.spawnBurst(wallHit.x, wallHit.y, proj.color, 4);
           destroyed = true;
           break;
         }
@@ -3624,7 +4404,7 @@ export class TwilightEngine {
           proj.minTraversedElevation = Math.min(proj.minTraversedElevation, effectiveFloor);
         }
         const crateBlocks = h.isCrate && proj.minTraversedElevation < 1.5 && h.totalHeight - proj.minTraversedElevation > 1.0;
-        const cliffBlocks = !h.isCrate && h.totalHeight > proj.startElevation && h.totalHeight - proj.minTraversedElevation > 1.0;
+        const cliffBlocks = !h.isCrate && h.totalHeight - proj.minTraversedElevation > 1.0;
         if (h.isWall || crateBlocks || cliffBlocks) {
           this.spawnBurst(proj.x, proj.y, proj.color, 4);
           destroyed = true;
@@ -3788,6 +4568,7 @@ export class TwilightEngine {
         isReloading: eReloading,
         reloadProgress: eReloadProg,
         isBlinded: e.blindTimer > 0,
+        isFrozen: e.freezeTimer > 0,
         gunKind: eActive.type === 'gun' ? eActive.def.kind : eGun?.def.kind,
         meleeKind: eActive.type === 'melee' ? eActive.def.kind : eMelee?.def.kind,
         skin: e.characterSkin,
@@ -3912,6 +4693,7 @@ export class TwilightEngine {
         isReloading,
         reloadProgress: playerReloadProg,
         isBlinded: false,
+        isFrozen: p.freezeTimer > 0,
         gunKind: weapon.type === 'gun' ? weapon.def.kind : undefined,
         meleeKind: weapon.type === 'melee' ? weapon.def.kind : undefined,
         skin: p.characterSkin,
@@ -3976,18 +4758,6 @@ export class TwilightEngine {
 
   public emitHud() {
     const p = this.player;
-    let nearby: string | null = null;
-    for (const pk of this.pickups) {
-      if (dist(p.x, p.y, pk.x, pk.y) < 70) {
-        nearby =
-          pk.kind === 'gun' && pk.gunDef && pk.ammoInMag !== undefined
-            ? `${pk.label} (${pk.ammoInMag}/${pk.gunDef.magSize})`
-            : pk.meleeDef?.kind === 'shield' && pk.durability !== undefined
-              ? `${pk.label} (${pk.durability}/100)`
-              : pk.label;
-        break;
-      }
-    }
     const hostiles = this.enemies.filter((e) => areHostile(p.faction, 'player', e.faction, e.id));
     const weapon = p.weapons[p.activeHand];
     const offHandWeapon = p.weapons[p.activeHand === 0 ? 1 : 0];
@@ -4018,6 +4788,10 @@ export class TwilightEngine {
     if (p.giantTimer > 0) {
       buffs.push(`巨人化 ${p.giantTimer.toFixed(1)}s`);
       activeTimedSkills.push({ id: 'giant', name: '巨人化', remaining: p.giantTimer, duration: 7.5, color: '#F97316' });
+    }
+    if (p.freezeTimer > 0) {
+      buffs.push(`冰凍 ${p.freezeTimer.toFixed(1)}s`);
+      activeTimedSkills.push({ id: 'frozen', name: '冰凍', remaining: p.freezeTimer, duration: 5.0, color: '#38BDF8' });
     }
 
     const factionActive: Record<FactionId, number> = {
@@ -4083,7 +4857,6 @@ export class TwilightEngine {
         activeBuffText: buffs.length > 0 ? buffs.join(' · ') : null,
         activeTimedSkills,
       },
-      nearbyPickup: nearby,
       factionScores: { ...this.factionScores },
     });
   }

@@ -1,18 +1,21 @@
 import { describe, expect, it, vi } from 'vitest';
 import { sfx } from '../audio/sfx';
 import {
+  FLOOR_TERRAIN_BINDINGS,
   TREE_FOLIAGE_PRESETS,
   arenaMapToCustomData,
   buildArenaMapFromCustom,
+  canPlaceTerrainStairAt,
   createBlankCustomMap,
   hasUniformCellElevation,
   validateCustomMap,
 } from './customMaps';
-import { FACTION_CHARACTERS, GUNS, MELEES, getReputationQiMultiplier, getWeaponSwapDuration } from './data';
+import { FACTION_CHARACTERS, GUNS, MAP_CATALOG, MELEES, getReputationQiMultiplier, getWeaponSwapDuration } from './data';
 import { TwilightEngine, snapToEightDirections } from './engine';
-import { TILE, createArenaMap } from './maps';
-import { AI_COMBAT, RESPAWN_DELAY_SECONDS } from './tuning';
-import { EnemyEntity, FactionId, HudSnapshot, MapId, WeaponHand } from './types';
+import { CHAR_BASE_RADIUS } from './geometry';
+import { TILE, createArenaMap, getIglooCellMask } from './maps';
+import { AI_COMBAT, AI_GUN_AIM, GUN_AIM, RESPAWN_DELAY_SECONDS, getGunSpread } from './tuning';
+import { CardinalDir, EnemyEntity, FactionId, FloorStyle, HudSnapshot, MapId, WeaponHand } from './types';
 
 function createTestEngine(
   faction: FactionId = 'royal',
@@ -556,6 +559,7 @@ describe('Default loadout, player respawn, and map crate placement invariants', 
       'western_railway',
       'bamboo_fortress',
       'stanley_island',
+      'glacier_rift',
     ];
     for (const mapId of allMaps) {
       const map = createArenaMap(mapId);
@@ -631,7 +635,7 @@ describe('Shotgun 5-round burst, 1xN tunnel traversal, and full map BFS reachabi
     expect(engine.player.y).toBeLessThan(1.5 * TILE);
   });
 
-  it('guarantees all faction spawns are mutually reachable and all weapons/ammo/shields are reachable by elevation rules on all 7 maps', () => {
+  it('guarantees all faction spawns are mutually reachable and all weapons/ammo/shields are reachable by elevation rules on all 8 maps', () => {
     const mapIds: MapId[] = [
       'tokyo_shrine',
       'european_castle',
@@ -640,6 +644,7 @@ describe('Shotgun 5-round burst, 1xN tunnel traversal, and full map BFS reachabi
       'western_railway',
       'bamboo_fortress',
       'stanley_island',
+      'glacier_rift',
     ];
 
     for (const mapId of mapIds) {
@@ -927,7 +932,7 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     expect(countNonDefaultWeapons()).toBe(initialPoolCount);
 
     // 2. Player picks up a claw while holding default knife -> knife MUST NOT drop onto ground
-    engine.equipHand(1);
+    engine.switchWeapon();
     const clawPickup = engine.pickups.find((pk) => pk.kind === 'melee' && pk.meleeDef?.kind === 'claw')!;
     engine.player.x = clawPickup.x;
     engine.player.y = clawPickup.y;
@@ -938,7 +943,7 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     expect(countNonDefaultWeapons()).toBe(initialPoolCount);
 
     // 3. Player swaps rifle with shotgun -> old rifle DOES drop, pool stays constant
-    engine.equipHand(0);
+    engine.switchWeapon();
     const shotgunPickup = engine.pickups.find((pk) => pk.kind === 'gun' && pk.gunDef?.kind === 'shotgun')!;
     engine.player.x = shotgunPickup.x;
     engine.player.y = shotgunPickup.y;
@@ -1185,12 +1190,12 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
       engine.setMouseDown(true);
       engine.setMouseDown(false);
       expect(charge).not.toHaveBeenCalledWith(0);
-      engine.equipHand(1);
+      engine.switchWeapon();
       engine.setMouseDown(true);
       engine.update(0.15, 1280, 720);
       expect(charge).toHaveBeenCalledWith(0);
       expect(charge.mock.calls.some(([progress]) => progress !== null && progress > 0)).toBe(true);
-      engine.equipHand(0);
+      engine.switchWeapon();
       expect(charge).toHaveBeenLastCalledWith(null);
     } finally {
       step.mockRestore();
@@ -1214,9 +1219,9 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
   });
 });
 
-describe('Esc drops current weapon without pausing, 1/2 selects a hand, and enemies match faction UI roster', () => {
+describe('Esc drops current weapon without pausing, Q-only hand switching, and enemies match faction UI roster', () => {
   it('pressing Escape drops held non-default weapon onto map and reverts to pistol/knife without pausing', () => {
-    const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
+    const { engine, getHud } = createTestEngine('royal', 'tokyo_shrine', 10);
 
     // Pick up a rifle into gun slot and a claw into melee slot
     const riflePickup = engine.pickups.find((pk) => pk.kind === 'gun' && pk.gunDef?.kind === 'rifle')!;
@@ -1225,16 +1230,24 @@ describe('Esc drops current weapon without pausing, 1/2 selects a hand, and enem
     engine.tryPickup();
     expect(gunInHand(engine).def.kind).toBe('rifle');
 
-    engine.equipHand(1);
+    // Digit1 / Digit2 must NOT switch hands; KeyQ toggles hands
+    engine.setKey('Digit2', true);
+    engine.setKey('Digit2', false);
+    expect(engine.player.activeHand).toBe(0);
+    expect('nearbyPickup' in (getHud() as unknown as Record<string, unknown>)).toBe(false);
+
+    engine.setKey('KeyQ', true);
+    engine.setKey('KeyQ', false);
+    expect(engine.player.activeHand).toBe(1);
     const clawPickup = engine.pickups.find((pk) => pk.kind === 'melee' && pk.meleeDef?.kind === 'claw')!;
     engine.player.x = clawPickup.x;
     engine.player.y = clawPickup.y;
     engine.tryPickup();
     expect(meleeInHand(engine).def.kind).toBe('claw');
 
-    // Digit1 equips first hand (gun), press Esc -> drops rifle back onto map, reverts to pistol, stays PLAYING
-    engine.setKey('Digit1', true);
-    engine.setKey('Digit1', false);
+    // KeyQ switches back to first hand (gun), press Esc -> drops rifle back onto map, reverts to pistol, stays PLAYING
+    engine.setKey('KeyQ', true);
+    engine.setKey('KeyQ', false);
     expect(engine.player.activeHand).toBe(0);
 
     engine.setKey('Escape', true);
@@ -1250,9 +1263,9 @@ describe('Esc drops current weapon without pausing, 1/2 selects a hand, and enem
     expect(engine.status).toBe('PLAYING');
     expect(engine.pickups.length).toBe(countBefore);
 
-    // Digit2 equips second hand (melee), press Esc -> drops claw back onto map, reverts to knife
-    engine.setKey('Digit2', true);
-    engine.setKey('Digit2', false);
+    // KeyQ switches to second hand (melee), press Esc -> drops claw back onto map, reverts to knife
+    engine.setKey('KeyQ', true);
+    engine.setKey('KeyQ', false);
     expect(engine.player.activeHand).toBe(1);
 
     engine.setKey('Escape', true);
@@ -1278,8 +1291,9 @@ describe('Esc drops current weapon without pausing, 1/2 selects a hand, and enem
     expect(engine.player.weapons.map(({ def }) => def.kind)).toEqual(['claw', 'knife']);
     expect(engine.pickups.some((item) => item.gunDef?.kind === 'rifle')).toBe(true);
 
-    engine.setKey('Digit2', true);
-    engine.setKey('Digit2', false);
+    engine.setKey('KeyQ', true);
+    engine.setKey('KeyQ', false);
+    expect(engine.player.activeHand).toBe(1);
     pickUp('rifle');
     const rifleInSecondHand = gunInHand(engine, 1);
     rifleInSecondHand.ammoInMag = 2;
@@ -1294,8 +1308,8 @@ describe('Esc drops current weapon without pausing, 1/2 selects a hand, and enem
     expect(getHud()!.player.offHandWeapon.def.kind).toBe('rifle');
     expect(engine.pickups.some((item) => item.meleeDef?.kind === 'claw')).toBe(true);
 
-    engine.setKey('Digit2', true);
-    engine.setKey('Digit2', false);
+    engine.setKey('KeyQ', true);
+    engine.setKey('KeyQ', false);
     expect(engine.player.activeHand).toBe(1);
     expect(getHud()!.player.weapon).toMatchObject({ type: 'gun', ammoInMag: 2 });
   });
@@ -1650,7 +1664,7 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
 });
 
 describe('Map redesigns, allied spawn proximity, and character title format', () => {
-  it('places allied royal and shadow spawns nearby (<= 3.5 tiles apart) on all 7 maps', () => {
+  it('places allied royal and shadow spawns nearby (<= 3.5 tiles apart) on all 8 maps', () => {
     const allMaps: MapId[] = [
       'tokyo_shrine',
       'european_castle',
@@ -1659,6 +1673,7 @@ describe('Map redesigns, allied spawn proximity, and character title format', ()
       'western_railway',
       'bamboo_fortress',
       'stanley_island',
+      'glacier_rift',
     ];
     for (const mapId of allMaps) {
       const map = createArenaMap(mapId);
@@ -2086,6 +2101,7 @@ describe('Rifle 1.1x pistol baseline, map & layer updates, wall height 10, zero 
       'western_railway',
       'bamboo_fortress',
       'stanley_island',
+      'glacier_rift',
     ];
     for (const mapId of allMaps) {
       const m = createArenaMap(mapId);
@@ -2889,5 +2905,719 @@ describe('Mud pits (-1.0), railings (+1.0), new themed objects, pure numeric pop
   });
 });
 
+describe('Per-floor terrain/stair bindings, glacier_rift map, and 5s ice_vent freeze mechanics', () => {
+  it('binds a high-ground terrain and matching stair to every FloorStyle and ships 8 built-in maps including glacier_rift', () => {
+    const allFloors: FloorStyle[] = [
+      'shrine_dirt',
+      'bamboo_moss',
+      'desert_sand',
+      'castle_stone',
+      'warehouse_steel',
+      'grass_ground',
+      'glacier_ice',
+    ];
+    expect(Object.keys(FLOOR_TERRAIN_BINDINGS).sort()).toEqual([...allFloors].sort());
+    for (const floor of allFloors) {
+      const binding = FLOOR_TERRAIN_BINDINGS[floor];
+      expect(binding.floorStyle).toBe(floor);
+      expect(binding.terrainStyle).toBeTruthy();
+      expect(binding.terrainLabel.length).toBeGreaterThan(0);
+      expect(binding.stairLabel.length).toBeGreaterThan(0);
+    }
+
+    expect(MAP_CATALOG.length).toBe(8);
+    expect(MAP_CATALOG.some((m) => m.id === 'glacier_rift')).toBe(true);
+
+    const glacier = createArenaMap('glacier_rift');
+    expect(glacier.biome).toBe('glacier_outdoor');
+    expect(glacier.iceVents?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(glacier.waterTiles.length).toBeGreaterThan(10);
+    expect(glacier.bridges.length).toBe(0);
+    expect(glacier.tileGrid.flat().some((c) => c.style === 'mud_pit')).toBe(false);
+    expect(glacier.obstacles.some((o) => o.style === 'railing')).toBe(false);
+    expect(glacier.floatingIceTiles?.length ?? 0).toBeGreaterThanOrEqual(10);
+    expect(glacier.campfires?.length ?? 0).toBe(2);
+    expect(glacier.igloos?.length ?? 0).toBe(1);
+    expect(glacier.pushableIceBlocks?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(glacier.floorGrid?.some((row) => row.includes('glacier_ice'))).toBe(true);
+    expect(glacier.tileGrid.some((row) => row.some((c) => c.style === 'glacier_ice' && c.elev === 2))).toBe(true);
+    expect(glacier.stairs.some((s) => s.style === 'glacier_ice')).toBe(true);
+    expect(validateCustomMap(arenaMapToCustomData(glacier)).valid).toBe(true);
+  });
+
+  it('rejects mismatched terrain stairs and only accepts stairs attached to matching plateau or mud_pit tiles', () => {
+    const map = createBlankCustomMap('階梯配對測試', 'glacier_outdoor', 16, 12);
+    map.tileGrid[5][6] = { elev: 1, style: 'glacier_ice' };
+    map.tileGrid[5][8] = { elev: -1, style: 'mud_pit' };
+    map.factionSpawns.royal.push({ gx: 1, gy: 1 });
+    map.factionSpawns.shadow.push({ gx: 14, gy: 1 });
+    map.factionSpawns.mercenary.push({ gx: 1, gy: 10 });
+
+    // Mismatched stair style onto glacier_ice plateau must fail both placement check and validation
+    expect(canPlaceTerrainStairAt(map.tileGrid, 5, 5, 'hill', 'east')).toBe(false);
+    expect(canPlaceTerrainStairAt(map.tileGrid, 5, 5, 'glacier_ice', 'east')).toBe(true);
+    expect(canPlaceTerrainStairAt(map.tileGrid, 5, 5, 'glacier_ice', 'west')).toBe(false);
+
+    // Mud pit stair must sit inside -1.0 mud_pit pointing toward 0.0 rim
+    expect(canPlaceTerrainStairAt(map.tileGrid, 8, 5, 'mud_pit', 'east')).toBe(true);
+    expect(canPlaceTerrainStairAt(map.tileGrid, 7, 5, 'mud_pit', 'east')).toBe(false);
+
+    map.stairs.push({ gx: 5, gy: 5, gw: 1, gh: 1, direction: 'east', style: 'hill' });
+    const badRes = validateCustomMap(map);
+    expect(badRes.valid).toBe(false);
+    expect(badRes.errors.some((e) => e.includes('階梯'))).toBe(true);
+
+    map.stairs = [{ gx: 5, gy: 5, gw: 1, gh: 1, direction: 'east', style: 'glacier_ice' }];
+    const okRes = validateCustomMap(map);
+    expect(okRes.valid).toBe(true);
+  });
+
+  it('freezes player & AI on ice_vent for 5s, interrupts timed skills, slows speed/melee by 10%, and blocks Qi charging', () => {
+    const custom = createBlankCustomMap('冰氣孔測試場', 'glacier_outdoor', 20, 14);
+    custom.factionSpawns.royal.push({ gx: 2, gy: 6 }, { gx: 3, gy: 6 });
+    custom.factionSpawns.shadow.push({ gx: 16, gy: 6 }, { gx: 17, gy: 6 });
+    custom.factionSpawns.mercenary.push({ gx: 10, gy: 2 }, { gx: 10, gy: 11 }, { gx: 12, gy: 2 }, { gx: 12, gy: 11 });
+    custom.iceVents = [{ gx: 6, gy: 6 }];
+
+    let latestHud: HudSnapshot | null = null;
+    const testEngine = new TwilightEngine(
+      'royal',
+      FACTION_CHARACTERS.royal[0],
+      'glacier_rift',
+      { royal: 100, shadow: 100, mercenary: 100 },
+      (snap) => {
+        latestHud = snap;
+      },
+      undefined,
+      custom
+    );
+
+    const p = testEngine.player;
+    const ventX = 6.5 * TILE;
+    const ventY = 6.5 * TILE;
+
+    // Measure normal movement distance over 0.5s away from vent
+    p.activeHand = 0;
+    p.x = 2.5 * TILE;
+    p.y = 6.5 * TILE;
+    p.vx = 0;
+    p.vy = 0;
+    p.freezeTimer = 0;
+    testEngine.setKey('KeyD', true);
+    for (let i = 0; i < 15; i++) testEngine.update(1 / 30, 1280, 720);
+    testEngine.setKey('KeyD', false);
+    const normalDx = p.x - 2.5 * TILE;
+    expect(normalDx).toBeGreaterThan(50);
+
+    // Step onto ice vent with active timed skills + giant sizeScale
+    p.royalShieldTimer = 4.0;
+    p.eagleEyeTimer = 5.0;
+    p.vampireTimer = 6.0;
+    p.giantTimer = 5.0;
+    p.sizeScale = 1.45;
+    p.radius = CHAR_BASE_RADIUS * 1.45;
+    p.chargingMelee = true;
+    p.chargeReady = true;
+    p.qi = 40;
+    p.x = ventX;
+    p.y = ventY;
+    p.elevation = 0;
+
+    testEngine.update(1 / 60, 1280, 720);
+
+    expect(p.freezeTimer).toBeGreaterThan(4.9);
+    expect(p.freezeTimer).toBeLessThanOrEqual(5.0);
+    expect(p.royalShieldTimer).toBe(0);
+    expect(p.eagleEyeTimer).toBe(0);
+    expect(p.vampireTimer).toBe(0);
+    expect(p.giantTimer).toBe(0);
+    expect(p.sizeScale).toBe(1);
+    expect(p.radius).toBeCloseTo(CHAR_BASE_RADIUS, 4);
+    expect(p.chargingMelee).toBe(false);
+    expect(p.chargeReady).toBe(false);
+    const hudAfterFreeze = latestHud as HudSnapshot | null;
+    expect(hudAfterFreeze?.player.activeTimedSkills.some((sk) => sk.id === 'frozen')).toBe(true);
+
+    // While frozen: no passive Qi gain, melee click cannot charge Qi and suffers -10% swing speed
+    const qiBefore = p.qi;
+    p.activeHand = 1;
+    p.swapTimer = 0;
+    p.attackCooldown = 0;
+    testEngine.setMouseDown(true);
+    expect(p.chargingMelee).toBe(false);
+    expect(p.chargeReady).toBe(false);
+    const knife = meleeInHand(testEngine, 1);
+    expect(p.attackCooldown).toBeCloseTo(1 / (knife.def.swingRate * 0.9), 3);
+    testEngine.setMouseDown(false);
+
+    // Measure frozen movement speed (-10%) from clear ground with matching activeHand = 0
+    p.activeHand = 0;
+    p.x = 2.5 * TILE;
+    p.y = 6.5 * TILE;
+    p.vx = 0;
+    p.vy = 0;
+    testEngine.setKey('KeyD', true);
+    for (let i = 0; i < 15; i++) testEngine.update(1 / 30, 1280, 720);
+    testEngine.setKey('KeyD', false);
+    const frozenDx = p.x - 2.5 * TILE;
+    expect(frozenDx / normalDx).toBeCloseTo(0.9, 1);
+    expect(p.qi).toBeLessThanOrEqual(qiBefore + 0.001);
+
+    // Enemy AI stepping onto the same ice_vent is also frozen for 5s and loses timed skills
+    const enemy = testEngine.enemies[0];
+    expect(enemy).toBeDefined();
+    enemy.x = ventX;
+    enemy.y = ventY;
+    enemy.elevation = 0;
+    enemy.royalShieldTimer = 4.0;
+    enemy.chargingMelee = true;
+    enemy.chargeReady = true;
+    testEngine.update(1 / 60, 1280, 720);
+    expect(enemy.freezeTimer).toBeGreaterThan(4.9);
+    expect(enemy.royalShieldTimer).toBe(0);
+    expect(enemy.chargingMelee).toBe(false);
+    expect(enemy.chargeReady).toBe(false);
+  });
+});
+
+describe('Polar objects: floatingIceTiles, campfires, igloo 3/5/5/5/3 footprint, and pushableIceBlocks shove & crush', () => {
+  it('requires floatingIceTiles to sit strictly on water tiles and bridges split factions cleanly in BFS & gameplay', () => {
+    const custom = createBlankCustomMap('浮冰測試圖', 'glacier_outdoor', 16, 12);
+    custom.factionSpawns.royal.push({ gx: 2, gy: 5 });
+    custom.factionSpawns.shadow.push({ gx: 12, gy: 5 });
+    custom.factionSpawns.mercenary.push({ gx: 13, gy: 8 });
+
+    // Full vertical river bisecting column gx = 7
+    for (let gy = 0; gy < 12; gy++) {
+      custom.waterTiles.push({ gx: 7, gy });
+    }
+    expect(validateCustomMap(custom).valid).toBe(false);
+
+    // Floating ice placed on dry land (gx = 4) must be rejected
+    custom.floatingIceTiles = [{ gx: 4, gy: 5 }];
+    const badLandIce = validateCustomMap(custom);
+    expect(badLandIce.valid).toBe(false);
+    expect(badLandIce.errors.some((e) => e.includes('浮冰'))).toBe(true);
+
+    // Floating ice placed on river tile (7, 5) restores cross-river BFS connectivity & player crossing
+    custom.floatingIceTiles = [{ gx: 7, gy: 5 }];
+    expect(validateCustomMap(custom).valid).toBe(true);
+
+    const engine = new TwilightEngine(
+      'royal',
+      FACTION_CHARACTERS.royal[0],
+      'glacier_rift',
+      { royal: 100, shadow: 100, mercenary: 100 },
+      () => {},
+      undefined,
+      custom
+    );
+    const p = engine.player;
+    p.x = 6.5 * TILE;
+    p.y = 5.5 * TILE;
+    p.elevation = 0;
+    engine.setKey('KeyD', true);
+    for (let i = 0; i < 45; i++) engine.update(1 / 30, 1280, 720);
+    engine.setKey('KeyD', false);
+    expect(p.x).toBeGreaterThan(7.5 * TILE);
+  });
+
+  it('enforces exact 3/5/5/5/3 igloo mask across all 4 rotations, checks 21-cell uniform elevation, and allows interior entry', () => {
+    const dirs: CardinalDir[] = ['south', 'north', 'east', 'west'];
+    for (const dir of dirs) {
+      const mask = getIglooCellMask(4, 4, dir);
+      expect(mask.walls.length).toBe(11);
+      expect(mask.interior.length).toBe(9);
+      expect(mask.occupied.length).toBe(21);
+
+      // Verify per-slice counts along depth axis are strictly [3, 5, 5, 5, 3]
+      const counts = new Array(5).fill(0);
+      for (const c of mask.occupied) {
+        const lx = c.gx - 4;
+        const ly = c.gy - 4;
+        const slice = dir === 'south' || dir === 'north' ? ly : lx;
+        counts[slice] += 1;
+      }
+      expect(counts).toEqual([3, 5, 5, 5, 3]);
+    }
+
+    const custom = createBlankCustomMap('冰屋測試圖', 'glacier_outdoor', 18, 14);
+    custom.factionSpawns.royal.push({ gx: 1, gy: 1 });
+    custom.factionSpawns.shadow.push({ gx: 15, gy: 1 });
+    custom.factionSpawns.mercenary.push({ gx: 15, gy: 11 });
+    custom.igloos = [{ gx: 6, gy: 4, direction: 'south' }];
+
+    // One corner OUTSIDE the 3/5/5/5/3 mask (6,4) being elevated must still be valid
+    custom.tileGrid[4][6] = { elev: 1, style: 'glacier_ice' };
+    expect(validateCustomMap(custom).valid).toBe(true);
+
+    // One cell INSIDE the 3/5/5/5/3 mask (e.g. entrance 6+2=8, 4+4=8) having different elevation fails validation
+    custom.tileGrid[8][8] = { elev: 1, style: 'glacier_ice' };
+    const badIgloo = validateCustomMap(custom);
+    expect(badIgloo.valid).toBe(false);
+    expect(badIgloo.errors.some((e) => e.includes('冰屋'))).toBe(true);
+
+    // Reset and verify player walks through south entrance (8, 8) into center interior (8, 6)
+    custom.tileGrid[8][8] = { elev: 0, style: 'default' };
+    expect(validateCustomMap(custom).valid).toBe(true);
+
+    const engine = new TwilightEngine(
+      'royal',
+      FACTION_CHARACTERS.royal[0],
+      'glacier_rift',
+      { royal: 100, shadow: 100, mercenary: 100 },
+      () => {},
+      undefined,
+      custom
+    );
+    const p = engine.player;
+    p.x = 8.5 * TILE;
+    p.y = 9.5 * TILE;
+    p.elevation = 0;
+    engine.setKey('KeyW', true);
+    for (let i = 0; i < 60; i++) engine.update(1 / 30, 1280, 720);
+    engine.setKey('KeyW', false);
+    // Player enters interior and stops smoothly at north back wall (gy = 4 wall bottom edge = 5 * TILE)
+    expect(p.y).toBeLessThan(8.0 * TILE);
+    expect(p.y).toBeGreaterThanOrEqual(5.4 * TILE);
+  });
+
+  it('slides pushable 2x2 ice block 1 tile after sustained push, blocks mismatched height, shoves open targets, and crushes pinned enemies to instant death', () => {
+    const custom = createBlankCustomMap('推冰塊測試場', 'glacier_outdoor', 20, 14);
+    custom.factionSpawns.royal.push({ gx: 1, gy: 1 });
+    custom.factionSpawns.shadow.push({ gx: 17, gy: 1 });
+    custom.factionSpawns.mercenary.push({ gx: 17, gy: 11 });
+    custom.pushableIceBlocks = [{ gx: 6, gy: 5 }];
+    // Plateau to the south blocks pushing onto +1.0 glacier terrain; solid wall at (10, 5..6) creates crush trap
+    custom.tileGrid[7][6] = { elev: 1, style: 'glacier_ice' };
+    custom.tileGrid[7][7] = { elev: 1, style: 'glacier_ice' };
+    custom.obstacles.push(
+      { gx: 10, gy: 5, gw: 1, gh: 1, elevation: 10, kind: 'wall', style: 'stone_wall_blue' },
+      { gx: 10, gy: 6, gw: 1, gh: 1, elevation: 10, kind: 'wall', style: 'stone_wall_blue' }
+    );
+
+    const engine = new TwilightEngine(
+      'royal',
+      FACTION_CHARACTERS.royal[0],
+      'glacier_rift',
+      { royal: 100, shadow: 100, mercenary: 100 },
+      () => {},
+      undefined,
+      custom
+    );
+    const p = engine.player;
+    const blk = engine.map.pushableIceBlocks![0];
+    expect(blk.elevation).toBe(1.5);
+
+    // 1. Trying to push SOUTH onto +1.0 glacier plateau must NOT move the block
+    p.x = 7.0 * TILE;
+    p.y = 4.5 * TILE - CHAR_BASE_RADIUS * 0.85;
+    p.elevation = 0;
+    engine.setKey('KeyS', true);
+    for (let i = 0; i < 20; i++) engine.update(1 / 30, 1280, 720);
+    engine.setKey('KeyS', false);
+    expect(blk.y).toBe(5 * TILE);
+
+    // Clear all enemies except one enemy standing in open lane at (8.2, 6.0)
+    const testEnemy = engine.enemies.find((e) => e.faction === 'shadow') ?? engine.enemies[0];
+    expect(testEnemy).toBeDefined();
+    engine.enemies = [testEnemy];
+    testEnemy.x = 8.2 * TILE;
+    testEnemy.y = 6.0 * TILE;
+    testEnemy.elevation = 0;
+    testEnemy.vx = 0;
+    testEnemy.vy = 0;
+    const enemyHpBeforeOpenShove = testEnemy.hp;
+
+    // 2. Push EAST from west side of block -> slides +1 tile to gx = 7 (336px) and shoves enemy forward safely
+    p.x = 6 * TILE - CHAR_BASE_RADIUS * 0.9;
+    p.y = 6.0 * TILE;
+    p.vx = 0;
+    p.vy = 0;
+    engine.setKey('KeyD', true);
+    for (let i = 0; i < 25; i++) engine.update(1 / 30, 1280, 720);
+    engine.setKey('KeyD', false);
+    expect(blk.x).toBeCloseTo(7 * TILE, 1);
+    expect(testEnemy.hp).toBe(enemyHpBeforeOpenShove);
+    expect(testEnemy.x).toBeGreaterThanOrEqual(9 * TILE);
+
+    // 3. Pin enemy directly against wall at gx = 10 (west face = 480px) while block slides from gx = 7 -> gx = 8 (east face = 480px)
+    //Wait: block moves gx 7->8 (east edge = 480px? No, 8+2=10 => 480px! Zero gap between block at gx=8..10 and wall at gx=10!)
+    testEnemy.x = 9.5 * TILE;
+    testEnemy.y = 6.0 * TILE;
+    testEnemy.vx = 0;
+    testEnemy.vy = 0;
+    testEnemy.elevation = 0;
+    testEnemy.hp = 100;
+    const killsBefore = p.kills;
+
+    p.x = blk.x - CHAR_BASE_RADIUS * 0.9;
+    p.y = 6.0 * TILE;
+    engine.setKey('KeyD', true);
+    for (let i = 0; i < 25; i++) {
+      // Hold enemy pinned in lane (don't let AI wander out before crush!)
+      if (engine.enemies.includes(testEnemy)) {
+        testEnemy.y = 6.0 * TILE;
+        testEnemy.vx = 0;
+        testEnemy.vy = 0;
+      }
+      engine.update(1 / 30, 1280, 720);
+    }
+    engine.setKey('KeyD', false);
+
+    expect(blk.x).toBeCloseTo(8 * TILE, 1);
+    expect(testEnemy.hp).toBe(0);
+    expect(engine.enemies.includes(testEnemy)).toBe(false);
+    expect(p.kills).toBe(killsBefore + 1);
+  });
+});
+
+describe('Igloo diagonal corner occlusion and AI crosshair bloom/spread parity', () => {
+  it('blocks LoS and gunfire diagonally through all 4 igloo corners (insider and outsider) while keeping the entrance open', () => {
+    const custom = createBlankCustomMap('冰屋牆縫阻擋測試', 'glacier_outdoor', 16, 14);
+    custom.factionSpawns.royal.push({ gx: 1, gy: 1 });
+    custom.factionSpawns.shadow.push({ gx: 13, gy: 1 });
+    custom.factionSpawns.mercenary.push({ gx: 13, gy: 11 });
+    custom.igloos = [{ gx: 5, gy: 4, direction: 'south' }];
+
+    const engine = new TwilightEngine(
+      'royal',
+      FACTION_CHARACTERS.royal[0],
+      'glacier_rift',
+      { royal: 100, shadow: 100, mercenary: 100 },
+      () => {},
+      undefined,
+      custom
+    );
+
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    enemy.speed = 0;
+    enemy.elevation = 0;
+    const p = engine.player;
+    p.elevation = 0;
+
+    // Test all 4 diagonal corners of the 5x5 igloo at (5,4):
+    // NW: interior (6,5) <-> exterior (5,4)
+    // NE: interior (8,5) <-> exterior (9,4)
+    // SW: interior (6,7) <-> exterior (5,8)
+    // SE: interior (8,7) <-> exterior (9,8)
+    const cornerPairs = [
+      { inX: 6.45 * TILE, inY: 5.45 * TILE, outX: 5.5 * TILE, outY: 4.5 * TILE },
+      { inX: 8.55 * TILE, inY: 5.45 * TILE, outX: 9.5 * TILE, outY: 4.5 * TILE },
+      { inX: 6.45 * TILE, inY: 7.55 * TILE, outX: 5.5 * TILE, outY: 8.5 * TILE },
+      { inX: 8.55 * TILE, inY: 7.55 * TILE, outX: 9.5 * TILE, outY: 8.5 * TILE },
+    ];
+
+    for (const pair of cornerPairs) {
+      p.x = pair.inX;
+      p.y = pair.inY;
+      enemy.x = pair.outX;
+      enemy.y = pair.outY;
+      enemy.hp = 100;
+      enemy.hasLosToTarget = false;
+      enemy.visibleTargetId = null;
+
+      // 1. Enemy outside MUST NOT gain LoS into igloo corner
+      engine.update(0.05, 1280, 720);
+      expect(enemy.hasLosToTarget).toBe(false);
+
+      // 2. Player inside corner shooting diagonally out MUST NOT pierce the corner wall seam or hit outsider
+      p.angle = Math.atan2(enemy.y - p.y, enemy.x - p.x);
+      p.attackCooldown = 0;
+      p.weapons[0] = { type: 'gun', def: GUNS.find((g) => g.kind === 'sniper')!, ammoInMag: 1, reloadTimer: 0 };
+      p.activeHand = 0;
+      engine.setMouseDown(true);
+      engine.setMouseDown(false);
+      expect(enemy.hp).toBe(100);
+
+      // 3. Outsider shooting diagonally in MUST NOT hit insider either
+      const pHpBefore = p.hp;
+      const aimIn = Math.atan2(p.y - enemy.y, p.x - enemy.x);
+      const fireEnemyGunHitscan = (
+        engine as unknown as {
+          fireEnemyGunHitscan: (
+            ent: EnemyEntity,
+            ang: number,
+            w: Extract<EnemyEntity['weapons'][number], { type: 'gun' }>,
+            d?: number
+          ) => void;
+        }
+      ).fireEnemyGunHitscan.bind(engine);
+      const sniperWeapon: Extract<EnemyEntity['weapons'][number], { type: 'gun' }> = {
+        type: 'gun',
+        def: GUNS.find((g) => g.kind === 'sniper')!,
+        ammoInMag: 1,
+        reloadTimer: 0,
+      };
+      fireEnemyGunHitscan(enemy, aimIn, sniperWeapon, 80);
+      expect(p.hp).toBe(pHpBefore);
+    }
+
+    // Open south entrance at (7, 8) -> (7, 9) MUST allow clear LoS
+    p.x = 7.5 * TILE;
+    p.y = 7.5 * TILE;
+    enemy.x = 7.5 * TILE;
+    enemy.y = 9.5 * TILE;
+    engine.update(0.05, 1280, 720);
+    expect(enemy.hasLosToTarget).toBe(true);
+  });
+
+  it('applies crosshair bloom, aim-sweep bloom, recovery, Eagle Eye tightening, and hand-swap reset to AI gunfire', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    engine.pickups = [];
+    enemy.speed = 0;
+    enemy.x = 10.5 * TILE;
+    enemy.y = 19.3 * TILE;
+    enemy.elevation = 0;
+
+    const rifleDef = GUNS.find((g) => g.kind === 'rifle')!;
+    const knifeDef = MELEES.find((m) => m.kind === 'knife')!;
+    enemy.weapons = [
+      { type: 'gun', def: rifleDef, ammoInMag: rifleDef.magSize, reloadTimer: 0 },
+      { type: 'melee', def: knifeDef, durability: 0 },
+    ];
+    enemy.activeHand = 0;
+    enemy.crosshairBloom = 0;
+    enemy.lastAimAngle = 0;
+    enemy.angle = 0;
+
+    // Place player straight east at 280px with clear LoS
+    engine.player.x = enemy.x + 280;
+    engine.player.y = enemy.y;
+    engine.player.elevation = 0;
+    engine.player.invulnTimer = 0;
+
+    // 1. Firing multiple rapid rifle shots grows AI crosshairBloom up to (maxCrosshair - baseCrosshair)
+    const fireEnemyGunHitscan = (
+      engine as unknown as {
+        fireEnemyGunHitscan: (
+          ent: EnemyEntity,
+          ang: number,
+          w: Extract<EnemyEntity['weapons'][number], { type: 'gun' }>,
+          d?: number
+        ) => void;
+      }
+    ).fireEnemyGunHitscan.bind(engine);
+
+    const gunSlot = enemy.weapons[0] as Extract<EnemyEntity['weapons'][number], { type: 'gun' }>;
+    fireEnemyGunHitscan(enemy, 0, gunSlot, 280);
+    expect(enemy.crosshairBloom).toBeCloseTo(rifleDef.bloomPerShot, 3);
+
+    for (let i = 0; i < 6; i++) {
+      fireEnemyGunHitscan(enemy, 0, gunSlot, 280);
+    }
+    const maxBloom = rifleDef.maxCrosshair - rifleDef.baseCrosshair;
+    expect(enemy.crosshairBloom).toBeCloseTo(maxBloom, 3);
+
+    // 2. When crosshairBloom is maxed at long range, enemy beams span significant dispersion around aimAngle
+    engine.beams = [];
+    const savedRandom = Math.random;
+    const anglesObserved: number[] = [];
+    try {
+      // Deterministic extremes (0 and 0.9999) + midpoint (0.5)
+      for (const r of [0.001, 0.999]) {
+        Math.random = () => r;
+        engine.beams = [];
+        enemy.crosshairBloom = maxBloom;
+        fireEnemyGunHitscan(enemy, 0, gunSlot, 400);
+        const beam = engine.beams[0];
+        anglesObserved.push(Math.atan2(beam.y2 - beam.y1, beam.x2 - beam.x1));
+      }
+    } finally {
+      Math.random = savedRandom;
+    }
+    const spreadSpan = Math.abs(anglesObserved[1] - anglesObserved[0]);
+    const expectedSpan = getGunSpread('rifle', rifleDef.maxCrosshair, 400, AI_GUN_AIM.spreadMult);
+    expect(spreadSpan).toBeGreaterThan(expectedSpan * 0.9);
+
+    // 3. Eagle Eye tightens AI spread to 0.45x (still scaled by AI_GUN_AIM.spreadMult)
+    enemy.eagleEyeTimer = 5.0;
+    enemy.crosshairBloom = maxBloom;
+    const eagleAngles: number[] = [];
+    try {
+      for (const r of [0.001, 0.999]) {
+        Math.random = () => r;
+        engine.beams = [];
+        fireEnemyGunHitscan(enemy, 0, gunSlot, 320);
+        const beam = engine.beams[0];
+        eagleAngles.push(Math.atan2(beam.y2 - beam.y1, beam.x2 - beam.x1));
+      }
+    } finally {
+      Math.random = savedRandom;
+    }
+    const eagleSpan = Math.abs(eagleAngles[1] - eagleAngles[0]);
+    const expectedEagleSpan = getGunSpread('rifle', rifleDef.maxCrosshair, 320, 0.45 * AI_GUN_AIM.spreadMult);
+    expect(eagleSpan).toBeCloseTo(expectedEagleSpan, 2);
+    expect(eagleSpan).toBeLessThan(spreadSpan);
+
+    // 4. Bloom recovers over time in updateEnemies and resets to 0 on hand swap
+    gunSlot.ammoInMag = rifleDef.magSize;
+    enemy.eagleEyeTimer = 0;
+    enemy.crosshairBloom = 30;
+    enemy.attackCooldown = 99;
+    enemy.reactionTimer = 0;
+    enemy.lastAimAngle = 0;
+    enemy.angle = 0;
+    engine.player.x = enemy.x + 220;
+    engine.player.y = enemy.y;
+    engine.update(0.5, 1280, 720);
+    // Recovers by GUN_AIM.bloomRecovery * 0.5 (=10) with minor human mouse-tracking wobble
+    expect(enemy.crosshairBloom).toBeLessThan(23);
+    expect(enemy.crosshairBloom).toBeGreaterThan(18);
+
+    // Rapid 90 deg flank (clear open aisle north at 120px): AI turns smoothly and accumulates aim-sweep bloom
+    const bloomBeforeSnap = enemy.crosshairBloom;
+    engine.player.x = enemy.x;
+    engine.player.y = enemy.y - 120;
+    engine.update(1 / 60, 1280, 720);
+    expect(Math.abs(enemy.angle)).toBeLessThan(0.25); // Did NOT teleport 90 deg in 1 frame
+    for (let i = 0; i < 16; i++) {
+      engine.update(1 / 60, 1280, 720);
+    }
+    expect(enemy.crosshairBloom).toBeGreaterThan(bloomBeforeSnap + 3);
+
+    // Hand swap resets bloom cleanly
+    const switchEnemyHand = (
+      engine as unknown as { switchEnemyHand: (ent: EnemyEntity, hand: 0 | 1) => void }
+    ).switchEnemyHand.bind(engine);
+    switchEnemyHand(enemy, 1);
+    expect(enemy.crosshairBloom).toBe(0);
+  });
+});
+
+describe('3D elevation LoS/bullet occlusion and AI mouse-turn & gunfire cadence nerf', () => {
+  it('blocks elevated-to-low LoS and bullets over open ground behind high crates (industrial_warehouse 20,11 -> 16,16 -> 16,18)', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const internals = engine as unknown as {
+      hasLineOfSight: (ax: number, ay: number, ae: number, bx: number, by: number, be: number, r: number) => boolean;
+      canRangedHitTarget: (ax: number, ay: number, ae: number, bx: number, by: number, be: number) => boolean;
+      traceBulletSegment: (
+        x1: number,
+        y1: number,
+        a: number,
+        d: number,
+        e: number,
+        b?: boolean
+      ) => { x1: number; y1: number; x2: number; y2: number };
+    };
+
+    // Shooter standing on (20,11) 2x2 1.5 crate -> open 0.0 aisle -> (16,16) 2x2 1.5 crate -> target at (16,18) 0.0 ground
+    const sx = 20.5 * TILE;
+    const sy = 12.5 * TILE;
+    const tx = 16.5 * TILE;
+    const ty = 18.5 * TILE;
+    expect(internals.hasLineOfSight(sx, sy, 1.5, tx, ty, 0, 9.5 * TILE)).toBe(false);
+    expect(internals.canRangedHitTarget(sx, sy, 1.5, tx, ty, 0)).toBe(false);
+
+    // Directional ray from (20,11) toward (16,18) drops over open ground and stops inside (16,16) crate
+    const shotAng = Math.atan2(ty - sy, tx - sx);
+    const seg = internals.traceBulletSegment(sx, sy, shotAng, 12 * TILE, 1.5, false);
+    expect(Math.hypot(seg.x2 - sx, seg.y2 - sy)).toBeLessThan(Math.hypot(tx - sx, ty - sy) - 10);
+
+    // Actual player rifle shot from (20,11) toward enemy at (16,18) (even with cursor placed past enemy) deals 0 damage
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    enemy.x = tx;
+    enemy.y = ty;
+    enemy.elevation = 0;
+    enemy.hp = 100;
+    enemy.royalShieldTimer = 0;
+    enemy.shadowCloneTimer = 0;
+
+    engine.player.x = sx;
+    engine.player.y = sy;
+    engine.player.elevation = 1.5;
+    engine.player.activeHand = 0;
+    gunInHand(engine).def = GUNS.find((g) => g.kind === 'sniper')!;
+    gunInHand(engine).ammoInMag = 5;
+    engine.player.attackCooldown = 0;
+    engine.player.swapTimer = 0;
+    engine.player.angle = shotAng;
+    engine.setMouseDown(true);
+    engine.update(1 / 60, 1280, 720);
+    engine.setMouseDown(false);
+    expect(enemy.hp).toBe(100);
+
+    // Meanwhile, target standing ON TOP of (16,16) (1.5) or on the 0.0 aisle between (20,11) & (16,16) IS visible and hittable!
+    expect(internals.hasLineOfSight(sx, sy, 1.5, 17.0 * TILE, 17.0 * TILE, 1.5, 9.5 * TILE)).toBe(true);
+    expect(internals.canRangedHitTarget(sx, sy, 1.5, 17.0 * TILE, 17.0 * TILE, 1.5)).toBe(true);
+    enemy.x = 17.0 * TILE;
+    enemy.y = 17.0 * TILE;
+    enemy.elevation = 1.5;
+    engine.player.attackCooldown = 0;
+    engine.player.angle = Math.atan2(enemy.y - sy, enemy.x - sx);
+    engine.setMouseDown(true);
+    engine.update(1 / 60, 1280, 720);
+    engine.setMouseDown(false);
+    expect(enemy.hp).toBeLessThan(100);
+  });
+
+  it('prevents 2.0 plateau shooter from seeing/hitting 0.0 targets behind another 2.0 plateau while allowing 2.0-to-2.0 valley dueling', () => {
+    const map = createBlankCustomMap('雙高台對射測試', 'desert_outdoor', 24, 18);
+    map.factionSpawns.royal = [{ gx: 2, gy: 9 }];
+    map.factionSpawns.shadow = [{ gx: 21, gy: 9 }];
+    map.factionSpawns.mercenary = [{ gx: 12, gy: 15 }];
+    // West 2.0 plateau (4..6, 7..11), 0.0 valley (7..12), East 2.0 plateau (13..15, 7..11)
+    for (let gy = 7; gy <= 11; gy++) {
+      for (let gx = 4; gx <= 6; gx++) map.tileGrid[gy][gx] = { elev: 2.0, style: 'pyramid' };
+      for (let gx = 13; gx <= 15; gx++) map.tileGrid[gy][gx] = { elev: 2.0, style: 'pyramid' };
+    }
+    const engine = new TwilightEngine('royal', FACTION_CHARACTERS.royal[0], map.id, { royal: 10, shadow: 10, mercenary: 10 }, () => {}, () => {}, map);
+    const internals = engine as unknown as {
+      hasLineOfSight: (ax: number, ay: number, ae: number, bx: number, by: number, be: number, r: number) => boolean;
+      canRangedHitTarget: (ax: number, ay: number, ae: number, bx: number, by: number, be: number) => boolean;
+    };
+
+    // 2.0 plateau -> 0.0 target hugging right behind East 2.0 plateau at (16.5, 9.5) is BLOCKED
+    expect(internals.hasLineOfSight(5.5 * TILE, 9.5 * TILE, 2.0, 16.5 * TILE, 9.5 * TILE, 0, 14 * TILE)).toBe(false);
+    expect(internals.canRangedHitTarget(5.5 * TILE, 9.5 * TILE, 2.0, 16.5 * TILE, 9.5 * TILE, 0)).toBe(false);
+
+    // 2.0 plateau -> 2.0 target standing atop East 2.0 plateau at (14.5, 9.5) across the 0.0 valley IS CLEAR
+    expect(internals.hasLineOfSight(5.5 * TILE, 9.5 * TILE, 2.0, 14.5 * TILE, 9.5 * TILE, 2.0, 14 * TILE)).toBe(true);
+    expect(internals.canRangedHitTarget(5.5 * TILE, 9.5 * TILE, 2.0, 14.5 * TILE, 9.5 * TILE, 2.0)).toBe(true);
+  });
+
+  it('nerfs AI gun fire rate and enforces finite mouse turn rate before opening fire', () => {
+    const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    engine.pickups = [];
+    enemy.speed = 0;
+    // Open south lane (gy=18.5, no shrine wall between gx=8.5 and gx=12.5)
+    enemy.x = 12.5 * TILE;
+    enemy.y = 18.5 * TILE;
+    enemy.elevation = 0;
+
+    const rifle = GUNS.find((g) => g.kind === 'rifle')!;
+    enemy.weapons[0] = { type: 'gun', def: rifle, ammoInMag: rifle.magSize, reloadTimer: 0 };
+    enemy.activeHand = 0;
+    enemy.reactionTimer = 0;
+    enemy.attackCooldown = 0;
+    // Facing East (0 rad), player appears directly West (180 deg behind)
+    enemy.angle = 0;
+    enemy.lastAimAngle = 0;
+    engine.player.x = 8.5 * TILE;
+    engine.player.y = 18.5 * TILE;
+    engine.player.elevation = 0;
+    engine.player.invulnTimer = 99;
+
+    // 1. After 1 frame (1/60s), AI has NOT snapped 180 deg and CANNOT shoot backward
+    engine.beams = [];
+    engine.update(1 / 60, 1280, 720);
+    expect(Math.abs(enemy.angle)).toBeLessThan(0.5);
+    expect(engine.beams.length).toBe(0);
+
+    // 2. After completing human-like turn + reaction (~1.2s), AI fires and sets nerfed gun cooldown (> 1.5x player base interval)
+    for (let i = 0; i < 90; i++) {
+      engine.update(1 / 60, 1280, 720);
+      if (engine.beams.length > 0) break;
+    }
+    expect(engine.beams.length).toBeGreaterThan(0);
+    expect(enemy.attackCooldown).toBeGreaterThan((1 / rifle.fireRate) * 1.5);
+  });
+});
 
 

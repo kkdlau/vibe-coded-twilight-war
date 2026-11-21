@@ -39,8 +39,6 @@ function normalizeControlCode(e: KeyboardEvent): string {
         'KeyQ',
         'KeyR',
         'KeyP',
-        'Digit1',
-        'Digit2',
         'Space',
         'Escape',
       ].includes(e.code)
@@ -56,8 +54,6 @@ function normalizeControlCode(e: KeyboardEvent): string {
   if (k === 'q') return 'KeyQ';
   if (k === 'r') return 'KeyR';
   if (k === 'p') return 'KeyP';
-  if (k === '1') return 'Digit1';
-  if (k === '2') return 'Digit2';
   if (k === ' ') return 'Space';
   if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Escape') {
     return e.key;
@@ -349,16 +345,11 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
         </div>
       )}
 
-      {/* BOTTOM-LEFT: Controls & Pickup Prompt */}
+      {/* BOTTOM-LEFT: Controls */}
       {hud && p && (
         <div className="pointer-events-none fixed bottom-3 left-3 flex flex-col items-start gap-2">
-          {hud.status === 'PLAYING' && hud.nearbyPickup && (
-            <div className="bg-emerald-500 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg shadow-lg">
-              按 [Space] 拾取：{hud.nearbyPickup}
-            </div>
-          )}
           <div className="text-[11px] text-slate-200 bg-slate-950/78 px-3 py-1.5 rounded-lg border border-slate-800/90">
-            [1] 第一手 · [2] 第二手 · [Q] 切換 · [Esc] 放下武器 · [R] 裝彈 · [Space] 拾取 · [Tab] 遊戲進展 · [P] 暫停
+            [Q] 切換 · [Esc] 放下武器 · [R] 裝彈 · [Space] 拾取 · [Tab] 遊戲進展 · [P] 暫停
           </div>
         </div>
       )}

@@ -1,17 +1,29 @@
 import { CHAR_BASE_RADIUS, clamp, getMoveCheckRadius, pointInRect, resolveCircleRect } from './geometry';
-import { ArenaMap, MapBiome, TILE, biomeToDefaultFloor, createFloorGrid } from './maps';
+import {
+  ArenaMap,
+  MapBiome,
+  TILE,
+  biomeToDefaultFloor,
+  compileIglooWalls,
+  createFloorGrid,
+  getIglooCellMask,
+  makePushableIceBlock,
+} from './maps';
 import {
   AmmoSpawn,
   BridgeRect,
   BushProp,
+  CardinalDir,
   FactionId,
   FarmCropType,
   FarmTileCell,
   FloorStyle,
   GridTile,
+  IglooProp,
   Obstacle,
   ObstacleStyle,
   PlatformStyle,
+  PushableIceBlock,
   RailTrackCell,
   StairRect,
   TerrainTileCell,
@@ -61,6 +73,17 @@ export interface CustomWeaponSpawnEntry extends CustomSpawnCoord {
   weaponId: string;
 }
 
+export interface CustomIglooEntry {
+  gx: number;
+  gy: number;
+  direction: CardinalDir;
+}
+
+export interface CustomPushableIceEntry {
+  gx: number;
+  gy: number;
+}
+
 export interface CustomMapData {
   id: string;
   name: string;
@@ -72,10 +95,15 @@ export interface CustomMapData {
   tileGrid: TerrainTileCell[][];
   stairs: CustomStairEntry[];
   waterTiles: GridTile[];
+  floatingIceTiles?: GridTile[];
   bridges: CustomBridgeEntry[];
   stoneRoads: GridTile[];
   railTracks: RailTrackCell[];
   farmTiles?: FarmTileCell[];
+  iceVents?: GridTile[];
+  campfires?: GridTile[];
+  igloos?: CustomIglooEntry[];
+  pushableIceBlocks?: CustomPushableIceEntry[];
   obstacles: CustomObstacleEntry[];
   bushes: CustomSpawnCoord[];
   trees: (CustomSpawnCoord & { canopyRadius?: number; foliagePalette?: [string, string, string, string] })[];
@@ -85,19 +113,144 @@ export interface CustomMapData {
   factionSpawns: Record<FactionId, CustomSpawnCoord[]>;
 }
 
+/**
+ * 編譯期強制規格：每一種地板 (`FloorStyle`) 皆必須綁定對應的高地地形與攀爬階梯。
+ * 日後新增任何地板型別時，TypeScript 將強制要求於此註冊其高地與階梯設定。
+ */
+export interface FloorTerrainBinding {
+  floorStyle: FloorStyle;
+  floorLabel: string;
+  floorSublabel: string;
+  previewBiome: MapBiome;
+  terrainStyle: PlatformStyle;
+  terrainLabel: string;
+  terrainDesc: string;
+  stairLabel: string;
+  stairDesc: string;
+}
+
+export const FLOOR_TERRAIN_BINDINGS: Record<FloorStyle, FloorTerrainBinding> = {
+  shrine_dirt: {
+    floorStyle: 'shrine_dirt',
+    floorLabel: '江戶泥土地板',
+    floorSublabel: '古社砂礫黃土',
+    previewBiome: 'shrine_outdoor',
+    terrainStyle: 'shrine_dirt',
+    terrainLabel: '江戶土台（疊加）',
+    terrainDesc: '江戶古社夯土高台，支援逐層疊加（+1.0/層），搭配江戶土坡階梯無縫上下銜接。',
+    stairLabel: '江戶土坡階梯',
+    stairDesc: '專屬於「江戶土台」的平滑夯土坡道（所在層 +0.5），僅可貼合並指向同系高台攀登。',
+  },
+  bamboo_moss: {
+    floorStyle: 'bamboo_moss',
+    floorLabel: '嵐山林間苔土',
+    floorSublabel: '深翠密林地坪',
+    previewBiome: 'bamboo_outdoor',
+    terrainStyle: 'bamboo_moss',
+    terrainLabel: '嵐山苔台（疊加）',
+    terrainDesc: '密林深翠苔蘚土台，支援逐層疊加（+1.0/層），僅可與嵐山苔階自然相接。',
+    stairLabel: '嵐山苔階',
+    stairDesc: '專屬於「嵐山苔台」的平滑苔土坡道（所在層 +0.5），貼合高台時自動融接苔緣。',
+  },
+  desert_sand: {
+    floorStyle: 'desert_sand',
+    floorLabel: '荒野沙海地板',
+    floorSublabel: '金色乾旱細沙',
+    previewBiome: 'desert_outdoor',
+    terrainStyle: 'pyramid',
+    terrainLabel: '切石高台（疊加）',
+    terrainDesc: '遺跡砂岩切石平台，支援逐層疊加（1.0、2.0…）；跨格物件須置於等高格位。',
+    stairLabel: '切石石階',
+    stairDesc: '專屬於「切石高台」的砂岩石砌階梯（所在層 +0.5），銜接高台邊緣時自動消除多餘石縫。',
+  },
+  castle_stone: {
+    floorStyle: 'castle_stone',
+    floorLabel: '聖殿石磚地板',
+    floorSublabel: '古堡淺灰磚石',
+    previewBiome: 'castle_indoor',
+    terrainStyle: 'castle_dais',
+    terrainLabel: '聖殿石台（疊加）',
+    terrainDesc: '歐式古堡青灰大理石高台，支援逐層疊加（+1.0/層），與聖殿石階無縫接軌。',
+    stairLabel: '聖殿石階',
+    stairDesc: '專屬於「聖殿石台」的大理石階梯（所在層 +0.5），僅可銜接聖殿石台。',
+  },
+  warehouse_steel: {
+    floorStyle: 'warehouse_steel',
+    floorLabel: '東港鋼板地板',
+    floorSublabel: '深藍工業地坪',
+    previewBiome: 'warehouse_indoor',
+    terrainStyle: 'warehouse_steel',
+    terrainLabel: '鋼構高台（疊加）',
+    terrainDesc: '工業貨倉鉚接鋼板高台，支援逐層疊加（+1.0/層），邊緣附帶防滑黃框。',
+    stairLabel: '鋼構斜階',
+    stairDesc: '專屬於「鋼構高台」的防滑鐵板階梯（所在層 +0.5），僅可貼合鋼構高台登台。',
+  },
+  grass_ground: {
+    floorStyle: 'grass_ground',
+    floorLabel: '青綠草坪地板',
+    floorSublabel: '鮮綠柔軟草地',
+    previewBiome: 'shrine_outdoor',
+    terrainStyle: 'hill',
+    terrainLabel: '土丘高地（疊加）',
+    terrainDesc: '青翠山丘高地，支援任意多層疊加（1.0、2.0…），並可承載水面、竹林或箱體。',
+    stairLabel: '土坡階梯',
+    stairDesc: '專屬於「土丘高地」的平滑自然土坡（所在層 +0.5），與草丘接觸面無縫融接。',
+  },
+  glacier_ice: {
+    floorStyle: 'glacier_ice',
+    floorLabel: '極地冰川地板',
+    floorSublabel: '萬年玄冰雪原',
+    previewBiome: 'glacier_outdoor',
+    terrainStyle: 'glacier_ice',
+    terrainLabel: '極地冰川高地（疊加）',
+    terrainDesc: '晶瑩冰脊凍土高地，支援逐層疊加（+1.0/層），僅可搭配極地冰川階梯攀登。',
+    stairLabel: '極地冰川階梯',
+    stairDesc: '專屬於「極地冰川高地」的平滑冰雪斜坡（所在層 +0.5），貼合冰川高台自然融合。',
+  },
+};
+
+export interface StandaloneTerrainSpec {
+  id: 'shrine_floor' | 'mud_pit';
+  terrainStyle: PlatformStyle;
+  terrainLabel: string;
+  heightLabel: string;
+  terrainDesc: string;
+  stairLabel: string;
+  stairDesc: string;
+}
+
+export const STANDALONE_TERRAIN_SPECS: StandaloneTerrainSpec[] = [
+  {
+    id: 'shrine_floor',
+    terrainStyle: 'shrine_floor',
+    terrainLabel: '木板神社高台（疊加）',
+    heightLabel: '每層 +1.0',
+    terrainDesc: '斜面木板架高神社迴廊，支援多層疊加（+1.0/層），須搭配木板神社階梯。',
+    stairLabel: '木板神社階梯',
+    stairDesc: '專屬於「木板神社高台」的朱木階梯（所在層 +0.5），貼合木台時自動無縫接軌。',
+  },
+  {
+    id: 'mud_pit',
+    terrainStyle: 'mud_pit',
+    terrainLabel: '泥坑窪地（下挖）',
+    heightLabel: '每層 -1.0',
+    terrainDesc: '向下凹陷的泥濘坑地，支援逐層深挖（-1.0、-2.0…）；平地子彈越過泥坑不受低窪阻擋。',
+    stairLabel: '泥坡階梯',
+    stairDesc: '專屬於「泥坑窪地」的坑內平滑泥坡（所在層 +0.5），須置於泥坑格位內並朝向上層出口。',
+  },
+];
+
 export const FLOOR_STYLE_OPTIONS: {
   id: FloorStyle;
   label: string;
   sublabel: string;
   previewBiome: MapBiome;
-}[] = [
-  { id: 'shrine_dirt', label: '江戶泥土地板', sublabel: '古社砂礫黃土', previewBiome: 'shrine_outdoor' },
-  { id: 'bamboo_moss', label: '嵐山林間苔土', sublabel: '深翠密林地坪', previewBiome: 'bamboo_outdoor' },
-  { id: 'desert_sand', label: '荒野沙海地板', sublabel: '金色乾旱細沙', previewBiome: 'desert_outdoor' },
-  { id: 'castle_stone', label: '聖殿石磚地板', sublabel: '古堡淺灰磚石', previewBiome: 'castle_indoor' },
-  { id: 'warehouse_steel', label: '東港鋼板地板', sublabel: '深藍工業地坪', previewBiome: 'warehouse_indoor' },
-  { id: 'grass_ground', label: '青綠草坪地板', sublabel: '鮮綠柔軟草地', previewBiome: 'shrine_outdoor' },
-];
+}[] = (Object.values(FLOOR_TERRAIN_BINDINGS) as FloorTerrainBinding[]).map((b) => ({
+  id: b.floorStyle,
+  label: b.floorLabel,
+  sublabel: b.floorSublabel,
+  previewBiome: b.previewBiome,
+}));
 
 export const BIOME_OPTIONS: { id: MapBiome; label: string; environment: '野外' | '室內' }[] = [
   { id: 'shrine_outdoor', label: '江戶・古社泥土', environment: '野外' },
@@ -105,23 +258,11 @@ export const BIOME_OPTIONS: { id: MapBiome; label: string; environment: '野外'
   { id: 'desert_outdoor', label: '荒野・沙海黃土', environment: '野外' },
   { id: 'castle_indoor', label: '聖殿・石磚地坪', environment: '室內' },
   { id: 'warehouse_indoor', label: '東港・鋼板地坪', environment: '室內' },
+  { id: 'glacier_outdoor', label: '極地・裂隙冰川', environment: '野外' },
 ];
 
 export function floorStyleToBiome(floor: FloorStyle): MapBiome {
-  switch (floor) {
-    case 'castle_stone':
-      return 'castle_indoor';
-    case 'desert_sand':
-      return 'desert_outdoor';
-    case 'warehouse_steel':
-      return 'warehouse_indoor';
-    case 'bamboo_moss':
-      return 'bamboo_outdoor';
-    case 'shrine_dirt':
-    case 'grass_ground':
-    default:
-      return 'shrine_outdoor';
-  }
+  return FLOOR_TERRAIN_BINDINGS[floor]?.previewBiome ?? 'shrine_outdoor';
 }
 
 export interface TreeFoliagePreset {
@@ -203,6 +344,116 @@ export function hasUniformCellElevation(
   return true;
 }
 
+/**
+ * 檢查冰屋（5×5 外框內精確 3/5/5/5/3 共 21 格）之所有實際佔用格是否皆在圖內且地形高度完全一致
+ */
+export function hasUniformIglooElevation(
+  tileGrid: TerrainTileCell[][],
+  gx: number,
+  gy: number,
+  direction: CardinalDir
+): boolean {
+  const rows = tileGrid.length;
+  const cols = tileGrid[0]?.length ?? 0;
+  const { occupied } = getIglooCellMask(gx, gy, direction);
+  if (occupied.length === 0) return false;
+  let firstElev: number | null = null;
+  for (const cell of occupied) {
+    if (cell.gx < 0 || cell.gx >= cols || cell.gy < 0 || cell.gy >= rows) return false;
+    const elev = tileGrid[cell.gy][cell.gx].elev;
+    if (firstElev === null) {
+      firstElev = elev;
+    } else if (Math.abs(elev - firstElev) > 0.001) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function normalizeTerrainStyle(style?: PlatformStyle): PlatformStyle | null {
+  if (!style || style === 'default' || style === 'grass_ground' || style === 'rail_track') return null;
+  if (style === 'wooden_plank') return 'shrine_floor';
+  return style;
+}
+
+const STAIR_DIR_DELTA: Record<'north' | 'south' | 'east' | 'west', [number, number]> = {
+  north: [0, -1],
+  east: [1, 0],
+  south: [0, 1],
+  west: [-1, 0],
+};
+
+/**
+ * 嚴格檢驗地形階梯是否放置並指向「同一系地形」：
+ * - 正向地形階梯（土坡、切石、神社木板、冰川等）：必須從 curElev (0 或同系 >=1) 指向 curElev + 1.0 且樣式完全相同的相鄰高台
+ * - 泥坑階梯 ('mud_pit')：必須位於負層泥坑格位 (curElev <= -1.0, mud_pit) 並指向 curElev + 1.0 的出口（0.0 平地或上層泥坑）
+ * - 物件層的「木條階梯踏台 ('default')」則不受地形樣式鎖定
+ */
+export function canPlaceTerrainStairAt(
+  tileGrid: TerrainTileCell[][],
+  gx: number,
+  gy: number,
+  stairStyle: PlatformStyle | undefined,
+  direction: 'north' | 'south' | 'east' | 'west'
+): boolean {
+  const rows = tileGrid.length;
+  const cols = tileGrid[0]?.length ?? 0;
+  if (gx < 0 || gy < 0 || gx >= cols || gy >= rows) return false;
+  const normStair = normalizeTerrainStyle(stairStyle);
+  if (!normStair) return true;
+
+  const [dx, dy] = STAIR_DIR_DELTA[direction];
+  const nx = gx + dx;
+  const ny = gy + dy;
+  if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) return false;
+
+  const cur = tileGrid[gy][gx];
+  const curStyle = normalizeTerrainStyle(cur.style);
+  const target = tileGrid[ny][nx];
+  const targetStyle = normalizeTerrainStyle(target.style);
+
+  if (normStair === 'mud_pit') {
+    return (
+      cur.elev <= -1.0 &&
+      curStyle === 'mud_pit' &&
+      Math.abs(target.elev - (cur.elev + 1.0)) <= 0.01 &&
+      (Math.abs(target.elev) <= 0.01 || targetStyle === 'mud_pit')
+    );
+  }
+
+  return (
+    cur.elev >= 0 &&
+    (cur.elev < 1.0 || curStyle === normStair) &&
+    Math.abs(target.elev - (cur.elev + 1.0)) <= 0.01 &&
+    targetStyle === normStair
+  );
+}
+
+/**
+ * 嘗試以偏好的方向優先，尋找與該格相接之同系高台／泥坑方向（找不到則回傳 null）
+ */
+export function findMatchingStairDirection(
+  tileGrid: TerrainTileCell[][],
+  gx: number,
+  gy: number,
+  stairStyle: PlatformStyle | undefined,
+  preferredDir: 'north' | 'south' | 'east' | 'west'
+): 'north' | 'south' | 'east' | 'west' | null {
+  const order: ('north' | 'south' | 'east' | 'west')[] = [
+    preferredDir,
+    'north',
+    'east',
+    'south',
+    'west',
+  ];
+  for (const dir of order) {
+    if (canPlaceTerrainStairAt(tileGrid, gx, gy, stairStyle, dir)) {
+      return dir;
+    }
+  }
+  return null;
+}
+
 export function getIntrinsicObstacleHeight(
   kind: 'crate' | 'wall',
   style?: ObstacleStyle,
@@ -258,10 +509,15 @@ export function createBlankCustomMap(
     tileGrid,
     stairs: [],
     waterTiles: [],
+    floatingIceTiles: [],
     bridges: [],
     stoneRoads: [],
     railTracks: [],
     farmTiles: [],
+    iceVents: [],
+    campfires: [],
+    igloos: [],
+    pushableIceBlocks: [],
     obstacles: [],
     bushes: [],
     trees: [],
@@ -278,9 +534,14 @@ export function createBlankCustomMap(
 
 export function cloneCustomMap(data: CustomMapData): CustomMapData {
   const cloned = JSON.parse(JSON.stringify(data)) as CustomMapData;
+  cloned.floatingIceTiles = cloned.floatingIceTiles || [];
   cloned.stoneRoads = cloned.stoneRoads || [];
   cloned.railTracks = cloned.railTracks || [];
   cloned.farmTiles = cloned.farmTiles || [];
+  cloned.iceVents = cloned.iceVents || [];
+  cloned.campfires = cloned.campfires || [];
+  cloned.igloos = cloned.igloos || [];
+  cloned.pushableIceBlocks = cloned.pushableIceBlocks || [];
   cloned.floorGrid = resolveNormalizedFloorGrid(cloned);
   return cloned;
 }
@@ -314,10 +575,15 @@ export function resizeCustomMap(data: CustomMapData, nextCols: number, nextRows:
     tileGrid,
     stairs: data.stairs.filter((s) => inCell(s.gx, s.gy, s.gw ?? 1, s.gh ?? 1)),
     waterTiles: data.waterTiles.filter((w) => inCell(w.gx, w.gy)),
+    floatingIceTiles: (data.floatingIceTiles || []).filter((f) => inCell(f.gx, f.gy)),
     bridges: data.bridges.filter((b) => inCell(b.gx, b.gy, b.gw, b.gh)),
     stoneRoads: (data.stoneRoads || []).filter((r) => inCell(r.gx, r.gy)),
     railTracks: (data.railTracks || []).filter((r) => inCell(r.gx, r.gy)),
     farmTiles: (data.farmTiles || []).filter((f) => inCell(f.gx, f.gy)),
+    iceVents: (data.iceVents || []).filter((iv) => inCell(iv.gx, iv.gy)),
+    campfires: (data.campfires || []).filter((cf) => inCell(cf.gx, cf.gy)),
+    igloos: (data.igloos || []).filter((ig) => inCell(ig.gx, ig.gy, 5, 5)),
+    pushableIceBlocks: (data.pushableIceBlocks || []).filter((pb) => inCell(pb.gx, pb.gy, 2, 2)),
     obstacles: data.obstacles.filter((o) => inCell(o.gx, o.gy, o.gw, o.gh)),
     bushes: data.bushes.filter((b) => inCell(b.gx, b.gy)),
     trees: data.trees.filter((t) => inCell(t.gx, t.gy)),
@@ -411,25 +677,78 @@ export function buildArenaMapFromCustom(data: CustomMapData): ArenaMap {
   }
   const farmTiles = Array.from(farmMap.values());
 
-  const obstacles: Obstacle[] = data.obstacles.map((o) => {
-    const baseElev = tileGrid[clamp(o.gy, 0, rows - 1)]?.[clamp(o.gx, 0, cols - 1)]?.elev ?? 0;
-    const intrinsic = getIntrinsicObstacleHeight(o.kind, o.style, o.elevation);
-    const totalElev =
-      o.kind === 'wall'
-        ? Math.max(10, Math.round((baseElev + 10) * 10) / 10)
-        : Math.round((baseElev + intrinsic) * 10) / 10;
-    return {
-      x: o.gx * TILE,
-      y: o.gy * TILE,
-      w: o.gw * TILE,
-      h: o.gh * TILE,
-      elevation: totalElev,
-      kind: o.kind,
-      style: o.style,
-      colorVariant: o.colorVariant,
-      direction: o.direction,
-    };
-  });
+  const iceVentMap = new Map<string, GridTile>();
+  for (const iv of data.iceVents || []) {
+    if (iv.gx >= 0 && iv.gx < cols && iv.gy >= 0 && iv.gy < rows) {
+      iceVentMap.set(`${iv.gx},${iv.gy}`, { gx: iv.gx, gy: iv.gy });
+    }
+  }
+  const iceVents = Array.from(iceVentMap.values());
+
+  const floatingIceTiles: GridTile[] = [];
+  const floatingIceTileKeys = new Set<string>();
+  for (const fi of data.floatingIceTiles || []) {
+    if (fi.gx < 0 || fi.gx >= cols || fi.gy < 0 || fi.gy >= rows) continue;
+    const key = `${fi.gx},${fi.gy}`;
+    if (!waterTileKeys.has(key) || floatingIceTileKeys.has(key)) continue;
+    floatingIceTileKeys.add(key);
+    floatingIceTiles.push({ gx: fi.gx, gy: fi.gy });
+  }
+
+  const campfireMap = new Map<string, GridTile>();
+  for (const cf of data.campfires || []) {
+    if (cf.gx >= 0 && cf.gx < cols && cf.gy >= 0 && cf.gy < rows) {
+      campfireMap.set(`${cf.gx},${cf.gy}`, { gx: cf.gx, gy: cf.gy });
+    }
+  }
+  const campfires = Array.from(campfireMap.values());
+
+  const igloos: IglooProp[] = (data.igloos || [])
+    .filter((ig) => ig.gx >= 0 && ig.gy >= 0 && ig.gx + 5 <= cols && ig.gy + 5 <= rows)
+    .map((ig) => {
+      const { entrance } = getIglooCellMask(ig.gx, ig.gy, ig.direction);
+      const baseElev = tileGrid[clamp(entrance.gy, 0, rows - 1)]?.[clamp(entrance.gx, 0, cols - 1)]?.elev ?? 0;
+      return {
+        x: ig.gx * TILE,
+        y: ig.gy * TILE,
+        w: 5 * TILE,
+        h: 5 * TILE,
+        direction: ig.direction,
+        elevation: baseElev,
+      };
+    });
+
+  const pushableIceBlocks: PushableIceBlock[] = (data.pushableIceBlocks || [])
+    .filter((pb) => pb.gx >= 0 && pb.gy >= 0 && pb.gx + 2 <= cols && pb.gy + 2 <= rows)
+    .map((pb, idx) => {
+      const baseElev = tileGrid[clamp(pb.gy, 0, rows - 1)]?.[clamp(pb.gx, 0, cols - 1)]?.elev ?? 0;
+      return makePushableIceBlock(`custom_push_${idx}_${pb.gx}_${pb.gy}`, pb.gx, pb.gy, baseElev);
+    });
+
+  const obstacles: Obstacle[] = data.obstacles
+    .filter((o) => o.style !== 'igloo_wall')
+    .map((o) => {
+      const baseElev = tileGrid[clamp(o.gy, 0, rows - 1)]?.[clamp(o.gx, 0, cols - 1)]?.elev ?? 0;
+      const intrinsic = getIntrinsicObstacleHeight(o.kind, o.style, o.elevation);
+      const totalElev =
+        o.kind === 'wall'
+          ? Math.max(10, Math.round((baseElev + 10) * 10) / 10)
+          : Math.round((baseElev + intrinsic) * 10) / 10;
+      return {
+        x: o.gx * TILE,
+        y: o.gy * TILE,
+        w: o.gw * TILE,
+        h: o.gh * TILE,
+        elevation: totalElev,
+        kind: o.kind,
+        style: o.style,
+        colorVariant: o.colorVariant,
+        direction: o.direction,
+      };
+    });
+  for (const ig of igloos) {
+    obstacles.push(...compileIglooWalls(ig));
+  }
 
   const bushes: BushProp[] = data.bushes.map((b) => ({
     x: b.gx * TILE,
@@ -487,10 +806,16 @@ export function buildArenaMapFromCustom(data: CustomMapData): ArenaMap {
     stairs,
     waterTiles,
     waterTileKeys,
+    floatingIceTiles,
+    floatingIceTileKeys,
     bridges,
     stoneRoads,
     railTracks,
     farmTiles,
+    iceVents,
+    campfires,
+    igloos,
+    pushableIceBlocks,
     obstacles,
     bushes,
     trees,
@@ -536,6 +861,7 @@ export function arenaMapToCustomData(map: ArenaMap, customName?: string): Custom
       style: s.style,
     })),
     waterTiles: map.waterTiles.map((w) => ({ gx: w.gx, gy: w.gy })),
+    floatingIceTiles: (map.floatingIceTiles || []).map((f) => ({ gx: f.gx, gy: f.gy })),
     bridges: map.bridges.map((b) => ({
       gx: Math.round(b.x / TILE),
       gy: Math.round(b.y / TILE),
@@ -547,25 +873,38 @@ export function arenaMapToCustomData(map: ArenaMap, customName?: string): Custom
     stoneRoads: map.stoneRoads.map((r) => ({ gx: r.gx, gy: r.gy })),
     railTracks: map.railTracks.map((r) => ({ gx: r.gx, gy: r.gy, orientation: r.orientation })),
     farmTiles: (map.farmTiles || []).map((f) => ({ gx: f.gx, gy: f.gy, crop: f.crop })),
-    obstacles: map.obstacles.map((o) => {
-      const gx = Math.round(o.x / TILE);
-      const gy = Math.round(o.y / TILE);
-      const baseElev = map.tileGrid[clamp(gy, 0, map.rows - 1)]?.[clamp(gx, 0, map.cols - 1)]?.elev ?? 0;
-      return {
-        gx,
-        gy,
-        gw: Math.max(1, Math.round(o.w / TILE)),
-        gh: Math.max(1, Math.round(o.h / TILE)),
-        elevation:
-          o.kind === 'wall'
-            ? 10
-            : getIntrinsicObstacleHeight(o.kind, o.style, Math.max(0.5, o.elevation - baseElev)),
-        kind: o.kind,
-        style: o.style,
-        colorVariant: o.colorVariant,
-        direction: o.direction,
-      };
-    }),
+    iceVents: (map.iceVents || []).map((iv) => ({ gx: iv.gx, gy: iv.gy })),
+    campfires: (map.campfires || []).map((cf) => ({ gx: cf.gx, gy: cf.gy })),
+    igloos: (map.igloos || []).map((ig) => ({
+      gx: Math.round(ig.x / TILE),
+      gy: Math.round(ig.y / TILE),
+      direction: ig.direction,
+    })),
+    pushableIceBlocks: (map.pushableIceBlocks || []).map((pb) => ({
+      gx: Math.round(pb.x / TILE),
+      gy: Math.round(pb.y / TILE),
+    })),
+    obstacles: map.obstacles
+      .filter((o) => o.style !== 'igloo_wall')
+      .map((o) => {
+        const gx = Math.round(o.x / TILE);
+        const gy = Math.round(o.y / TILE);
+        const baseElev = map.tileGrid[clamp(gy, 0, map.rows - 1)]?.[clamp(gx, 0, map.cols - 1)]?.elev ?? 0;
+        return {
+          gx,
+          gy,
+          gw: Math.max(1, Math.round(o.w / TILE)),
+          gh: Math.max(1, Math.round(o.h / TILE)),
+          elevation:
+            o.kind === 'wall'
+              ? 10
+              : getIntrinsicObstacleHeight(o.kind, o.style, Math.max(0.5, o.elevation - baseElev)),
+          kind: o.kind,
+          style: o.style,
+          colorVariant: o.colorVariant,
+          direction: o.direction,
+        };
+      }),
     bushes: map.bushes.map((b) => ({
       gx: Math.round(b.x / TILE),
       gy: Math.round(b.y / TILE),
@@ -625,6 +964,9 @@ function getArenaWalkableElevation(arena: ArenaMap, x: number, y: number): numbe
   for (const obs of arena.obstacles) {
     if (pointInRect(x, y, obs) && obs.elevation > best) best = obs.elevation;
   }
+  for (const blk of arena.pushableIceBlocks || []) {
+    if (pointInRect(x, y, blk) && blk.elevation > best) best = blk.elevation;
+  }
   return best;
 }
 
@@ -635,7 +977,10 @@ function isArenaGroundWalkable(arena: ArenaMap, x: number, y: number): boolean {
   }
   const gx = Math.floor(x / TILE);
   const gy = Math.floor(y / TILE);
-  return !arena.waterTileKeys.has(`${gx},${gy}`);
+  const key = `${gx},${gy}`;
+  if (!arena.waterTileKeys.has(key)) return true;
+  if (arena.floatingIceTileKeys?.has(key)) return true;
+  return Boolean(arena.floatingIceTiles?.some((f) => f.gx === gx && f.gy === gy));
 }
 
 function canStandAtPoint(arena: ArenaMap, x: number, y: number, curElev: number): boolean {
@@ -689,6 +1034,43 @@ export function validateCustomMap(data: CustomMapData): CustomMapValidationResul
   for (const br of data.bridges) {
     if ((br.gw > 1 || br.gh > 1) && !hasUniformCellElevation(data.tileGrid, br.gx, br.gy, br.gw, br.gh)) {
       errors.push(`木橋 (${br.gx}, ${br.gy}) ${br.gw}×${br.gh} 所跨各格的地形高度不一致`);
+      break;
+    }
+  }
+  const waterSet = new Set(data.waterTiles.map((w) => `${w.gx},${w.gy}`));
+  for (const fi of data.floatingIceTiles || []) {
+    if (!waterSet.has(`${fi.gx},${fi.gy}`)) {
+      errors.push(`浮冰 (${fi.gx}, ${fi.gy}) 只能放置於水域格位之上`);
+      break;
+    }
+  }
+  for (const ig of data.igloos || []) {
+    if (!hasUniformIglooElevation(data.tileGrid, ig.gx, ig.gy, ig.direction)) {
+      errors.push(`冰屋 (${ig.gx}, ${ig.gy}) 所佔 3/5/5/5/3 各格地形高度不一致或超出邊界`);
+      break;
+    }
+  }
+  for (const pb of data.pushableIceBlocks || []) {
+    if (!hasUniformCellElevation(data.tileGrid, pb.gx, pb.gy, 2, 2)) {
+      errors.push(`可推動冰塊 (${pb.gx}, ${pb.gy}) 2×2 所跨各格的地形高度不一致`);
+      break;
+    }
+  }
+  for (const st of data.stairs) {
+    if (!normalizeTerrainStyle(st.style)) continue;
+    const gw = st.gw ?? 1;
+    const gh = st.gh ?? 1;
+    let stairValid = true;
+    for (let sy = st.gy; sy < st.gy + gh && stairValid; sy++) {
+      for (let sx = st.gx; sx < st.gx + gw; sx++) {
+        if (!canPlaceTerrainStairAt(data.tileGrid, sx, sy, st.style, st.direction)) {
+          stairValid = false;
+          break;
+        }
+      }
+    }
+    if (!stairValid) {
+      errors.push(`階梯 (${st.gx}, ${st.gy}) 必須貼合並指向對應樣式之高台／泥坑上層`);
       break;
     }
   }
@@ -824,9 +1206,14 @@ export function loadCustomMaps(): CustomMapData[] {
       .map((item) => ({
         ...item,
         floorGrid: resolveNormalizedFloorGrid(item),
+        floatingIceTiles: Array.isArray(item.floatingIceTiles) ? item.floatingIceTiles : [],
         stoneRoads: Array.isArray(item.stoneRoads) ? item.stoneRoads : [],
         railTracks: Array.isArray(item.railTracks) ? item.railTracks : [],
         farmTiles: Array.isArray(item.farmTiles) ? item.farmTiles : [],
+        iceVents: Array.isArray(item.iceVents) ? item.iceVents : [],
+        campfires: Array.isArray(item.campfires) ? item.campfires : [],
+        igloos: Array.isArray(item.igloos) ? item.igloos : [],
+        pushableIceBlocks: Array.isArray(item.pushableIceBlocks) ? item.pushableIceBlocks : [],
       }));
   } catch {
     return [];

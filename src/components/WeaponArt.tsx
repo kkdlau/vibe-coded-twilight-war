@@ -532,7 +532,7 @@ export const FactionLogoSvg: React.FC<{
  * 戰鬥左上方有時效主動技能矩陣圖示 SVG
  */
 export const SkillIconSvg: React.FC<{
-  id: 'royalShield' | 'eagleEye' | 'shadowClone' | 'vampire' | 'shrink' | 'giant';
+  id: 'royalShield' | 'eagleEye' | 'shadowClone' | 'vampire' | 'shrink' | 'giant' | 'frozen';
   className?: string;
 }> = ({ id, className = 'w-7 h-7' }) => {
   switch (id) {
@@ -596,6 +596,19 @@ export const SkillIconSvg: React.FC<{
           <circle cx="18" cy="18" r="9.5" fill="#EA580C" stroke="#FED7AA" strokeWidth="2.2" />
           <path d="M12 12 L6 6 M6 10 V6 H10" stroke="#FDBA74" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
           <path d="M24 24 L30 30 M30 26 V30 H26" stroke="#FDBA74" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
+    case 'frozen':
+      return (
+        <svg viewBox="0 0 36 36" className={className} fill="none">
+          <circle cx="18" cy="18" r="11" fill="#0369A1" stroke="#BAE6FD" strokeWidth="2" />
+          <path
+            d="M18 8 V28 M9.3 13 L26.7 23 M26.7 13 L9.3 23"
+            stroke="#E0F2FE"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+          />
+          <circle cx="18" cy="18" r="3" fill="#FFFFFF" />
         </svg>
       );
   }

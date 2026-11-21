@@ -41,12 +41,28 @@ export const GUNFIRE_ANIMATION_SECONDS = 0.14;
 export const RESPAWN_DELAY_SECONDS = 2.5;
 
 export const AI_COMBAT = {
-  trooper: { reactionSeconds: 0.55, preferredRange: 205 },
-  rusher: { reactionSeconds: 0.36, preferredRange: 65 },
-  sniper: { reactionSeconds: 0.78, preferredRange: 300 },
-  phantom: { reactionSeconds: 0.28, preferredRange: 110 },
-  heavy: { reactionSeconds: 0.68, preferredRange: 165 },
-} satisfies Record<EnemyArchetype, { reactionSeconds: number; preferredRange: number }>;
+  trooper: { reactionSeconds: 0.58, preferredRange: 205, aimTurnSpeed: 5.0 },
+  rusher: { reactionSeconds: 0.40, preferredRange: 65, aimTurnSpeed: 6.2 },
+  sniper: { reactionSeconds: 0.78, preferredRange: 300, aimTurnSpeed: 4.2 },
+  phantom: { reactionSeconds: 0.34, preferredRange: 110, aimTurnSpeed: 6.4 },
+  heavy: { reactionSeconds: 0.70, preferredRange: 165, aimTurnSpeed: 4.0 },
+} satisfies Record<EnemyArchetype, { reactionSeconds: number; preferredRange: number; aimTurnSpeed: number }>;
+
+export const AI_GUN_AIM = {
+  /** 模擬玩家手持滑鼠點擊節奏，電腦槍械射擊間隔倍率（> 1 表示降速） */
+  fireIntervalMultByKind: {
+    pistol: 1.55,
+    rifle: 1.85,
+    shotgun: 1.50,
+    sniper: 1.45,
+  } satisfies Record<GunKind, number>,
+  /** 模擬玩家手動跟槍與手抖散射，避免機器人式超高準度 */
+  spreadMult: 1.65,
+  /** 模擬鼠標微幅偏擺最大角度（弧度） */
+  aimWobbleRad: 0.11,
+  /** 轉向目標至該角度容差內（弧度）才允許開槍 */
+  fireAngleToleranceRad: 0.28,
+};
 
 
 export const AI_PATROL = {
