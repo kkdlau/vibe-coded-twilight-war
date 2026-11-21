@@ -10,8 +10,8 @@ const FOOTSTEP_MIX: Record<FootstepSurface, { filter: number; duration: number; 
 };
 
 const SHOT_MIX: Record<GunKind, { rate: number; lowpass: number; gain: number }> = {
-  pistol: { rate: 1, lowpass: 16000, gain: 0.48 },
-  rifle: { rate: 0.88, lowpass: 10500, gain: 0.50 },
+  pistol: { rate: 0.97, lowpass: 7600, gain: 0.48 },
+  rifle: { rate: 0.83, lowpass: 5200, gain: 0.50 },
   shotgun: { rate: 0.66, lowpass: 4500, gain: 0.55 },
   sniper: { rate: 0.75, lowpass: 13500, gain: 0.52 },
 };
@@ -193,8 +193,15 @@ class SoundEngine {
   }
 
   meleeReady() {
-    this.playNoise(0.10, 0.16, 2050);
-    this.playTone(238, 94, 0.15, 'triangle', 0.13);
+    this.playNoise(0.17, 0.13, 1350);
+    this.playTone(218, 207, 0.19, 'sine', 0.17);
+    this.playTone(326, 306, 0.26, 'triangle', 0.11, 0.085);
+    this.playTone(106, 53, 0.22, 'sine', 0.12, 0.08);
+  }
+
+  shieldBash() {
+    this.playNoise(0.11, 0.15, 980);
+    this.playTone(98, 42, 0.1, 'sine', 0.08);
   }
 
   slash(heavy = false) {
@@ -208,6 +215,11 @@ class SoundEngine {
 
   switchWeapon(comboCancel = false) {
     this.playNoise(0.05, comboCancel ? 0.095 : 0.06, 2600);
+  }
+
+  emptyGun() {
+    this.playNoise(0.065, 0.20, 2700);
+    this.playNoise(0.04, 0.11, 1400, 0.05);
   }
 
   reload(kind: GunKind, cue: ReloadCue) {

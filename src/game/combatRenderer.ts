@@ -1,5 +1,6 @@
 import { clamp } from './geometry';
-import { GUNFIRE_ANIMATION_SECONDS } from './tuning';
+import { drawShadowForms } from './skillRenderer';
+import { EAGLE_EYE_DURATION, GUNFIRE_ANIMATION_SECONDS, ROYAL_SHIELD_PADDING } from './tuning';
 import {
   BeamTracer,
   CharacterSkin,
@@ -8,7 +9,7 @@ import {
   MeleeKind,
   Particle,
   PickupItem,
-  Projectile,
+  ShadowDodge,
   SlashEffect,
 } from './types';
 
@@ -34,7 +35,9 @@ export interface CharacterRenderParams {
   attackAnimProgress?: number;
   attackAnimKind?: MeleeKind | null;
   gunfireTimer?: number;
-  isPhantomClone?: boolean;
+  eagleEyeRemaining?: number;
+  shadowDodge?: ShadowDodge;
+  morphScale?: number;
 }
 
 export function drawOutlinedText(
@@ -46,12 +49,14 @@ export function drawOutlinedText(
   size = 12,
   align: CanvasTextAlign = 'left',
   strokeColor = 'rgba(0, 0, 0, 0.85)',
-  fontFamily = '"Noto Sans TC", "JetBrains Mono", sans-serif'
+  fontFamily = '"Noto Sans TC", "JetBrains Mono", sans-serif',
+  weight = 700,
+  outlineWidth = 3.2
 ) {
   ctx.save();
-  ctx.font = `700 ${size}px ${fontFamily}`;
+  ctx.font = `${weight} ${size}px ${fontFamily}`;
   ctx.textAlign = align;
-  ctx.lineWidth = 3.2;
+  ctx.lineWidth = outlineWidth;
   ctx.strokeStyle = strokeColor;
   ctx.strokeText(text, x, y);
   ctx.fillStyle = color;
@@ -382,19 +387,186 @@ export function drawPickup(ctx: CanvasRenderingContext2D, pk: PickupItem) {
       ctx.strokeRect(-13, -2.5, 11, 5);
     }
   } else if (pk.kind === 'ammo') {
-    const bobY = Math.sin(pk.bobPhase) * 2;
-    ctx.translate(0, bobY);
-    ctx.fillStyle = '#1E3A8A';
-    ctx.fillRect(-9, -7, 18, 14);
-    ctx.strokeStyle = '#93C5FD';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+    ctx.beginPath();
+    ctx.ellipse(0, 8, 16, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.translate(0, Math.sin(pk.bobPhase) * 1.8);
+
+    // Olive ammo case with a lid, latch and yellow identification stripe.
+    ctx.strokeStyle = '#111909';
     ctx.lineWidth = 2;
-    ctx.strokeRect(-9, -7, 18, 14);
-    ctx.fillStyle = '#FBBF24';
-    ctx.fillRect(-4, -4, 2, 8);
-    ctx.fillRect(-1, -4, 2, 8);
-    ctx.fillRect(2, -4, 2, 8);
+    ctx.fillStyle = '#414D2B';
+    ctx.beginPath();
+    ctx.roundRect(-14, -6, 28, 17, 3);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#68734A';
+    ctx.beginPath();
+    ctx.roundRect(-15, -10, 30, 9, 3);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#D6B853';
+    ctx.fillRect(-10, 4, 20, 3);
+    ctx.fillStyle = '#B2B8A0';
+    ctx.fillRect(-3, -4, 6, 7);
+    ctx.strokeRect(-3, -4, 6, 7);
   }
 
+  ctx.restore();
+}
+
+function drawShieldFlow(ctx: CanvasRenderingContext2D, radius: number, time: number) {
+  ctx.save();
+  ctx.clip();
+  const driftX = Math.cos(time * 0.9) * radius * 0.56;
+  const driftY = Math.sin(time * 0.9) * radius * 0.39;
+  const haze = ctx.createRadialGradient(driftX, driftY, 0, driftX, driftY, radius * 0.74);
+  haze.addColorStop(0, 'rgba(116, 199, 211, 0.21)');
+  haze.addColorStop(1, 'rgba(116, 199, 211, 0)');
+  ctx.fillStyle = haze;
+  ctx.fillRect(-radius, -radius, radius * 2, radius * 2);
+
+  const tilt = 0.54 + Math.sin(time * 0.48) * 0.22;
+  for (let i = 0; i < 7; i++) {
+    const latitude = (i % 3 - 1) * 0.54;
+    const band = radius * Math.cos(latitude) * 0.95;
+    const height = radius * Math.sin(latitude) * 0.95;
+    const longitude = time * (0.86 + i * 0.055) + i * 2.4;
+    const depth = Math.sin(longitude);
+    const opacity = (0.16 + 0.35 * (1 + depth) / 2) * (0.82 + 0.18 * Math.sin(time * 2 + i));
+    const headX = Math.cos(longitude) * band;
+    const headY = height * Math.cos(tilt) + depth * band * Math.sin(tilt);
+    ctx.lineCap = 'round';
+    for (let j = 3; j >= 0; j--) {
+      const start = longitude - (j + 1) * 0.17;
+      const end = longitude - j * 0.17;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(start) * band, height * Math.cos(tilt) + Math.sin(start) * band * Math.sin(tilt));
+      ctx.lineTo(Math.cos(end) * band, height * Math.cos(tilt) + Math.sin(end) * band * Math.sin(tilt));
+      ctx.strokeStyle = `rgba(169, 222, 233, ${opacity * (1 - j * 0.23)})`;
+      ctx.lineWidth = 0.9 + (1 + depth) * 0.43;
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(headX, headY, 1 + depth * 0.32, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(215, 245, 246, ${opacity})`;
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+export function drawRoyalShield(
+  ctx: CanvasRenderingContext2D,
+  actor: { x: number; y: number; radius: number; royalShieldImpact?: { angle: number; time: number } },
+  time: number
+) {
+  const radius = actor.radius + ROYAL_SHIELD_PADDING;
+  const glint = 0.47 + Math.sin(time * 0.8) * 0.04;
+  ctx.save();
+  ctx.translate(actor.x, actor.y);
+
+  const shell = ctx.createRadialGradient(0, 0, radius * 0.54, 0, 0, radius);
+  shell.addColorStop(0, 'rgba(26, 52, 67, 0.025)');
+  shell.addColorStop(0.72, 'rgba(56, 122, 142, 0.08)');
+  shell.addColorStop(1, 'rgba(134, 191, 205, 0.27)');
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fillStyle = shell;
+  ctx.fill();
+
+  const edge = ctx.createLinearGradient(-radius * 0.7, -radius, radius * 0.6, radius);
+  edge.addColorStop(0, `rgba(212, 233, 238, ${glint})`);
+  edge.addColorStop(0.52, 'rgba(127, 180, 198, 0.29)');
+  edge.addColorStop(1, 'rgba(49, 92, 117, 0.56)');
+  ctx.strokeStyle = edge;
+  ctx.lineWidth = 1.35;
+  ctx.stroke();
+
+  const reflection = ctx.createRadialGradient(-radius * 0.42, -radius * 0.55, 0, -radius * 0.42, -radius * 0.55, radius * 0.55);
+  reflection.addColorStop(0, 'rgba(236, 249, 250, 0.17)');
+  reflection.addColorStop(1, 'rgba(236, 249, 250, 0)');
+  ctx.fillStyle = reflection;
+  ctx.fill();
+  drawShieldFlow(ctx, radius, time);
+
+  const impact = actor.royalShieldImpact;
+  if (impact) {
+    const age = time - impact.time;
+    const progress = age / 0.32;
+    if (progress >= 0 && progress < 1) {
+      const arc = 0.18 + progress * 1.2;
+      ctx.globalAlpha *= (1 - progress) * 0.72;
+      ctx.strokeStyle = '#D7F9FF';
+      ctx.lineWidth = 1.8 - progress * 0.65;
+      for (const offset of [0, 4]) {
+        ctx.beginPath();
+        ctx.arc(0, 0, radius + offset + progress * 5, impact.angle - arc, impact.angle + arc);
+        ctx.stroke();
+      }
+    }
+  }
+  ctx.restore();
+}
+
+export function drawQiRecovery(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, time: number) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = '#8AC5EA';
+  for (let i = 0; i < 3; i++) {
+    const phase = (time * 0.68 + i / 3) % 1;
+    const angle = i * Math.PI * 2 / 3 + time * 0.25;
+    const distance = radius * (1.05 - phase * 0.52) + (1 - phase) * 11;
+    ctx.globalAlpha = Math.sin(Math.PI * phase) * 0.43;
+    ctx.beginPath();
+    ctx.arc(Math.cos(angle) * distance, Math.sin(angle) * distance, 1.5 - phase * 0.55, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawEagleEyeVisor(ctx: CanvasRenderingContext2D, radius: number, remaining: number) {
+  const activation = clamp((EAGLE_EYE_DURATION - remaining) / 0.48, 0, 1);
+  const fade = Math.min(1, remaining / 0.45);
+  const halfSpan = radius * 0.58;
+  const front = radius * 0.66;
+  ctx.save();
+  ctx.globalAlpha *= fade;
+
+  ctx.beginPath();
+  ctx.moveTo(radius * 0.34, -halfSpan);
+  ctx.quadraticCurveTo(front, -halfSpan * 0.8, front, 0);
+  ctx.quadraticCurveTo(front, halfSpan * 0.8, radius * 0.34, halfSpan);
+  ctx.quadraticCurveTo(radius * 0.49, 0, radius * 0.34, -halfSpan);
+  ctx.closePath();
+  const glass = ctx.createLinearGradient(radius * 0.34, 0, front, 0);
+  glass.addColorStop(0, 'rgba(20, 11, 22, 0.95)');
+  glass.addColorStop(0.58, 'rgba(86, 35, 56, 0.93)');
+  glass.addColorStop(1, 'rgba(176, 91, 109, 0.91)');
+  ctx.fillStyle = glass;
+  ctx.fill();
+
+  const edge = ctx.createLinearGradient(0, -halfSpan, 0, halfSpan);
+  edge.addColorStop(0, 'rgba(128, 65, 83, 0.22)');
+  edge.addColorStop(0.38, 'rgba(230, 158, 167, 0.88)');
+  edge.addColorStop(0.65, 'rgba(167, 84, 104, 0.70)');
+  edge.addColorStop(1, 'rgba(57, 28, 42, 0.36)');
+  ctx.lineWidth = 1.1;
+  ctx.strokeStyle = edge;
+  ctx.stroke();
+
+  if (activation < 1) {
+    const scanY = halfSpan * (2 * (1 - (1 - activation) ** 2) - 1);
+    ctx.save();
+    ctx.clip();
+    const glint = ctx.createLinearGradient(0, scanY - 3, 0, scanY + 3);
+    glint.addColorStop(0, 'rgba(245, 197, 192, 0)');
+    glint.addColorStop(0.5, 'rgba(245, 197, 192, 0.52)');
+    glint.addColorStop(1, 'rgba(245, 197, 192, 0)');
+    ctx.fillStyle = glint;
+    ctx.fillRect(radius * 0.30, scanY - 3, radius * 0.40, 6);
+    ctx.restore();
+  }
   ctx.restore();
 }
 
@@ -421,50 +593,20 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
     attackAnimProgress = 0,
     attackAnimKind = null,
     gunfireTimer = 0,
-    isPhantomClone = false,
+    eagleEyeRemaining = 0,
+    shadowDodge,
+    morphScale = 1,
   } = params;
 
-  if (shadowActive && !isPhantomClone) {
-    const perpAngle = angle + Math.PI / 2;
-    const cloneOffset = radius * 0.96 + Math.sin(time * 12) * 2.5;
-    for (const side of [-1, 1]) {
-      const cx = x + Math.cos(perpAngle) * cloneOffset * side;
-      const cy = y + Math.sin(perpAngle) * cloneOffset * side;
-      ctx.save();
-      ctx.globalAlpha = 0.28;
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius * 0.94, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(192, 38, 211, 0.26)';
-      ctx.fill();
-      ctx.restore();
-
-      ctx.save();
-      ctx.globalAlpha = 0.42;
-      drawCharacter(ctx, {
-        ...params,
-        x: cx,
-        y: cy,
-        radius: radius * 0.95,
-        shadowActive: false,
-        walkPhase: walkPhase + side * 0.45,
-        isPhantomClone: true,
-      });
-      ctx.restore();
-    }
+  const dodge = shadowDodge ? clamp((time - shadowDodge.startedAt) / 0.31, 0, 1) : 1;
+  const lean = dodge < 1 ? Math.sin(Math.PI * dodge ** 0.64) * radius * 1.06 : 0;
+  const dodgeAngle = shadowDodge?.angle ?? angle;
+  if (shadowActive || lean > 0) {
+    drawShadowForms(ctx, x, y, radius, angle, time, lean, dodgeAngle);
   }
 
   ctx.save();
-  ctx.translate(x, y);
-  if (shadowActive && !isPhantomClone) {
-    ctx.globalAlpha = 0.72;
-    ctx.beginPath();
-    ctx.arc(0, 0, radius + 6, 0, Math.PI * 2);
-    ctx.strokeStyle = '#FB7185';
-    ctx.setLineDash([4, 4]);
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
+  ctx.translate(x + Math.cos(dodgeAngle) * lean, y + Math.sin(dodgeAngle) * lean);
 
   // 地面投影
   ctx.fillStyle = 'rgba(0,0,0,0.38)';
@@ -473,6 +615,7 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
   ctx.fill();
 
   ctx.rotate(angle);
+  ctx.scale(1 - (morphScale - 1) * 0.22, 1 + (morphScale - 1) * 0.46);
 
   const bodyR = radius * 0.72;
   const stride = Math.sin(walkPhase) * radius * 0.4 * moveIntensity;
@@ -498,6 +641,30 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
     ctx.beginPath();
     ctx.ellipse(radius * 0.08, 0, radius * 0.09, radius * 0.1, 0, 0, Math.PI * 2);
     ctx.fill();
+    ctx.restore();
+  }
+
+  // Giant form spreads its weight across a wider shoulder silhouette.
+  if (morphScale > 1.02) {
+    ctx.save();
+    ctx.globalAlpha *= clamp((morphScale - 1) * 4, 0, 1);
+    for (const side of [-1, 1]) {
+      const shoulder = ctx.createLinearGradient(-bodyR, 0, bodyR * 0.48, 0);
+      shoulder.addColorStop(0, '#27282C');
+      shoulder.addColorStop(0.56, bodyColor);
+      shoulder.addColorStop(1, '#857B72');
+      ctx.beginPath();
+      ctx.moveTo(-bodyR * 0.69, side * bodyR * 0.61);
+      ctx.quadraticCurveTo(-bodyR * 0.84, side * bodyR * 1.13, -bodyR * 0.4, side * bodyR * 1.27);
+      ctx.quadraticCurveTo(bodyR * 0.12, side * bodyR * 1.17, bodyR * 0.38, side * bodyR * 0.76);
+      ctx.lineTo(0, side * bodyR * 0.47);
+      ctx.closePath();
+      ctx.fillStyle = shoulder;
+      ctx.fill();
+      ctx.strokeStyle = '#262428';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
     ctx.restore();
   }
 
@@ -679,22 +846,32 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
     ctx.restore();
   }
 
-  // 3. 武器與雙手（無肩膀，依實戰武器原圖精準繪製）
-  if (swapProgress > 0) {
-    // 換武器搓手動畫：重武器耗時更長，雙手合於身前來回搓動
-    const rub = Math.sin(swapProgress * Math.PI * 6) * 5.2;
-    const handX = bodyR * 0.92;
-    drawHand(ctx, handX + rub * 0.35, -3.5 + rub * 0.4, handR, handColor);
-    drawHand(ctx, handX - rub * 0.35, 3.5 - rub * 0.4, handR, handColor);
-    ctx.strokeStyle = 'rgba(255,255,255,0.65)';
-    ctx.lineWidth = 1.2;
+  // 3. 武器及持握姿勢
+  const drawGrip = (x: number, y: number, side: -1 | 1) => {
+    ctx.save();
     ctx.beginPath();
-    ctx.moveTo(handX - 3, -5);
-    ctx.lineTo(handX + 3, 5);
+    ctx.moveTo(bodyR * 0.18, side * bodyR * 0.70);
+    ctx.quadraticCurveTo(bodyR * 0.83, side * bodyR * 0.91, x, y);
+    ctx.lineCap = 'round';
+    ctx.lineWidth = handR * 1.58;
+    ctx.strokeStyle = '#020617';
     ctx.stroke();
+    ctx.lineWidth = handR * 1.03;
+    ctx.strokeStyle = skin?.bodyHighlight || bodyColor;
+    ctx.stroke();
+    ctx.restore();
+    drawHand(ctx, x, y, handR, handColor);
+  };
+  if (swapProgress > 0) {
+    // 換手時雙手平順合攏再分開
+    const reach = Math.sin(swapProgress * Math.PI);
+    const handX = bodyR * 1.11;
+    const separation = 6 - reach * 2.5;
+    drawGrip(handX - reach * 2, -separation, -1);
+    drawGrip(handX + reach * 2, separation, 1);
   } else if (isReloading && !holdingMelee) {
-    const tilt = -0.82 + Math.sin(reloadProgress * Math.PI * 2) * 0.12;
-    const gunLen = gunKind === 'sniper' ? 28 : gunKind === 'rifle' ? 23 : gunKind === 'shotgun' ? 22 : 14;
+    const tilt = -0.82 + Math.sin(reloadProgress * Math.PI) * 0.06;
+    const gunLen = gunKind === 'sniper' ? 32 : gunKind === 'rifle' ? 28 : gunKind === 'shotgun' ? 27 : 19;
     const magPhase =
       reloadProgress < 0.4
         ? reloadProgress / 0.4
@@ -705,6 +882,7 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
 
     ctx.save();
     ctx.rotate(tilt);
+    ctx.translate(bodyR * 0.32, 0);
 
     ctx.fillStyle = gunKind === 'sniper' || gunKind === 'shotgun' ? '#B45309' : '#0F172A';
     ctx.strokeStyle = '#020617';
@@ -728,15 +906,15 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
 
     const leftHandX = reloadProgress >= 0.75 ? bodyR * 0.78 - rackPhase * 7 : magX + 2.5;
     const leftHandY = reloadProgress >= 0.75 ? -5 : magOffsetY + 4;
-    drawHand(ctx, leftHandX, leftHandY, handR, handColor);
-    drawHand(ctx, bodyR * 0.62, -bodyR * 0.55, handR * 0.95, handColor);
+    drawGrip(leftHandX, leftHandY, 1);
+    drawGrip(bodyR * 0.62, -bodyR * 0.55, -1);
     ctx.restore();
   } else if (holdingMelee) {
     if (meleeKind === 'claw') {
       const lunge = attackAnimKind === 'claw' && attackAnimProgress > 0 ? Math.sin(attackAnimProgress * Math.PI) : 0;
-      const rx = bodyR * 0.66 + armSwing * 0.72 + lunge * 14;
+      const rx = bodyR * 1.01 + armSwing * 0.72 + lunge * 14;
       const ry = bodyR * 0.78 - lunge * 6;
-      const lx = bodyR * 0.66 - armSwing * 0.72 + lunge * 14;
+      const lx = bodyR * 1.01 - armSwing * 0.72 + lunge * 14;
       const ly = -bodyR * 0.78 + lunge * 6;
 
       for (const [hx, hy, dir] of [
@@ -759,16 +937,16 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
           ctx.stroke();
         }
       }
-      drawHand(ctx, rx, ry, handR, handColor);
-      drawHand(ctx, lx, ly, handR, handColor);
+      drawGrip(rx, ry, 1);
+      drawGrip(lx, ly, -1);
     } else if (meleeKind === 'shield') {
       // 手持戰術防彈盾：置於身前正弧方向（左鍵推擊時雙手同步前頂）
       const bashLunge = attackAnimKind === 'shield' && attackAnimProgress > 0 ? Math.sin(attackAnimProgress * Math.PI) : 0;
-      const gripX = bodyR * 0.85 + bashLunge * 15;
-      drawHand(ctx, gripX, -bodyR * 0.48, handR, handColor);
-      drawHand(ctx, gripX, bodyR * 0.48, handR, handColor);
+      const gripX = bodyR * 1.34 + bashLunge * 7;
+      drawGrip(gripX, -bodyR * 0.57, -1);
+      drawGrip(gripX, bodyR * 0.57, 1);
 
-      const shieldFrontX = bodyR * 1.16 + bashLunge * 16;
+      const shieldFrontX = bodyR * 1.65 + bashLunge * 8;
       const halfSpan = bodyR * 1.12;
       ctx.save();
       ctx.beginPath();
@@ -809,8 +987,8 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
         const swingRot = -1.55 + attackAnimProgress * 3.0;
         ctx.save();
         ctx.rotate(swingRot);
-        const gripInnerX = bodyR * 0.65;
-        const gripOuterX = bodyR * 0.92;
+        const gripInnerX = bodyR * 0.96;
+        const gripOuterX = bodyR * 1.28;
         ctx.fillStyle = '#EAB308';
         ctx.strokeStyle = '#020617';
         ctx.lineWidth = 1.6;
@@ -824,13 +1002,13 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
         ctx.fillStyle = '#E2E8F0';
         ctx.fill();
         ctx.stroke();
-        drawHand(ctx, gripInnerX, 2.5, handR, handColor);
-        drawHand(ctx, gripOuterX, -2.0, handR, handColor);
+        drawGrip(gripInnerX, 2.5, 1);
+        drawGrip(gripOuterX, -2.0, -1);
         ctx.restore();
       } else {
-        const rx = bodyR * 0.58 + armSwing * 0.25;
+        const rx = bodyR * 1.04 + armSwing * 0.25;
         const ry = bodyR * 0.56;
-        const lx = bodyR * 0.8 + armSwing * 0.22;
+        const lx = bodyR * 1.16 + armSwing * 0.22;
         const ly = bodyR * 0.1;
 
         ctx.save();
@@ -851,15 +1029,15 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
         ctx.stroke();
         ctx.restore();
 
-        drawHand(ctx, rx, ry, handR, handColor);
-        drawHand(ctx, lx, ly, handR, handColor);
+        drawGrip(rx, ry, 1);
+        drawGrip(lx, ly, -1);
       }
     } else {
       // 小刀：刺擊時右手筆直前刺、左手後收保持平衡
       const thrust = attackAnimKind === 'knife' && attackAnimProgress > 0 ? Math.sin(attackAnimProgress * Math.PI) : 0;
-      const rx = bodyR * 0.64 + armSwing * 0.55 + thrust * 16;
+      const rx = bodyR * 1.05 + armSwing * 0.55 + thrust * 16;
       const ry = bodyR * 0.74 - thrust * bodyR * 0.42;
-      const lx = bodyR * 0.52 - armSwing * 0.85 - thrust * 6;
+      const lx = bodyR * 0.83 - armSwing * 0.85 - thrust * 6;
       const ly = -bodyR * 0.78;
 
       ctx.save();
@@ -879,8 +1057,8 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
       ctx.fillRect(-5, -2, 6, 4);
       ctx.restore();
 
-      drawHand(ctx, rx, ry, handR, handColor);
-      drawHand(ctx, lx, ly, handR, handColor);
+      drawGrip(rx, ry, 1);
+      drawGrip(lx, ly, -1);
     }
   } else {
     const recoil = (gunfireTimer / GUNFIRE_ANIMATION_SECONDS) ** 2;
@@ -888,28 +1066,28 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
     ctx.save();
     ctx.translate(-recoil * (gunKind === 'pistol' ? 6 : 8), 0);
     if (gunKind === 'pistol') {
-      const rx = bodyR * 0.74 + armSwing * 0.2;
-      const ry = bodyR * 0.5;
-      const lx = bodyR * 0.48 - armSwing * 0.8;
-      const ly = -bodyR * 0.78;
+      const rx = bodyR * 1.19 + armSwing * 0.2;
+      const ry = bodyR * 0.24;
+      const lx = rx + handR * 0.7;
+      const ly = ry - handR * 0.88;
 
       ctx.fillStyle = '#0F172A';
       ctx.strokeStyle = '#020617';
       ctx.lineWidth = 1.5;
-      ctx.fillRect(rx - 2, ry - 3, 15, 6);
-      ctx.strokeRect(rx - 2, ry - 3, 15, 6);
+      ctx.fillRect(rx - 2, ry - 3, 20, 6);
+      ctx.strokeRect(rx - 2, ry - 3, 20, 6);
       ctx.fillStyle = '#334155';
-      ctx.fillRect(rx + 1, ry - 1.8, 10, 3.2);
+      ctx.fillRect(rx + 1, ry - 1.8, 15, 3.2);
 
-      drawHand(ctx, rx, ry, handR, handColor);
-      drawHand(ctx, lx, ly, handR, handColor);
-      drawMuzzleFlash(ctx, rx + 13, ry, flash);
+      drawGrip(rx, ry, 1);
+      drawGrip(lx, ly, -1);
+      drawMuzzleFlash(ctx, rx + 18, ry, flash);
     } else {
-      const baseGunX = bodyR * 0.56;
-      const rx = bodyR * 0.58;
-      const ry = bodyR * 0.42;
-      const lx = (gunKind === 'sniper' ? bodyR * 1.15 : bodyR * 0.98) + armSwing * 0.18;
-      const ly = -bodyR * 0.14;
+      const baseGunX = bodyR * 0.91;
+      const rx = baseGunX + 3;
+      const ry = handR * 0.55;
+      const lx = baseGunX + (gunKind === 'sniper' ? 16 : 12) + armSwing * 0.18;
+      const ly = -handR * 0.53;
 
       ctx.strokeStyle = '#020617';
       ctx.lineWidth = 1.5;
@@ -918,8 +1096,8 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
         ctx.fillRect(baseGunX - 2, -3.2, 16, 6.4);
         ctx.strokeRect(baseGunX - 2, -3.2, 16, 6.4);
         ctx.fillStyle = '#1E3A5F';
-        ctx.fillRect(baseGunX + 10, -2.2, 21, 4.4);
-        ctx.strokeRect(baseGunX + 10, -2.2, 21, 4.4);
+        ctx.fillRect(baseGunX + 10, -2.2, 25, 4.4);
+        ctx.strokeRect(baseGunX + 10, -2.2, 25, 4.4);
         ctx.fillStyle = '#1E3A5F';
         ctx.fillRect(baseGunX + 3, -3.8, 13, 5.2);
         ctx.strokeRect(baseGunX + 3, -3.8, 13, 5.2);
@@ -930,22 +1108,29 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
         ctx.fillRect(baseGunX - 2, -3.2, 10, 6.4);
         ctx.strokeRect(baseGunX - 2, -3.2, 10, 6.4);
         ctx.fillStyle = '#1E3A5F';
-        ctx.fillRect(baseGunX + 7, -2.4, 16, 4.8);
-        ctx.strokeRect(baseGunX + 7, -2.4, 16, 4.8);
+        ctx.fillRect(baseGunX + 7, -2.4, 21, 4.8);
+        ctx.strokeRect(baseGunX + 7, -2.4, 21, 4.8);
         ctx.fillStyle = '#C2410C';
         ctx.fillRect(baseGunX + 10, -1.6, 8, 4.8);
         ctx.strokeRect(baseGunX + 10, -1.6, 8, 4.8);
       } else {
-        ctx.fillStyle = '#0F172A';
-        ctx.fillRect(baseGunX, -3.2, 23, 6.4);
-        ctx.strokeRect(baseGunX, -3.2, 23, 6.4);
-        ctx.fillStyle = '#334155';
-        ctx.fillRect(baseGunX + 4, -1.8, 12, 3.6);
+        const receiver = ctx.createLinearGradient(0, -3.4, 0, 3.4);
+        receiver.addColorStop(0, '#788390');
+        receiver.addColorStop(0.35, '#414D59');
+        receiver.addColorStop(1, '#18232D');
+        ctx.fillStyle = receiver;
+        ctx.fillRect(baseGunX - 2, -3.4, 22, 6.8);
+        ctx.strokeRect(baseGunX - 2, -3.4, 22, 6.8);
+        ctx.fillStyle = '#26323D';
+        ctx.fillRect(baseGunX + 20, -1.65, 8, 3.3);
+        ctx.strokeRect(baseGunX + 20, -1.65, 8, 3.3);
+        ctx.fillStyle = '#AAB5BB';
+        ctx.fillRect(baseGunX + 6, -2.5, 9, 0.8);
       }
 
-      drawHand(ctx, rx, ry, handR, handColor);
-      drawHand(ctx, lx, ly, handR, handColor);
-      drawMuzzleFlash(ctx, baseGunX + (gunKind === 'sniper' ? 31 : 23), 0, flash);
+      drawGrip(rx, ry, 1);
+      drawGrip(lx, ly, -1);
+      drawMuzzleFlash(ctx, baseGunX + (gunKind === 'sniper' ? 35 : 28), 0, flash);
     }
     ctx.restore();
   }
@@ -1154,6 +1339,10 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
     ctx.fillRect(bodyR * 0.32, -bodyR * 0.45, bodyR * 0.42, bodyR * 0.9);
   }
 
+  if (eagleEyeRemaining > 0 && !isBlinded) {
+    drawEagleEyeVisor(ctx, bodyR, eagleEyeRemaining);
+  }
+
   ctx.restore();
 }
 
@@ -1180,116 +1369,6 @@ export function drawBeamTracers(ctx: CanvasRenderingContext2D, beams: BeamTracer
   }
 }
 
-export function drawProjectiles(ctx: CanvasRenderingContext2D, projectiles: Projectile[], time: number) {
-  for (const proj of projectiles) {
-    ctx.save();
-    if (proj.isBlackDragon) {
-      const segs = proj.segments && proj.segments.length > 0 ? proj.segments : [{ x: proj.x, y: proj.y }];
-      // 龍身（由尾向頭疊加紫藍刺毛與黑核）
-      for (let k = segs.length - 1; k >= 1; k--) {
-        const sp = segs[k];
-        const t = 1 - k / Math.max(1, segs.length);
-        const segR = 11 + t * 8;
-        ctx.save();
-        ctx.translate(sp.x, sp.y);
-        ctx.fillStyle = 'rgba(67, 56, 202, 0.55)';
-        for (let spike = 0; spike < 8; spike++) {
-          const sa = (spike / 8) * Math.PI * 2 + k * 0.4 + time * 9;
-          ctx.beginPath();
-          ctx.moveTo(Math.cos(sa - 0.25) * segR * 0.7, Math.sin(sa - 0.25) * segR * 0.7);
-          ctx.lineTo(Math.cos(sa) * (segR + 7), Math.sin(sa) * (segR + 7));
-          ctx.lineTo(Math.cos(sa + 0.25) * segR * 0.7, Math.sin(sa + 0.25) * segR * 0.7);
-          ctx.closePath();
-          ctx.fill();
-        }
-        const bodyGrad = ctx.createRadialGradient(0, 0, 2, 0, 0, segR);
-        bodyGrad.addColorStop(0, '#020617');
-        bodyGrad.addColorStop(0.6, '#1E1B4B');
-        bodyGrad.addColorStop(1, 'rgba(49, 46, 129, 0.25)');
-        ctx.beginPath();
-        ctx.arc(0, 0, segR, 0, Math.PI * 2);
-        ctx.fillStyle = bodyGrad;
-        ctx.fill();
-        ctx.restore();
-      }
-      // 龍頭（深紫藍帶雙長角）
-      ctx.translate(proj.x, proj.y);
-      ctx.rotate(Math.atan2(proj.vy, proj.vx));
-      ctx.fillStyle = 'rgba(67, 56, 202, 0.5)';
-      for (let spike = 0; spike < 10; spike++) {
-        const sa = (spike / 10) * Math.PI * 2 + time * 10;
-        ctx.beginPath();
-        ctx.moveTo(Math.cos(sa - 0.2) * 14, Math.sin(sa - 0.2) * 14);
-        ctx.lineTo(Math.cos(sa) * 26, Math.sin(sa) * 26);
-        ctx.lineTo(Math.cos(sa + 0.2) * 14, Math.sin(sa + 0.2) * 14);
-        ctx.closePath();
-        ctx.fill();
-      }
-      for (const side of [-1, 1]) {
-        ctx.beginPath();
-        ctx.moveTo(4, side * 9);
-        ctx.lineTo(-26, side * 19);
-        ctx.lineTo(-8, side * 5);
-        ctx.closePath();
-        ctx.fillStyle = '#312E81';
-        ctx.fill();
-        ctx.strokeStyle = '#6366F1';
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
-      }
-      const headGrad = ctx.createRadialGradient(3, 0, 2, 0, 0, 21);
-      headGrad.addColorStop(0, '#020617');
-      headGrad.addColorStop(0.65, '#1E1B4B');
-      headGrad.addColorStop(1, '#312E81');
-      ctx.beginPath();
-      ctx.ellipse(2, 0, 21, 15, 0, 0, Math.PI * 2);
-      ctx.fillStyle = headGrad;
-      ctx.fill();
-      ctx.fillStyle = '#818CF8';
-      ctx.beginPath();
-      ctx.arc(10, -5, 2.2, 0, Math.PI * 2);
-      ctx.arc(10, 5, 2.2, 0, Math.PI * 2);
-      ctx.fill();
-    } else {
-      // 黃色彗星光彈（對應 光彈.png）
-      const ang = Math.atan2(proj.vy, proj.vx);
-      ctx.translate(proj.x, proj.y);
-      ctx.rotate(ang);
-      const tailGrad = ctx.createLinearGradient(-34, 0, 8, 0);
-      tailGrad.addColorStop(0, 'rgba(250, 204, 21, 0)');
-      tailGrad.addColorStop(0.55, 'rgba(250, 204, 21, 0.72)');
-      tailGrad.addColorStop(1, '#FEF08A');
-      ctx.fillStyle = tailGrad;
-      ctx.beginPath();
-      ctx.moveTo(-34, 0);
-      ctx.lineTo(-8, -proj.radius * 0.95);
-      ctx.lineTo(4, 0);
-      ctx.lineTo(-8, proj.radius * 0.95);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.fillStyle = 'rgba(254, 249, 195, 0.9)';
-      ctx.beginPath();
-      ctx.moveTo(-24, -4);
-      ctx.lineTo(8, 0);
-      ctx.lineTo(-24, 4);
-      ctx.closePath();
-      ctx.fill();
-
-      const orbGrad = ctx.createRadialGradient(2, 0, 2, 0, 0, proj.radius);
-      orbGrad.addColorStop(0, '#FFFFFF');
-      orbGrad.addColorStop(0.45, '#FEF08A');
-      orbGrad.addColorStop(0.85, '#FACC15');
-      orbGrad.addColorStop(1, 'rgba(234, 179, 8, 0)');
-      ctx.beginPath();
-      ctx.arc(0, 0, proj.radius + 2, 0, Math.PI * 2);
-      ctx.fillStyle = orbGrad;
-      ctx.fill();
-    }
-    ctx.restore();
-  }
-}
-
 export function drawParticles(ctx: CanvasRenderingContext2D, particles: Particle[]) {
   for (const pt of particles) {
     ctx.globalAlpha = clamp(pt.life / pt.maxLife, 0, 1);
@@ -1311,7 +1390,9 @@ export function drawFloatingTexts(ctx: CanvasRenderingContext2D, texts: Floating
       Math.round(13 * ft.scale),
       'center',
       'rgba(0, 0, 0, 0.85)',
-      '"CyrBit", "Noto Sans TC", "JetBrains Mono", sans-serif'
+      ft.subtle ? '"Noto Sans TC", sans-serif' : '"CyrBit", "Noto Sans TC", "JetBrains Mono", sans-serif',
+      ft.subtle ? 500 : 700,
+      ft.subtle ? 1.5 : 3.2
     );
   }
   ctx.globalAlpha = 1;

@@ -11,13 +11,14 @@ import {
 import { FACTION_CHARACTERS, GUNS, MELEES, getReputationQiMultiplier, getWeaponSwapDuration } from './data';
 import { TwilightEngine, snapToEightDirections } from './engine';
 import { TILE, createArenaMap } from './maps';
-import { AI_COMBAT, RESPAWN_DELAY_SECONDS } from './tuning';
+import { AI_COMBAT, AI_DIFFICULTY, AI_SURPRISE_SECONDS, MELEE_CHARGE_HOLD_SECONDS, QI_RATE, RESPAWN_DELAY_SECONDS, ROYAL_SHIELD_PADDING, SHIELD_BASH_DISTANCE, getGunSpread, type AiDifficulty } from './tuning';
 import { EnemyEntity, FactionId, HudSnapshot, MapId, WeaponHand } from './types';
 
 function createTestEngine(
   faction: FactionId = 'royal',
   mapId: MapId = 'tokyo_shrine',
-  initialRepsInput: number | Partial<Record<FactionId, number>> = 10
+  initialRepsInput: number | Partial<Record<FactionId, number>> = 10,
+  difficulty: AiDifficulty = 'standard'
 ) {
   const initialReps: Record<FactionId, number> =
     typeof initialRepsInput === 'number'
@@ -40,7 +41,9 @@ function createTestEngine(
     },
     (reps) => {
       latestReps = { ...reps };
-    }
+    },
+    undefined,
+    difficulty
   );
   return { engine, getHud: () => latestHud, getRep: () => latestReps[faction], getReps: () => latestReps };
 }
@@ -58,9 +61,10 @@ function meleeInHand(engine: TwilightEngine, hand: WeaponHand = 1) {
 }
 
 describe('Reputation logarithmic Qi speed & independent per-faction kill adjustments', () => {
-  it('follows the exact log10 multiplier points (0 -> 0.5x, 10 -> 1.0x, 100 -> 1.5x, 1000 -> 2.0x) and handles negative safely', () => {
-    expect(getReputationQiMultiplier(-5)).toBeCloseTo(0.5, 5);
-    expect(getReputationQiMultiplier(0)).toBeCloseTo(0.5, 5);
+  it('raises the low-reputation floor and preserves the 10, 100 and 1000 reputation anchors', () => {
+    expect(getReputationQiMultiplier(-5)).toBeCloseTo(0.8, 5);
+    expect(getReputationQiMultiplier(0)).toBeCloseTo(0.8, 5)
+    expect(getReputationQiMultiplier(5)).toBeCloseTo(0.9, 5);
     expect(getReputationQiMultiplier(10)).toBeCloseTo(1.0, 5);
     expect(getReputationQiMultiplier(100)).toBeCloseTo(1.5, 5);
     expect(getReputationQiMultiplier(1000)).toBeCloseTo(2.0, 5);
@@ -227,6 +231,22 @@ describe('KeyR reload & infinite ranged weapon range', () => {
     expect(gunInHand(engine).reloadTimer).toBe(0);
     expect(gunInHand(engine).ammoInMag).toBe(gunInHand(engine).def.magSize);
     expect(engine.player.reserveAmmo).toBe(26);
+  });
+
+  it('uses a short audio cue when reloading with no reserve ammo', () => {
+    const { engine } = createTestEngine();
+    gunInHand(engine).ammoInMag = 0;
+    engine.player.reserveAmmo = 0;
+    const cue = vi.spyOn(sfx, 'emptyGun');
+    try {
+      engine.setKey('KeyR', true);
+      engine.setKey('KeyR', false);
+      expect(cue).toHaveBeenCalledTimes(1);
+      expect(gunInHand(engine).reloadTimer).toBe(0);
+      expect(engine.floatingTexts).toHaveLength(0);
+    } finally {
+      cue.mockRestore();
+    }
   });
 
   it.each(['shotgun', 'sniper'] as const)('times each %s reload cue to the reload and waits over two seconds', (kind) => {
@@ -416,6 +436,32 @@ describe('Faction skill combat rules', () => {
     expect(shadowEnemy.hp).toBeLessThan(100);
   });
 
+  it('shows a directional Shadow Clone dodge only when a ranged hit is evaded', () => {
+    const { engine } = createTestEngine('shadow', 'tokyo_shrine', 10);
+    const player = engine.player;
+    player.shadowCloneTimer = 5;
+    player.invulnTimer = 0;
+    const x = player.x;
+    const y = player.y;
+    const hp = player.hp;
+    const random = vi.spyOn(Math, 'random');
+    try {
+      random.mockReturnValueOnce(0.2);
+      engine['damagePlayer'](12, false, undefined, x - 100, y);
+      const visuals = engine['actorSkillVisuals'].get(player)!;
+      expect(Math.abs(visuals.shadowDodge!.angle)).toBeCloseTo(Math.PI / 2);
+      expect(player.hp).toBe(hp);
+      expect([player.x, player.y]).toEqual([x, y]);
+
+      engine['damagePlayer'](12, true);
+      expect(player.shadowCloneTimer).toBe(0);
+      expect(visuals.shadowDodge).toBeUndefined();
+      expect(player.hp).toBeLessThan(hp);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
   it('breaks Royal Shield when the shielded player fires a gun', () => {
     const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
     engine.player.royalShieldTimer = 6.0;
@@ -508,6 +554,47 @@ describe('Default loadout, player respawn, and map crate placement invariants', 
     expect(engine.player.elevation).toBe(0);
   });
 
+  it('stops a hitscan at the Royal bubble and draws a bounce without damaging either actor', () => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    const enemy = engine.enemies.find(e => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    engine.player.x = 10.5 * TILE;
+    engine.player.y = enemy.y = 19.3 * TILE;
+    engine.player.elevation = enemy.elevation = 0;
+    engine.player.angle = 0;
+    enemy.x = engine.player.x + 3 * TILE;
+    enemy.royalShieldTimer = 3;
+    const edgeX = enemy.x - enemy.radius - ROYAL_SHIELD_PADDING;
+
+    const random = vi.spyOn(Math, 'random').mockReturnValueOnce(0.5);
+    try {
+      engine.setMouseDown(true);
+      engine.setMouseDown(false);
+    } finally {
+      random.mockRestore();
+    }
+
+    expect(enemy.hp).toBe(enemy.maxHp);
+    expect(engine.player.hp).toBe(engine.player.maxHp);
+    expect(enemy.royalShieldImpact).toBeDefined();
+    const [bounce, incoming] = engine.beams;
+    expect(incoming.x2).toBeCloseTo(edgeX);
+    expect(bounce.x1).toBeCloseTo(edgeX);
+    expect(bounce.x2).toBeLessThan(bounce.x1);
+  });
+
+  it('applies incoming damage without shaking the player camera', () => {
+    const { engine } = createTestEngine();
+    const state = engine as unknown as {
+      camera: { shake: number };
+      damagePlayer: (damage: number, melee: boolean) => void;
+    };
+    engine.player.invulnTimer = 0;
+    state.damagePlayer(20, false);
+    expect(engine.player.hp).toBe(engine.player.maxHp - 20);
+    expect(state.camera.shake).toBe(0);
+  });
+
   it('continues the battle while the player is down and does not target the body', () => {
     const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
     const attacker = engine.enemies.find(e => e.faction === 'shadow')!;
@@ -534,7 +621,7 @@ describe('Default loadout, player respawn, and map crate placement invariants', 
     damagePlayer(999, false);
 
     let firedDuringRespawn = false;
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 70; i++) {
       engine.update(1 / 60, 1280, 720);
       firedDuringRespawn ||= engine.beams.length > 0;
     }
@@ -842,6 +929,7 @@ describe('Enemy sight radius (8 tiles), hit-based target switching, and A* eleva
 
     damageEnemy(targetEnemy, 5, false, 0, 0, false, false, 'player', 'royal');
     expect(targetEnemy.focusedTargetId).toBe('player');
+    expect(targetEnemy.reactionTimer).toBeCloseTo((AI_COMBAT[targetEnemy.archetype].reactionSeconds + AI_SURPRISE_SECONDS) * AI_DIFFICULTY.standard.reactionMultiplier);
     expect(targetEnemy.aggroLockTimer).toBeGreaterThan(0);
 
     // Even when targetEnemy currently has LoS on mercAttacker, repeated hits from player give a chance to switch aggro
@@ -1088,7 +1176,7 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     expect(enemy.weapons[enemy.activeHand].type).toBe('gun');
     expect(enemy.chargingMelee).toBe(false);
     enemy.speed = 0;
-    engine.update(AI_COMBAT[enemy.archetype].reactionSeconds, 1280, 720);
+    engine.update(AI_COMBAT[enemy.archetype].reactionSeconds * AI_DIFFICULTY.standard.reactionMultiplier, 1280, 720);
 
     // Move player into close melee range -> switches to claw (swap 0.16s) then begins draining Qi
     engine.player.x = enemy.x + 55;
@@ -1105,17 +1193,19 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     expect(enemy.chargingMelee).toBe(false);
     expect(enemy.shadowCloneTimer).toBe(0);
 
-    // Restore full Qi and hold close range through swap (0.16s) + Qi drain (0.58s) -> casts Shadow Clone
+    // Restore full Qi and hold close range through the swap and charge.
     enemy.qi = enemy.maxQi;
     engine.player.x = enemy.x + 55;
     engine.update(0.05, 1280, 720);
-    for (let i = 0; i < 10; i++) engine.update(0.1, 1280, 720);
+    for (let i = 0; i < 14; i++) engine.update(0.1, 1280, 720);
     expect(enemy.chargingMelee).toBe(false);
     expect(enemy.shadowCloneTimer).toBeGreaterThan(0);
   });
 
-  it('gives each AI archetype a reaction window before firing or reacquiring a target', () => {
-    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+  it.each(['relaxed', 'standard', 'hard'] as const)('delays target acquisition and follow-up shots on %s difficulty', (difficulty) => {
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10, difficulty);
+    const preset = AI_DIFFICULTY[difficulty];
+    const reactionTime = AI_COMBAT.sniper.reactionSeconds * preset.reactionMultiplier;
     const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
     engine.enemies = [enemy];
     engine.pickups = [];
@@ -1128,18 +1218,20 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     engine.player.x = enemy.x + 5 * TILE;
     engine.update(0.05, 1280, 720);
     expect(enemy.hasLosToTarget).toBe(true);
-    expect(enemy.reactionTimer).toBe(AI_COMBAT.sniper.reactionSeconds);
-    engine.update(AI_COMBAT.phantom.reactionSeconds, 1280, 720);
+    expect(enemy.reactionTimer).toBe(reactionTime);
+    engine.update(reactionTime * 0.6, 1280, 720);
     expect(enemy.gunfireTimer).toBe(0);
-    engine.update(AI_COMBAT.sniper.reactionSeconds, 1280, 720);
+    engine.update(reactionTime * 0.5, 1280, 720);
     expect(enemy.gunfireTimer).toBeGreaterThan(0);
+    const pistol = GUNS.find(gun => gun.kind === 'pistol')!;
+    expect(enemy.attackCooldown).toBeCloseTo(1 / pistol.fireRate);
 
     engine.player.x = 26.5 * TILE;
     engine.update(0.05, 1280, 720);
     expect(enemy.hasLosToTarget).toBe(false);
     engine.player.x = enemy.x + 5 * TILE;
     engine.update(0.15, 1280, 720);
-    expect(enemy.reactionTimer).toBe(AI_COMBAT.sniper.reactionSeconds);
+    expect(enemy.reactionTimer).toBe(reactionTime);
     expect(enemy.gunfireTimer).toBe(0);
   });
 
@@ -1166,6 +1258,65 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
     expect(soldier.moveIntensity).toBeGreaterThan(0);
   });
 
+  it('takes about 30 seconds to recover Qi at baseline reputation and scales with reputation', () => {
+    const { engine } = createTestEngine();
+    const updateQi = (engine as unknown as {
+      updatePlayerQi: (dt: number, reputationMultiplier: number) => void;
+    }).updatePlayerQi.bind(engine);
+
+    engine.player.qi = 0;
+    updateQi(15, getReputationQiMultiplier(10));
+    expect(engine.player.qi).toBeCloseTo(50);
+    updateQi(15, getReputationQiMultiplier(10));
+    expect(engine.player.qi).toBeCloseTo(100);
+
+    engine.player.qi = 0;
+    updateQi(15, getReputationQiMultiplier(1000));
+    expect(engine.player.qi).toBeCloseTo(100);
+
+    engine.player.qi = 0;
+    updateQi(37.5, getReputationQiMultiplier(0));
+    expect(engine.player.qi).toBeCloseTo(100);
+  });
+
+  it('swings on press and only releases a skill after the hold reaches full charge', () => {
+    const { engine } = createTestEngine();
+    engine.enemies = [];
+    engine.player.activeHand = 1;
+    const ready = vi.spyOn(sfx, 'meleeReady');
+    try {
+      engine.setMouseDown(true);
+      expect(engine.slashes).toHaveLength(1);
+      expect(engine.player.chargingMelee).toBe(false);
+      engine.setMouseDown(false);
+      expect(engine.slashes).toHaveLength(1);
+
+      engine.player.attackCooldown = 0;
+      engine.setMouseDown(true);
+      engine.update(MELEE_CHARGE_HOLD_SECONDS + 0.02, 1280, 720);
+      expect(engine.player.chargingMelee).toBe(true);
+      expect(ready).not.toHaveBeenCalled();
+      engine.update(engine.player.maxQi / QI_RATE.charge, 1280, 720);
+      engine.update(0.1, 1280, 720);
+      expect(engine.player.chargeReady).toBe(true);
+      expect(ready).toHaveBeenCalledTimes(1);
+      engine.setMouseDown(false);
+      expect(engine.player.royalShieldTimer).toBeGreaterThan(0);
+      expect(engine.player.chargeReady).toBe(false);
+    } finally {
+      ready.mockRestore();
+    }
+  });
+
+  it('loses pistol accuracy noticeably by 7.5 tiles and more gradually past that', () => {
+    const pistol = GUNS.find(gun => gun.kind === 'pistol')!;
+    const spreadAt = (tiles: number) => getGunSpread('pistol', pistol.baseCrosshair, tiles * TILE, 1);
+    const beforeKnee = spreadAt(7.5) - spreadAt(4.5);
+    const beyondKnee = spreadAt(10.5) - spreadAt(7.5);
+    expect(beforeKnee).toBeGreaterThan(beyondKnee * 2);
+    expect(beyondKnee).toBeGreaterThan(0);
+  });
+
   it('plays surface footsteps on movement and releases the melee charging cue on switch', () => {
     const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
     engine.enemies = [];
@@ -1187,7 +1338,7 @@ describe('Enemy pistol/knife spawn, fixed map weapon pool, no heal packs, AI wea
       expect(charge).not.toHaveBeenCalledWith(0);
       engine.equipHand(1);
       engine.setMouseDown(true);
-      engine.update(0.15, 1280, 720);
+      engine.update(MELEE_CHARGE_HOLD_SECONDS + 0.12, 1280, 720);
       expect(charge).toHaveBeenCalledWith(0);
       expect(charge.mock.calls.some(([progress]) => progress !== null && progress > 0)).toBe(true);
       engine.equipHand(0);
@@ -1394,6 +1545,8 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     engine.setMouseDown(true);
     engine.setMouseDown(false);
     expect(enemy.x).toBeGreaterThan(exBefore);
+    expect(enemy.x - exBefore).toBeLessThanOrEqual(SHIELD_BASH_DISTANCE + 0.01);
+    expect(engine.slashes).toHaveLength(0);
     expect(enemy.stunTimer).toBeGreaterThan(0);
     expect(enemy.hp).toBe(hpBeforeBash);
 
@@ -1436,7 +1589,7 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     engine.player.activeHand = 1;
     engine.player.qi = engine.player.maxQi;
     engine.setMouseDown(true);
-    engine.update(1.5, 1280, 720);
+    engine.update(2.05, 1280, 720);
     expect(engine.player.chargeReady).toBe(true);
     engine.setMouseDown(false);
     expect(meleeInHand(engine).durability).toBe(100);
@@ -1492,8 +1645,9 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     ally.y = 18.5 * TILE;
     ally.elevation = 0;
     ally.hp = 100;
+    rEng.player.angle = Math.PI;
     rEng.setMouseDown(true);
-    rEng.update(1.5, 1280, 720);
+    rEng.update(2.05, 1280, 720);
     expect(rEng.player.chargeReady).toBe(true);
     rEng.player.angle = 0;
     rEng.setMouseDown(false);
@@ -1521,8 +1675,9 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     sAlly.y = 18.5 * TILE;
     sAlly.elevation = 0;
     sAlly.hp = 100;
+    sEng.player.angle = Math.PI;
     sEng.setMouseDown(true);
-    sEng.update(1.5, 1280, 720);
+    sEng.update(2.05, 1280, 720);
     expect(sEng.player.chargeReady).toBe(true);
     sEng.player.angle = 0; // Aim right into map east wall (~28*TILE) to force bounce
     sEng.setMouseDown(false);
@@ -1602,10 +1757,19 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     damageEnemy(enemy, 30, false, 0, 0, false, false, 'player', 'mercenary');
     expect(engine.player.hp).toBe(60); // No passive lifesteal!
 
-    // Activate Vampire -> heals on hit
+    // A damaging hit pulls blood even when the attacker is already at full HP.
     engine.player.vampireTimer = 7.5;
+    engine.player.hp = engine.player.maxHp;
+    damageEnemy(enemy, 30, true, 0, 0, false, false, 'player', 'mercenary');
+    expect(engine.player.hp).toBe(engine.player.maxHp);
+    expect(engine['skillTraces']).toHaveLength(1);
+
+    engine.player.hp = 60;
     damageEnemy(enemy, 30, true, 0, 0, false, false, 'player', 'mercenary');
     expect(engine.player.hp).toBeGreaterThan(60);
+    expect(engine['skillTraces']).toHaveLength(2);
+    expect(engine['skillTraces'][1]).toMatchObject({ kind: 'siphon', fromX: enemy.x, fromY: enemy.y });
+    expect(engine['skillTraces'][1].destination).toBe(engine.player);
 
     // Expire Vampire via update -> no longer heals on hit
     for (let i = 0; i < 8; i++) engine.update(1.0, 1280, 720);
@@ -1640,7 +1804,7 @@ describe('Handheld tactical shield, death weapon drop/reset, Light Orb FF, Black
     meleeInHand(engine).def = MELEES.find((m) => m.kind === 'knife')!;
     engine.player.qi = engine.player.maxQi;
     engine.setMouseDown(true);
-    engine.update(1.5, 1280, 720);
+    engine.update(2.05, 1280, 720);
     expect(engine.player.chargeReady).toBe(true);
     engine.setMouseDown(false);
 
@@ -1747,6 +1911,7 @@ describe('Charge movement speed, heavy weapon balance, 1x1 non-adjacent hill sta
     engine.player.x = 10 * TILE;
     engine.player.qi = engine.player.maxQi;
     engine.setMouseDown(true);
+    engine.update(MELEE_CHARGE_HOLD_SECONDS + 0.02, 1280, 720);
     expect(engine.player.chargingMelee).toBe(true);
     engine.setKey('KeyD', true);
     for (let i = 0; i < 6; i++) engine.update(1 / 60, 1280, 720);
@@ -1860,7 +2025,7 @@ describe('Charge movement speed, heavy weapon balance, 1x1 non-adjacent hill sta
     engine.player.qi = engine.player.maxQi;
 
     engine.setMouseDown(true);
-    engine.update(1.5, 1280, 720);
+    engine.update(2.05, 1280, 720);
     expect(engine.player.chargeReady).toBe(true);
     engine.player.angle = (20 * Math.PI) / 180;
     engine.setMouseDown(false);
@@ -1932,14 +2097,21 @@ describe('Architectural parity: 100 HP, zero passives, independent player respaw
     engine.player.x = 13 * TILE;
     engine.player.invulnTimer = 99;
 
-    for (let i = 0; i < 16; i++) engine.update(0.1, 1280, 720);
+    for (let i = 0; i < 24 && engine.player.blindTimer === 0; i++) engine.update(0.1, 1280, 720);
     expect(engine.player.blindDuration).toBeGreaterThan(0);
     expect(engine.player.blindTimer).toBeGreaterThan(0);
+    expect(engine['skillTraces']).toMatchObject([{
+      kind: 'blink',
+      fromX: 12 * TILE,
+      fromY: 19.3 * TILE,
+      destination: { x: royalEnemy.x, y: royalEnemy.y },
+    }]);
 
     // Flashbang fades smoothly to 0 over time
     engine.update(1.2, 1280, 720);
     expect(engine.player.blindTimer).toBe(0);
     expect(engine.player.blindDuration).toBe(0);
+    expect(engine['skillTraces']).toHaveLength(0);
   });
 
   it('auto-reloads exhausted AI gun magazines from infinite reserve without pickup pads', () => {
@@ -1959,7 +2131,7 @@ describe('Architectural parity: 100 HP, zero passives, independent player respaw
     engine.player.invulnTimer = 99;
 
     // Wait past reaction window so AI fires 1 sniper shot -> magazine drops to 0 and reload starts
-    for (let i = 0; i < 10; i++) engine.update(0.1, 1280, 720);
+    for (let i = 0; i < 12; i++) engine.update(0.1, 1280, 720);
     const sniperSlot = enemy.weapons[0];
     expect(sniperSlot.type === 'gun' && sniperSlot.ammoInMag).toBe(0);
     expect(sniperSlot.type === 'gun' && sniperSlot.reloadTimer).toBeGreaterThan(0);
@@ -1970,6 +2142,42 @@ describe('Architectural parity: 100 HP, zero passives, independent player respaw
     for (let i = 0; i < 23; i++) engine.update(0.1, 1280, 720);
     expect(sniperSlot.type === 'gun' && sniperSlot.reloadTimer).toBe(0);
     expect(sniperSlot.type === 'gun' && sniperSlot.ammoInMag).toBe(1);
+  });
+
+  it('carries rifle recoil into the next shot, recovers between bursts, and dampens recoil with Eagle Eye', () => {
+    const { engine } = createTestEngine('shadow', 'industrial_warehouse', 10);
+    engine.enemies = [];
+    engine.player.x = 10.5 * TILE;
+    engine.player.y = 19.3 * TILE;
+    engine.player.elevation = 0;
+    gunInHand(engine).def = GUNS.find(gun => gun.kind === 'rifle')!;
+    gunInHand(engine).ammoInMag = 15;
+    const recoilState = engine as unknown as { rifleRecoilAngle: number; getPlayerRifleDrift: () => number };
+
+    const fire = () => {
+      engine.player.angle = 0;
+      engine.player.attackCooldown = 0;
+      engine.beams = [];
+      const random = vi.spyOn(Math, 'random').mockReturnValueOnce(0.5);
+      try {
+        engine.setMouseDown(true);
+        engine.setMouseDown(false);
+      } finally {
+        random.mockRestore();
+      }
+      const shot = engine.beams[0];
+      return Math.atan2(shot.y2 - shot.y1, shot.x2 - shot.x1);
+    };
+
+    expect(fire()).toBeCloseTo(0);
+    expect(fire()).toBeGreaterThan(0.01);
+    const accumulated = recoilState.rifleRecoilAngle;
+    engine.player.eagleEyeTimer = 8;
+    expect(fire()).toBeCloseTo(accumulated * 0.45, 3);
+    engine.player.eagleEyeTimer = 0;
+    const driftBeforeRest = recoilState.getPlayerRifleDrift();
+    engine.update(0.4, 1280, 720);
+    expect(recoilState.getPlayerRifleDrift()).toBeLessThan(driftBeforeRest * 0.5);
   });
 
   it('rapidly expands rifle crosshair radius on auto-fire so bursts disperse distinctly wider than tap shots', () => {
@@ -1995,9 +2203,9 @@ describe('Architectural parity: 100 HP, zero passives, independent player respaw
       const firstBeam = engine.beams[0];
       const firstDeviation = Math.abs(Math.atan2(firstBeam.y2 - firstBeam.y1, firstBeam.x2 - firstBeam.x1) - engine.player.angle);
 
-      // Hold mouse down across 12 x 0.04s frames (0.48s -> ~4 burst shots, dt < 0.085s beam life)
+      // Hold mouse down across 15 x 0.04s frames (0.60s -> three follow-up shots, dt < beam life)
       engine.beams = [];
-      for (let i = 0; i < 12; i++) engine.update(0.04, 1280, 720);
+      for (let i = 0; i < 15; i++) engine.update(0.04, 1280, 720);
       engine.setMouseDown(false);
 
       const lastBeam = engine.beams[engine.beams.length - 1];
@@ -2047,9 +2255,12 @@ describe('Rifle 1.1x pistol baseline, map & layer updates, wall height 10, zero 
     engine.setMousePos(1060, 360);
     const movedRifleSpread = getSpread(rifle);
     expect(movedRifleSpread).toBeGreaterThan(restedRifleSpread);
-    expect(movedRifleSpread).toBeLessThanOrEqual((rifle.maxCrosshair * 1.75) / 260 + 0.001);
+    expect(movedRifleSpread).toBeLessThanOrEqual(getGunSpread(rifle.kind, rifle.maxCrosshair, 420, 1) + 0.001);
 
     for (let i = 0; i < 60; i++) engine.update(0.05, 1280, 720);
+    camState.x = engine.player.x;
+    camState.y = engine.player.y;
+    camState.zoom = 1;
     expect(getSpread(rifle)).toBeCloseTo(restedRifleSpread, 5);
   });
 
@@ -2145,7 +2356,7 @@ describe('Rifle 1.1x pistol baseline, map & layer updates, wall height 10, zero 
       engine.player.qi = engine.player.maxQi;
 
       engine.setMouseDown(true);
-      engine.update(1.5, 1280, 720);
+      engine.update(2.05, 1280, 720);
       engine.player.angle = 0;
       engine.setMouseDown(false);
 
@@ -2204,7 +2415,7 @@ describe('Rifle 1.1x pistol baseline, map & layer updates, wall height 10, zero 
     // 1. Player Qi shockwave restores durability to 100, pushes/stuns enemy, deals 0 HP damage
     engine.player.qi = engine.player.maxQi;
     engine.setMouseDown(true);
-    engine.update(1.5, 1280, 720);
+    engine.update(2.05, 1280, 720);
     expect(engine.player.chargeReady).toBe(true);
     engine.setMouseDown(false);
     expect(meleeInHand(engine).durability).toBe(100);
@@ -2231,7 +2442,7 @@ describe('Rifle 1.1x pistol baseline, map & layer updates, wall height 10, zero 
     engine.player.hp = 100;
     engine.player.invulnTimer = 0;
 
-    for (let i = 0; i < 16; i++) engine.update(0.1, 1280, 720);
+    for (let i = 0; i < 26; i++) engine.update(0.1, 1280, 720);
     expect(engine.player.hp).toBe(100);
     expect(enemy.weapons[1].type === 'melee' && enemy.weapons[1].durability).toBe(100);
   });
@@ -2297,6 +2508,7 @@ describe('Solid height-10 trees, zero bush vision penalty, continuous rifle shri
 
     engine.setMousePos(900, 360);
     const afterWideFlick = getSpread(rifle);
+    const flickBloom = (engine as unknown as { crosshairBloom: number }).crosshairBloom;
     expect(afterWideFlick).toBeGreaterThan(rested);
 
     // 2. Micro cursor motion (1.5px/frame) still shrinks net crosshair toward rested every frame
@@ -2304,7 +2516,8 @@ describe('Solid height-10 trees, zero bush vision penalty, continuous rifle shri
       engine.setMousePos(900 + i * 1.5, 360);
       engine.update(1 / 60, 1280, 720);
     }
-    expect(getSpread(rifle)).toBeLessThan(afterWideFlick);
+    const recoveredBloom = (engine as unknown as { crosshairBloom: number }).crosshairBloom;
+    expect(recoveredBloom).toBeLessThan(flickBloom);
   });
 
   it('prevents pistol hold-to-autofire (semi-auto only) and enforces longer shot interval than rifle', () => {
@@ -2324,7 +2537,8 @@ describe('Solid height-10 trees, zero bush vision penalty, continuous rifle shri
     engine.setMouseDown(false);
     expect(gunInHand(engine).ammoInMag).toBe(pistol.magSize - 1);
 
-    // Must wait for pistol interval before next click fires
+    // Wait for the shared pistol interval before the next click.
+    engine.update(Math.max(0, 1 / pistol.fireRate - 0.6) + 0.01, 1280, 720);
     engine.setMouseDown(true);
     engine.setMouseDown(false);
     expect(gunInHand(engine).ammoInMag).toBe(pistol.magSize - 2);

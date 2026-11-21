@@ -266,6 +266,7 @@ export interface PlayerState {
   chargeReady: boolean;
   // 9 Faction × Melee active buffs
   royalShieldTimer: number;
+  royalShieldImpact?: { angle: number; time: number };
   eagleEyeTimer: number;
   shadowCloneTimer: number;
   vampireTimer: number;
@@ -323,6 +324,7 @@ export interface EnemyEntity {
   patrolTimer: number;
   // AI Active Faction × Melee Skill Buffs
   royalShieldTimer: number;
+  royalShieldImpact?: { angle: number; time: number };
   eagleEyeTimer: number;
   shadowCloneTimer: number;
   vampireTimer: number;
@@ -373,6 +375,28 @@ export interface Projectile {
   hitIds: Set<string>;
 }
 
+export interface ShadowDodge {
+  startedAt: number;
+  angle: number;
+}
+
+export interface ActorSkillVisuals {
+  mistX: number;
+  mistY: number;
+  mistOpacity: number;
+  sizeScale: number;
+  shadowDodge?: ShadowDodge;
+}
+
+export interface SkillTrace {
+  kind: 'blink' | 'siphon';
+  fromX: number;
+  fromY: number;
+  destination: { x: number; y: number };
+  startedAt: number;
+  duration: number;
+}
+
 export interface BeamTracer {
   x1: number;
   y1: number;
@@ -417,6 +441,7 @@ export interface FloatingText {
   life: number;
   maxLife: number;
   scale: number;
+  subtle?: boolean;
 }
 
 export type PickupKind = 'ammo' | 'gun' | 'melee';

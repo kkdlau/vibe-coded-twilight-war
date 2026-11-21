@@ -22,9 +22,9 @@ export function getWeaponSwapDuration(kind: GunKind | MeleeKind): number {
 }
 
 export function getReputationQiMultiplier(reputation: number): number {
-  const rep = Math.max(0, reputation);
-  if (rep <= 0) return 0.5;
-  return 0.5 + 0.5 * Math.log10(Math.max(1, rep));
+  const rep = Number.isFinite(reputation) ? Math.max(0, reputation) : 0;
+  if (rep < 10) return 0.8 + 0.2 * (rep / 10);
+  return 0.5 + 0.5 * Math.log10(rep);
 }
 
 export const FACTIONS: Record<FactionId, FactionInfo> = {
@@ -72,7 +72,7 @@ export const FACTIONS: Record<FactionId, FactionInfo> = {
       },
       claw: {
         name: '影分身',
-        desc: '開啟分身在左右兩側顯現殘影並閃避 2/3 遠程攻擊（子彈穿過時顯示 MISS），但被近戰傷害命中後會立即破除消失。',
+        desc: '展開影分身後有 2/3 機會閃避遠程攻擊。成功閃避時會側身留低殘影，近戰命中會即時破除分身。',
       },
       greatsword: {
         name: '黑龍波',
@@ -413,7 +413,7 @@ export const GUNS: GunDef[] = [
     kind: 'pistol',
     name: '制式小槍',
     damage: 25,
-    fireRate: 2.4,
+    fireRate: 2.0,
     magSize: 6,
     reloadTime: 0.95,
     moveSpeedMult: 0.94,
@@ -429,7 +429,7 @@ export const GUNS: GunDef[] = [
     kind: 'rifle',
     name: '突擊步槍',
     damage: 20,
-    fireRate: 8.5,
+    fireRate: 5.5,
     magSize: 15,
     reloadTime: 1.2,
     moveSpeedMult: 0.84,
@@ -438,7 +438,7 @@ export const GUNS: GunDef[] = [
     bloomPerShot: 14,
     pellets: 1,
     color: '#38BDF8',
-    description: '15 發連發步槍、攻速極快、最高傷 20，全圖無限射程。準心持續定速縮小（最小為小槍 1.1 倍），開火連發或大幅移動游標時擴散速度才大於回縮速度。',
+    description: '15 發連發步槍、射速每秒 5.5 發、最高傷 20，全圖無限射程。準心持續定速縮小（最小為小槍 1.1 倍），開火連發或大幅移動游標時擴散速度才大於回縮速度。',
   },
   {
     id: 'shotgun',

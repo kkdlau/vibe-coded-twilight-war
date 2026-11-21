@@ -7,9 +7,11 @@ import {
   drawOutlinedText,
   drawParticles,
   drawPickup,
-  drawProjectiles,
+  drawQiRecovery,
+  drawRoyalShield,
   drawSlashEffect,
 } from './combatRenderer';
+import { drawMorphGround, drawProjectiles, drawSkillTraces, drawVampireMist } from './skillRenderer';
 import { FACTIONS, FACTION_CHARACTERS, GUNS, MELEES, getReputationQiMultiplier, getWeaponSwapDuration } from './data';
 import {
   CHAR_BASE_RADIUS,
@@ -29,12 +31,21 @@ import { renderMapBaseLayer, renderMapCanopies } from './mapRenderer';
 import { ArenaMap, TILE, createArenaMap } from './maps';
 import {
   AI_COMBAT,
+  AI_DIFFICULTY,
+  type AiDifficulty,
   AI_PATROL,
+  AI_SURPRISE_SECONDS,
+  EAGLE_EYE_DURATION,
   GUN_AIM,
   GUNFIRE_ANIMATION_SECONDS,
   PLAYER_MOVEMENT,
+  QI_RATE,
+  ROYAL_SHIELD_PADDING,
+  SHIELD_BASH_DISTANCE,
+  MELEE_CHARGE_HOLD_SECONDS,
   RESPAWN_DELAY_SECONDS,
   RELOAD_CUES,
+  RIFLE_RECOIL,
   getGunSpread,
 } from './tuning';
 import { CustomMapData, buildArenaMapFromCustom } from './customMaps';
@@ -54,6 +65,8 @@ import {
   PickupItem,
   PlayerState,
   Projectile,
+  ActorSkillVisuals,
+  SkillTrace,
   SlashEffect,
   WeaponHand,
 } from './types';
@@ -141,6 +154,8 @@ export class TwilightEngine {
   public beams: BeamTracer[] = [];
   public slashes: SlashEffect[] = [];
   public particles: Particle[] = [];
+  private skillTraces: SkillTrace[] = [];
+  private actorSkillVisuals = new WeakMap<PlayerState | EnemyEntity, ActorSkillVisuals>();
   public floatingTexts: FloatingText[] = [];
   public pickups: PickupItem[] = [];
 
@@ -158,7 +173,9 @@ export class TwilightEngine {
   private mouseScreen = { x: 640, y: 360 };
   private mouseDown = false;
   private chargeSessionAllowed = false;
+  private meleeHeldSeconds = 0;
   private crosshairBloom = 0;
+  private rifleRecoilAngle = 0;
   private viewport = { width: 1280, height: 720 };
   private respawnTimer = 0;
   private distanceSinceStep = 0;
@@ -177,7 +194,8 @@ export class TwilightEngine {
     initialReputations: Record<FactionId, number>,
     onHudUpdate: (snap: HudSnapshot) => void,
     onReputationChange?: (reps: Record<FactionId, number>) => void,
-    customMap?: CustomMapData
+    customMap?: CustomMapData,
+    private readonly difficulty: AiDifficulty = 'standard'
   ) {
     this.mapId = mapId;
     this.onHudUpdate = onHudUpdate;
@@ -1076,6 +1094,7 @@ export class TwilightEngine {
     this.player.chargingMelee = false;
     this.player.chargeReady = false;
     this.chargeSessionAllowed = false;
+    this.meleeHeldSeconds = 0;
     sfx.setMeleeCharge(null);
   }
 
@@ -1091,6 +1110,8 @@ export class TwilightEngine {
         gun.maxCrosshair - gun.baseCrosshair,
         this.crosshairBloom + Math.min(18, Math.max(0, moveDist - 2) * 0.09)
       );
+    }
+    if (this.status === 'PLAYING') {
       const { x, y } = this.getWorldPointer();
       this.player.angle = Math.atan2(y - this.player.y, x - this.player.x);
     }
@@ -1105,10 +1126,10 @@ export class TwilightEngine {
     if (down && !this.mouseDown) {
       this.mouseDown = true;
       if (weapon.type === 'melee') {
-        this.player.chargingMelee = true;
-        this.chargeSessionAllowed = this.player.qi >= this.player.maxQi - 0.5;
-        this.player.chargeReady = false;
-        if (this.chargeSessionAllowed) sfx.setMeleeCharge(0);
+        this.performMeleeAttack();
+        if (this.mouseDown && this.status === 'PLAYING') {
+          this.chargeSessionAllowed = this.player.qi >= this.player.maxQi - 0.5;
+        }
       } else {
         if (this.player.swapTimer <= 0 && weapon.ammoInMag <= 0 && weapon.reloadTimer === 0) {
           this.startReload();
@@ -1118,8 +1139,8 @@ export class TwilightEngine {
       }
     } else if (!down && this.mouseDown) {
       this.mouseDown = false;
-      if (weapon.type === 'melee' && this.player.chargingMelee) {
-        this.releaseMeleeAttack();
+      if (weapon.type === 'melee' && this.player.chargeReady) {
+        this.performMeleeAttack();
       }
       this.cancelMeleeCharge();
     }
@@ -1200,6 +1221,7 @@ export class TwilightEngine {
 
   private resetGunFeedback() {
     this.crosshairBloom = 0;
+    this.rifleRecoilAngle = 0;
     this.player.gunfireTimer = 0;
   }
 
@@ -1217,8 +1239,12 @@ export class TwilightEngine {
       gun.kind,
       gun.baseCrosshair + this.crosshairBloom,
       dist(p.x, p.y, pointer.x, pointer.y),
-      p.eagleEyeTimer > 0 ? 0.45 : 1
+      p.eagleEyeTimer > 0 ? RIFLE_RECOIL.eagleEyeMultiplier : 1
     );
+  }
+
+  private getPlayerRifleDrift() {
+    return this.rifleRecoilAngle * (this.player.eagleEyeTimer > 0 ? RIFLE_RECOIL.eagleEyeMultiplier : 1);
   }
 
   public switchWeapon() {
@@ -1259,7 +1285,7 @@ export class TwilightEngine {
       return;
     }
     if (p.reserveAmmo <= 0) {
-      this.spawnText(p.x, p.y - 36, '備彈已空！請按 Space 拾取地圖彈藥箱', '#F87171', 1.0);
+      sfx.emptyGun();
       return;
     }
     weapon.reloadTimer = weapon.def.reloadTime;
@@ -1377,14 +1403,15 @@ export class TwilightEngine {
       const comboMult = p.comboEmpowerTimer > 0 ? 1 + p.delayCancelBonus : 1.0;
       if (p.comboEmpowerTimer > 0) p.comboEmpowerTimer = 0;
 
-      const muzzleX = p.x + Math.cos(p.angle) * (p.radius + 4);
-      const muzzleY = p.y + Math.sin(p.angle) * (p.radius + 4);
+      const aimAngle = p.angle + (gun.kind === 'rifle' ? this.getPlayerRifleDrift() : 0);
+      const muzzleX = p.x + Math.cos(aimAngle) * (p.radius + 4);
+      const muzzleY = p.y + Math.sin(aimAngle) * (p.radius + 4);
       const spreadRad = this.getPlayerGunSpread(gun);
       const infiniteRange = Math.hypot(this.map.width, this.map.height) + TILE * 2;
 
       for (let i = 0; i < pelletsToFire; i++) {
         const spreadOffset = (Math.random() - 0.5) * spreadRad;
-        const a = p.angle + spreadOffset;
+        const a = aimAngle + spreadOffset;
         const seg = this.traceBulletSegment(muzzleX, muzzleY, a, infiniteRange, p.elevation);
 
         let segEndX = seg.x2;
@@ -1394,7 +1421,7 @@ export class TwilightEngine {
         const candidates: { enemy: EnemyEntity; t: number; perpDist: number; hitX: number; hitY: number }[] = [];
         for (const e of this.enemies) {
           if (e.elevation - p.elevation >= 2.0) continue;
-          const res = segmentCircleHit(seg.x1, seg.y1, seg.x2, seg.y2, e.x, e.y, e.radius);
+          const res = this.getHitscanContact(seg, e);
           if (res.hit) {
             candidates.push({ enemy: e, ...res });
           }
@@ -1408,19 +1435,23 @@ export class TwilightEngine {
           const maxShotDmg = gun.damage * comboMult;
           const actualDmg = Math.max(1, Math.round(maxShotDmg * accuracyFactor));
 
-          this.damageEnemy(
-            hitInfo.enemy,
-            actualDmg,
-            false,
-            Math.cos(a) * 100,
-            Math.sin(a) * 100,
-            centerAccuracy >= 0.8,
-            false,
-            'player',
-            p.faction,
-            p.x,
-            p.y
-          );
+          if (hitInfo.enemy.royalShieldTimer > 0) {
+            this.deflectShieldShot(hitInfo.enemy, hitInfo.hitX, hitInfo.hitY, a);
+          } else {
+            this.damageEnemy(
+              hitInfo.enemy,
+              actualDmg,
+              false,
+              Math.cos(a) * 100,
+              Math.sin(a) * 100,
+              centerAccuracy >= 0.8,
+              false,
+              'player',
+              p.faction,
+              p.x,
+              p.y
+            );
+          }
 
           segEndX = hitInfo.hitX;
           segEndY = hitInfo.hitY;
@@ -1439,6 +1470,9 @@ export class TwilightEngine {
       }
 
       this.crosshairBloom = Math.min(gun.maxCrosshair - gun.baseCrosshair, this.crosshairBloom + gun.bloomPerShot);
+      if (gun.kind === 'rifle') {
+        this.rifleRecoilAngle = Math.min(RIFLE_RECOIL.maxAngle, this.rifleRecoilAngle + RIFLE_RECOIL.kick);
+      }
 
       this.camera.shake = Math.min(8, this.camera.shake + (gun.kind === 'shotgun' || gun.kind === 'sniper' ? 4.5 : 1.4));
       sfx.gunshot(gun.kind);
@@ -1446,9 +1480,9 @@ export class TwilightEngine {
     }
   }
 
-  private releaseMeleeAttack() {
+  private performMeleeAttack() {
     const p = this.player;
-    if (p.attackCooldown > 0 || p.swapTimer > 0) return;
+    if (p.swapTimer > 0 || (!p.chargeReady && p.attackCooldown > 0)) return;
 
     const weapon = p.weapons[p.activeHand];
     if (weapon.type !== 'melee') return;
@@ -1478,22 +1512,28 @@ export class TwilightEngine {
     p.attackAnimKind = melee.kind;
     if (p.comboEmpowerTimer > 0) p.comboEmpowerTimer = 0;
 
-    sfx.slash(melee.kind === 'greatsword');
+    if (melee.kind === 'shield') {
+      sfx.shieldBash();
+    } else {
+      sfx.slash(melee.kind === 'greatsword');
+    }
     const giantMult = p.giantTimer > 0 ? 1.3 : 1.0;
     const dmg = Math.round(melee.damage * comboMult * giantMult);
-    const style = melee.kind === 'knife' || melee.kind === 'shield' ? 'thrust' : melee.kind === 'claw' ? 'claw' : 'sweep';
-    this.slashes.push({
-      x: p.x,
-      y: p.y,
-      angle: p.angle,
-      arc: melee.arc,
-      reach: melee.reach * p.sizeScale,
-      color: melee.color,
-      life: melee.kind === 'greatsword' ? 0.24 : 0.16,
-      maxLife: melee.kind === 'greatsword' ? 0.24 : 0.16,
-      isUltimate: false,
-      style,
-    });
+    if (melee.kind !== 'shield') {
+      const style = melee.kind === 'knife' ? 'thrust' : melee.kind === 'claw' ? 'claw' : 'sweep';
+      this.slashes.push({
+        x: p.x,
+        y: p.y,
+        angle: p.angle,
+        arc: melee.arc,
+        reach: melee.reach * p.sizeScale,
+        color: melee.color,
+        life: melee.kind === 'greatsword' ? 0.24 : 0.16,
+        maxLife: melee.kind === 'greatsword' ? 0.24 : 0.16,
+        isUltimate: false,
+        style,
+      });
+    }
 
     this.applyPlayerMeleeHitbox(
       p.x,
@@ -1563,6 +1603,7 @@ export class TwilightEngine {
     if (fac === 'royal') {
       if (mk === 'knife') {
         p.royalShieldTimer = 6.5;
+        p.royalShieldImpact = undefined;
       } else if (mk === 'claw') {
         const hostiles = this.enemies.filter((e) => areHostile(p.faction, 'player', e.faction, e.id));
         if (hostiles.length > 0) {
@@ -1578,7 +1619,7 @@ export class TwilightEngine {
             p.x,
             p.y
           );
-          this.spawnBurst(p.x, p.y, '#38BDF8', 12);
+          this.addSkillTrace('blink', p, safeSpot, 0.58);
           p.x = safeSpot.x;
           p.y = safeSpot.y;
           p.elevation = this.getWalkableElevation(p.x, p.y);
@@ -1641,7 +1682,7 @@ export class TwilightEngine {
 
     if (fac === 'shadow') {
       if (mk === 'knife') {
-        p.eagleEyeTimer = 8.0;
+        p.eagleEyeTimer = EAGLE_EYE_DURATION;
       } else if (mk === 'claw') {
         p.shadowCloneTimer = 6.5;
       } else {
@@ -1721,7 +1762,7 @@ export class TwilightEngine {
     damage: number,
     isShieldPush = false
   ) {
-    const knockPower = isShieldPush ? 920 : 200;
+    const knockPower = isShieldPush ? SHIELD_BASH_DISTANCE / 0.05 : 200;
     for (const enemy of [...this.enemies]) {
       if (Math.abs(attackerElev - enemy.elevation) > 1.0) continue;
       const d = dist(ox, oy, enemy.x, enemy.y);
@@ -1742,8 +1783,7 @@ export class TwilightEngine {
             oy
           );
           if (isShieldPush && this.enemies.includes(enemy)) {
-            enemy.stunTimer = Math.max(enemy.stunTimer, 0.35);
-            this.spawnText(enemy.x, enemy.y - 36, '盾擊推開!', '#38BDF8', 0.95);
+            enemy.stunTimer = Math.max(enemy.stunTimer, 0.18);
           }
         }
       }
@@ -1753,6 +1793,71 @@ export class TwilightEngine {
   private isFrontalShieldBlock(defX: number, defY: number, defAngle: number, origX: number, origY: number): boolean {
     const incomingAngle = Math.atan2(origY - defY, origX - defX);
     return Math.abs(angleDiff(defAngle, incomingAngle)) <= Math.PI * 0.38;
+  }
+
+  private getActorSkillVisuals(actor: PlayerState | EnemyEntity): ActorSkillVisuals {
+    const existing = this.actorSkillVisuals.get(actor);
+    if (existing) return existing;
+    const visuals = { mistX: actor.x, mistY: actor.y, mistOpacity: 0, sizeScale: 1 };
+    this.actorSkillVisuals.set(actor, visuals);
+    return visuals;
+  }
+
+  private updateActorSkillVisuals(actor: PlayerState | EnemyEntity, dt: number) {
+    const visuals = this.getActorSkillVisuals(actor);
+    const mistTarget = actor.vampireTimer > 0 ? 1 : 0;
+    if (visuals.mistOpacity < 0.015) {
+      visuals.mistX = actor.x;
+      visuals.mistY = actor.y;
+    } else {
+      const follow = 1 - Math.exp(-dt * 8);
+      visuals.mistX += (actor.x - visuals.mistX) * follow;
+      visuals.mistY += (actor.y - visuals.mistY) * follow;
+      const trail = dist(actor.x, actor.y, visuals.mistX, visuals.mistY);
+      const maxTrail = actor.radius * 1.6;
+      if (trail > maxTrail) {
+        visuals.mistX = actor.x + (visuals.mistX - actor.x) * maxTrail / trail;
+        visuals.mistY = actor.y + (visuals.mistY - actor.y) * maxTrail / trail;
+      }
+    }
+    visuals.mistOpacity += (mistTarget - visuals.mistOpacity) * (1 - Math.exp(-dt * 7));
+    const morph = 1 - Math.exp(-dt * (actor.sizeScale > visuals.sizeScale ? 15 : 20));
+    visuals.sizeScale += (actor.sizeScale - visuals.sizeScale) * morph;
+    if (Math.abs(actor.sizeScale - visuals.sizeScale) < 0.002) visuals.sizeScale = actor.sizeScale;
+  }
+
+  private markShadowDodge(actor: PlayerState | EnemyEntity, originX?: number, originY?: number) {
+    const shotAngle = originX !== undefined && originY !== undefined
+      ? Math.atan2(actor.y - originY, actor.x - originX)
+      : actor.angle;
+    const side = Math.sin(actor.angle - shotAngle) < 0 ? -1 : 1;
+    this.getActorSkillVisuals(actor).shadowDodge = { startedAt: this.time, angle: shotAngle + side * Math.PI / 2 };
+  }
+
+  private drawActorSkillEffects(ctx: CanvasRenderingContext2D, actor: PlayerState | EnemyEntity, visuals: ActorSkillVisuals) {
+    if (visuals.mistOpacity > 0.015) {
+      drawVampireMist(ctx, actor, visuals, this.time);
+    }
+    if (visuals.sizeScale !== 1 || actor.sizeScale !== 1) {
+      drawMorphGround(ctx, actor, visuals.sizeScale, this.time);
+    }
+  }
+
+  private addSkillTrace(
+    kind: SkillTrace['kind'],
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    duration: number
+  ) {
+    this.skillTraces.push({
+      kind, fromX: from.x, fromY: from.y, destination: to, startedAt: this.time, duration,
+    });
+  }
+
+  private applyVampireHealing(attacker: PlayerState | EnemyEntity, victim: { x: number; y: number }, damage: number, melee: boolean) {
+    const heal = Math.max(1, Math.round(damage * (melee ? 0.5 : 1 / 3)));
+    attacker.hp = Math.min(attacker.maxHp, attacker.hp + heal);
+    this.addSkillTrace('siphon', victim, attacker, 0.64);
   }
 
   private damageEnemy(
@@ -1786,22 +1891,23 @@ export class TwilightEngine {
         }
         this.removeEnemy(enemy, false);
       } else {
-        this.spawnText(enemy.x, enemy.y - 24, `誤傷友軍 -${ffDmg}`, '#FCA5A5', 1.0);
+        this.spawnText(enemy.x, enemy.y - 24, `誤傷友軍 -${ffDmg}`, '#FCA5A5', 0.86, true);
       }
       return;
     }
 
-    // 敵人技能防禦判定：皇家護盾、天影影分身 MISS（近戰命中立即破除影分身）、第三變大減傷 / 變細近傷增加
+    // 敵人技能防禦判定：皇家護盾、天影影分身閃避（近戰命中立即破除影分身）、第三變大減傷 / 變細近傷增加
     if (enemy.royalShieldTimer > 0 && !isMelee) {
-      this.spawnText(enemy.x, enemy.y - 24, '護盾免疫!', '#38BDF8', 0.95);
+      this.markShieldImpact(enemy, hitOriginX, hitOriginY);
       return;
     }
     if (enemy.shadowCloneTimer > 0) {
       if (isMelee) {
         enemy.shadowCloneTimer = 0;
+        this.getActorSkillVisuals(enemy).shadowDodge = undefined;
         this.spawnText(enemy.x, enemy.y - 38, '近戰破除影分身!', '#FB7185', 1.05);
       } else if (Math.random() < 2 / 3) {
-        this.spawnText(enemy.x, enemy.y - 24, 'MISS', '#FB7185', 1.05);
+        this.markShadowDodge(enemy, hitOriginX, hitOriginY);
         return;
       }
     }
@@ -1876,6 +1982,13 @@ export class TwilightEngine {
         !enemy.focusedTargetId ||
         (enemy.focusedTargetId !== attackerId && (!enemy.hasLosToTarget || Math.random() < 0.6));
       if (shouldSwitchAggro) {
+        if (finalDmg > 0 && enemy.visibleTargetId !== attackerId) {
+          const surpriseDelay = (AI_COMBAT[enemy.archetype].reactionSeconds + AI_SURPRISE_SECONDS)
+            * AI_DIFFICULTY[this.difficulty].reactionMultiplier;
+          enemy.reactionTimer = Math.max(enemy.reactionTimer, surpriseDelay);
+          enemy.chargingMelee = false;
+          enemy.chargeReady = false;
+        }
         enemy.focusedTargetId = attackerId;
         enemy.aggroLockTimer = 5.0;
         enemy.lastSeenTargetPos = { x: attackerPos.x, y: attackerPos.y };
@@ -1892,15 +2005,12 @@ export class TwilightEngine {
       p.score += finalDmg;
 
       if (p.hp > 0 && p.vampireTimer > 0 && finalDmg > 0) {
-        const healRatio = isMelee ? 0.5 : 1 / 3;
-        const heal = Math.max(1, Math.round(finalDmg * healRatio));
-        p.hp = Math.min(p.maxHp, p.hp + heal);
+        this.applyVampireHealing(p, enemy, finalDmg, isMelee);
       }
 
       if (finalDmg > 0) sfx.hit(bullseye);
     } else if (attackerEntity && attackerEntity.vampireTimer > 0 && finalDmg > 0) {
-      const heal = Math.max(1, Math.round(finalDmg * (isMelee ? 0.5 : 1 / 3)));
-      attackerEntity.hp = Math.min(attackerEntity.maxHp, attackerEntity.hp + heal);
+      this.applyVampireHealing(attackerEntity, enemy, finalDmg, isMelee);
     }
 
     this.spawnBurst(enemy.x, enemy.y, finalDmg === 0 ? '#FFFFFF' : bullseye ? '#FBBF24' : '#F87171', bullseye ? 7 : 5);
@@ -1910,7 +2020,8 @@ export class TwilightEngine {
         enemy.y - 24,
         `-${finalDmg}`,
         '#EF4444',
-        bullseye ? 1.15 : 1.0
+        0.86,
+        true
       );
     }
 
@@ -1949,7 +2060,7 @@ export class TwilightEngine {
         enemy.faction === 'royal' || enemy.faction === 'shadow'
           ? `+1 ${facShort[p.faction]} · -1 ${facShort[enemy.faction]}`
           : `+1 ${facShort[p.faction]}聲望`;
-      this.spawnText(enemy.x, enemy.y - 42, repToast, '#38BDF8', 1.05);
+      this.spawnText(enemy.x, enemy.y - 42, repToast, '#7DD3FC', 0.85, true);
 
       p.score += 120 + p.comboCount * 15;
       this.factionScores[p.faction] += 25;
@@ -1975,16 +2086,17 @@ export class TwilightEngine {
     if (p.hp <= 0 || p.invulnTimer > 0) return;
 
     if (p.royalShieldTimer > 0 && !isMeleeAttack) {
-      this.spawnText(p.x, p.y - 38, '護盾免疫!', '#38BDF8', 1.0);
+      this.markShieldImpact(p, hitOriginX, hitOriginY);
       return;
     }
 
     if (p.shadowCloneTimer > 0) {
       if (isMeleeAttack) {
         p.shadowCloneTimer = 0;
+        this.getActorSkillVisuals(p).shadowDodge = undefined;
         this.spawnText(p.x, p.y - 44, '近戰破除影分身!', '#FB7185', 1.15);
       } else if (Math.random() < 2 / 3) {
-        this.spawnText(p.x, p.y - 38, 'MISS', '#FB7185', 1.15);
+        this.markShadowDodge(p, hitOriginX, hitOriginY);
         return;
       }
     }
@@ -2027,19 +2139,16 @@ export class TwilightEngine {
 
     if (finalDmg > 0) {
       p.hp -= finalDmg;
-      this.spawnText(p.x, p.y - 34, `-${finalDmg}`, '#EF4444', 1.05);
+      this.spawnText(p.x, p.y - 34, `-${finalDmg}`, '#EF4444', 0.86, true);
       if (attackerId) {
         const ae = this.enemies.find((e) => e.id === attackerId);
         if (ae && ae.vampireTimer > 0) {
-          ae.hp = Math.min(ae.maxHp, ae.hp + Math.max(1, Math.round(finalDmg * (isMeleeAttack ? 0.5 : 1 / 3))));
+          this.applyVampireHealing(ae, p, finalDmg, isMeleeAttack);
         }
       }
-    } else if (rawDmg <= 0) {
-      this.spawnText(p.x, p.y - 34, '被盾推開!', '#38BDF8', 0.95);
     }
 
     p.invulnTimer = finalDmg > 0 ? 0.2 : rawDmg > 0 ? 0.08 : 0.04;
-    this.camera.shake = Math.min(12, this.camera.shake + (finalDmg > 0 ? 5.5 : 2.0));
     if (p.hp <= 0) {
       this.handlePlayerDeath();
     } else {
@@ -2103,6 +2212,7 @@ export class TwilightEngine {
     p.blindTimer = 0;
     p.blindDuration = 0;
     p.sizeScale = 1;
+    this.actorSkillVisuals.delete(p);
     p.radius = p.baseRadius;
     p.hp = p.maxHp;
     p.qi = p.maxQi;
@@ -2339,7 +2449,7 @@ export class TwilightEngine {
     }
   }
 
-  private spawnText(x: number, y: number, text: string, color: string, scale = 1) {
+  private spawnText(x: number, y: number, text: string, color: string, scale = 1, subtle = false) {
     this.floatingTexts.push({
       x,
       y,
@@ -2349,6 +2459,7 @@ export class TwilightEngine {
       life: 0.85,
       maxLife: 0.85,
       scale,
+      subtle,
     });
   }
 
@@ -2376,6 +2487,33 @@ export class TwilightEngine {
     p.reserveAmmo -= needed;
     sfx.reload(weapon.def.kind, 'ready');
     this.emitHud();
+  }
+
+  private updatePlayerQi(dt: number, repSpeedMult: number) {
+    const p = this.player;
+    if (!this.chargeSessionAllowed) {
+      p.qi = Math.min(p.maxQi, p.qi + QI_RATE.recover * repSpeedMult * dt);
+      return;
+    }
+    if (p.chargeReady) return;
+
+    let chargeDt = dt;
+    if (!p.chargingMelee) {
+      this.meleeHeldSeconds += dt;
+      if (this.meleeHeldSeconds < MELEE_CHARGE_HOLD_SECONDS || p.swapTimer > 0) return;
+      p.chargingMelee = true;
+      chargeDt = Math.min(dt, this.meleeHeldSeconds - MELEE_CHARGE_HOLD_SECONDS);
+      sfx.setMeleeCharge(0);
+    }
+
+    p.qi = Math.max(0, p.qi - QI_RATE.charge * repSpeedMult * chargeDt);
+    if (p.qi === 0) {
+      p.chargeReady = true;
+      sfx.setMeleeCharge(null);
+      sfx.meleeReady();
+    } else {
+      sfx.setMeleeCharge(1 - p.qi / p.maxQi);
+    }
   }
 
   private updatePlayer(dt: number) {
@@ -2412,25 +2550,11 @@ export class TwilightEngine {
     const activeRep = p.reputations[p.faction];
     p.reputation = activeRep;
     const repSpeedMult = getReputationQiMultiplier(activeRep);
-    if (p.chargingMelee && this.chargeSessionAllowed) {
-      if (p.qi > 0) {
-        p.qi = Math.max(0, p.qi - 115 * repSpeedMult * dt);
-        if (p.qi === 0) {
-          p.chargeReady = true;
-          sfx.setMeleeCharge(null);
-          sfx.meleeReady();
-        } else {
-          sfx.setMeleeCharge(1 - p.qi / p.maxQi);
-        }
-      } else {
-        p.chargeReady = true;
-      }
-    } else {
-      p.qi = Math.min(p.maxQi, p.qi + 24 * repSpeedMult * dt);
-    }
+    this.updatePlayerQi(dt, repSpeedMult);
 
     const weapon = p.weapons[p.activeHand];
     this.crosshairBloom = Math.max(0, this.crosshairBloom - GUN_AIM.bloomRecovery * dt);
+    this.rifleRecoilAngle *= Math.exp(-RIFLE_RECOIL.recovery * dt);
 
     this.updateReloads(dt);
 
@@ -2478,6 +2602,9 @@ export class TwilightEngine {
 
     const respawningAtFrameStart = this.status === 'RESPAWNING';
     this.time += dt;
+    if (this.skillTraces.length > 0) {
+      this.skillTraces = this.skillTraces.filter((trace) => this.time - trace.startedAt < trace.duration);
+    }
     if (this.bannerTimer > 0) this.bannerTimer = Math.max(0, this.bannerTimer - dt);
     if (this.activeSkillBannerTimer > 0) this.activeSkillBannerTimer = Math.max(0, this.activeSkillBannerTimer - dt);
     if (this.camera.shake > 0) this.camera.shake = Math.max(0, this.camera.shake - dt * 26);
@@ -2513,6 +2640,8 @@ export class TwilightEngine {
     }
 
     this.updateEnemies(dt);
+    if (this.player.hp > 0) this.updateActorSkillVisuals(this.player, dt);
+    for (const enemy of this.enemies) this.updateActorSkillVisuals(enemy, dt);
     if (!this.isBattleActive()) return;
     this.updateProjectiles(dt);
     if (!this.isBattleActive()) return;
@@ -2618,6 +2747,55 @@ export class TwilightEngine {
   /**
    * 電腦士兵直線槍線射擊（即時顯示直線，碰到第一個角色或地形停止，絕不穿透多人）
    */
+  private getHitscanContact(
+    seg: { x1: number; y1: number; x2: number; y2: number },
+    target: PlayerState | EnemyEntity
+  ) {
+    if (target.royalShieldTimer <= 0) {
+      return segmentCircleHit(seg.x1, seg.y1, seg.x2, seg.y2, target.x, target.y, target.radius);
+    }
+
+    const dx = seg.x2 - seg.x1;
+    const dy = seg.y2 - seg.y1;
+    const startX = seg.x1 - target.x;
+    const startY = seg.y1 - target.y;
+    const radius = target.radius + ROYAL_SHIELD_PADDING;
+    const lengthSquared = dx * dx + dy * dy;
+    const startOffset = startX * startX + startY * startY - radius * radius;
+    const projection = startX * dx + startY * dy;
+    const discriminant = projection * projection - lengthSquared * startOffset;
+    const t = startOffset <= 0
+      ? 0
+      : lengthSquared > 0 && discriminant >= 0
+        ? (-projection - Math.sqrt(discriminant)) / lengthSquared
+        : -1;
+    return { hit: t >= 0 && t <= 1, t, hitX: seg.x1 + dx * t, hitY: seg.y1 + dy * t, perpDist: 0 };
+  }
+
+  private markShieldImpact(target: PlayerState | EnemyEntity, originX?: number, originY?: number) {
+    const angle = originX === undefined || originY === undefined
+      ? target.angle
+      : Math.atan2(originY - target.y, originX - target.x);
+    target.royalShieldImpact = { angle, time: this.time };
+    return angle;
+  }
+
+  private deflectShieldShot(target: PlayerState | EnemyEntity, x: number, y: number, incoming: number) {
+    const normal = this.markShieldImpact(target, x, y);
+    const outgoing = 2 * normal - incoming + Math.PI;
+    this.beams.push({
+      x1: x,
+      y1: y,
+      x2: x + Math.cos(outgoing) * 34,
+      y2: y + Math.sin(outgoing) * 34,
+      color: '#BAF2FF',
+      life: 0.15,
+      maxLife: 0.15,
+      width: 2.4,
+    });
+    this.spawnBurst(x, y, '#BAF2FF', 3);
+  }
+
   private fireEnemyGunHitscan(e: EnemyEntity, aimAngle: number, gunWeapon: Extract<EquippedWeapon, { type: 'gun' }>) {
     const gunDef = gunWeapon.def;
     e.gunfireTimer = GUNFIRE_ANIMATION_SECONDS;
@@ -2631,11 +2809,12 @@ export class TwilightEngine {
     const muzzleY = e.y + Math.sin(aimAngle) * (e.radius + 4);
     const pellets = gunDef.kind === 'shotgun' ? gunDef.pellets : 1;
     const spreadBase = e.eagleEyeTimer > 0 ? 0.025 : gunDef.kind === 'sniper' ? 0.03 : 0.09;
+    const aimSpread = (spreadBase + (pellets > 1 ? 0.14 : 0)) * AI_DIFFICULTY[this.difficulty].aimSpreadMultiplier;
     const maxRange = Math.hypot(this.map.width, this.map.height) + TILE * 2;
     const p = this.player;
 
     for (let i = 0; i < pellets; i++) {
-      const a = aimAngle + (Math.random() - 0.5) * (spreadBase + (pellets > 1 ? 0.14 : 0));
+      const a = aimAngle + (Math.random() - 0.5) * aimSpread;
       const seg = this.traceBulletSegment(muzzleX, muzzleY, a, maxRange, e.elevation);
 
       let segEndX = seg.x2;
@@ -2648,7 +2827,7 @@ export class TwilightEngine {
       const candidates: Candidate[] = [];
 
       if (p.hp > 0 && areHostile(e.faction, e.id, p.faction, 'player') && p.elevation - e.elevation < 2.0) {
-        const res = segmentCircleHit(seg.x1, seg.y1, seg.x2, seg.y2, p.x, p.y, p.radius);
+        const res = this.getHitscanContact(seg, p);
         if (res.hit) {
           candidates.push({ kind: 'player', ...res });
         }
@@ -2658,7 +2837,7 @@ export class TwilightEngine {
         if (other.id === e.id) continue;
         if (!areHostile(e.faction, e.id, other.faction, other.id)) continue;
         if (other.elevation - e.elevation >= 2.0) continue;
-        const res = segmentCircleHit(seg.x1, seg.y1, seg.x2, seg.y2, other.x, other.y, other.radius);
+        const res = this.getHitscanContact(seg, other);
         if (res.hit) {
           candidates.push({ kind: 'enemy', enemy: other, ...res });
         }
@@ -2674,7 +2853,10 @@ export class TwilightEngine {
         const centerAccuracy = clamp(1 - firstHit.perpDist / targetRadius, 0, 1);
         const scaledDmg = Math.max(3, Math.round(gunDef.damage * (0.4 + 0.6 * centerAccuracy)));
 
-        if (firstHit.kind === 'player') {
+        const target = firstHit.kind === 'player' ? p : firstHit.enemy;
+        if (target.royalShieldTimer > 0) {
+          this.deflectShieldShot(target, firstHit.hitX, firstHit.hitY, a);
+        } else if (firstHit.kind === 'player') {
           this.damagePlayer(scaledDmg, false, e.id, e.x, e.y);
         } else {
           this.damageEnemy(
@@ -2759,6 +2941,7 @@ export class TwilightEngine {
     if (fac === 'royal') {
       if (mk === 'knife') {
         e.royalShieldTimer = 6.5;
+        e.royalShieldImpact = undefined;
       } else if (mk === 'claw') {
         // 瞬移靠近敵人並閃光致盲（對敵對 AI 與敵對玩家皆會生效）
         const p = this.player;
@@ -2784,7 +2967,7 @@ export class TwilightEngine {
             e.x,
             e.y
           );
-          this.spawnBurst(e.x, e.y, '#38BDF8', 10);
+          this.addSkillTrace('blink', e, safeSpot, 0.58);
           e.x = safeSpot.x;
           e.y = safeSpot.y;
           e.elevation = this.getWalkableElevation(e.x, e.y);
@@ -2853,7 +3036,7 @@ export class TwilightEngine {
 
     if (fac === 'shadow') {
       if (mk === 'knife') {
-        e.eagleEyeTimer = 8.0;
+        e.eagleEyeTimer = EAGLE_EYE_DURATION;
       } else if (mk === 'claw') {
         e.shadowCloneTimer = 6.5;
       } else {
@@ -2952,6 +3135,7 @@ export class TwilightEngine {
   private updateEnemies(dt: number) {
     const p = this.player;
     const aiRepMult = getReputationQiMultiplier(AI_FIXED_REPUTATION);
+    const difficulty = AI_DIFFICULTY[this.difficulty];
     for (const e of [...this.enemies]) {
       if (!this.isBattleActive()) return;
       if (e.hp <= 0) continue;
@@ -2990,7 +3174,7 @@ export class TwilightEngine {
         e.visibleTargetId = null;
         e.chargingMelee = false;
         e.chargeReady = false;
-        e.qi = Math.min(e.maxQi, e.qi + 24 * aiRepMult * dt);
+        e.qi = Math.min(e.maxQi, e.qi + QI_RATE.recover * aiRepMult * dt);
         continue;
       }
 
@@ -3001,7 +3185,7 @@ export class TwilightEngine {
         e.visibleTargetId = null;
         e.chargingMelee = false;
         e.chargeReady = false;
-        e.qi = Math.min(e.maxQi, e.qi + 24 * aiRepMult * dt);
+        e.qi = Math.min(e.maxQi, e.qi + QI_RATE.recover * aiRepMult * dt);
         continue;
       }
 
@@ -3100,7 +3284,9 @@ export class TwilightEngine {
       const visibleTargetId = chosenVisible?.id ?? null;
       if (e.visibleTargetId !== visibleTargetId) {
         e.visibleTargetId = visibleTargetId;
-        e.reactionTimer = visibleTargetId ? combat.reactionSeconds : 0;
+        e.reactionTimer = visibleTargetId
+          ? Math.max(e.reactionTimer, combat.reactionSeconds * difficulty.reactionMultiplier)
+          : Math.max(0, e.reactionTimer - dt);
         e.chargingMelee = false;
         e.chargeReady = false;
       } else {
@@ -3155,9 +3341,9 @@ export class TwilightEngine {
       if (activeWeapon.type !== 'melee') {
         e.chargingMelee = false;
         e.chargeReady = false;
-        e.qi = Math.min(e.maxQi, e.qi + 24 * aiRepMult * dt);
+        e.qi = Math.min(e.maxQi, e.qi + QI_RATE.recover * aiRepMult * dt);
       } else if (e.chargingMelee) {
-        e.qi = Math.max(0, e.qi - 115 * aiRepMult * dt);
+        e.qi = Math.max(0, e.qi - QI_RATE.charge * aiRepMult * dt);
         if (e.qi === 0 && e.swapTimer <= 0) {
           e.chargeReady = true;
           const castAng = losTargetPos
@@ -3169,7 +3355,7 @@ export class TwilightEngine {
           e.attackCooldown = Math.max(e.attackCooldown, 0.25);
         }
       } else {
-        e.qi = Math.min(e.maxQi, e.qi + 24 * aiRepMult * dt);
+        e.qi = Math.min(e.maxQi, e.qi + QI_RATE.recover * aiRepMult * dt);
         const needEmergencyShieldRepair =
           !losTargetPos && activeWeapon.def.kind === 'shield' && activeWeapon.durability <= 45;
         if (e.swapTimer <= 0 && e.qi >= e.maxQi - 0.5 && (readyToAttack || needEmergencyShieldRepair)) {
@@ -3192,7 +3378,8 @@ export class TwilightEngine {
 
       if (losTargetPos) {
         const aimAngle = Math.atan2(losTargetPos.y - e.y, losTargetPos.x - e.x);
-        e.angle = aimAngle;
+        const turn = 5.5 * dt;
+        e.angle = readyToAttack ? aimAngle : e.angle + clamp(angleDiff(e.angle, aimAngle), -turn, turn);
 
         const desiredRange =
           !canHitRanged
@@ -3352,7 +3539,8 @@ export class TwilightEngine {
       if (moveFactor > 0) {
         const weaponSpeedMult = activeWeapon.def.moveSpeedMult;
         const moveAng = Math.atan2(desiredY - e.y, desiredX - e.x);
-        const stepDist = e.speed * weaponSpeedMult * moveFactor * dt;
+        const reactionPace = losTargetPos && e.reactionTimer > 0 ? 0.55 : 1;
+        const stepDist = e.speed * difficulty.moveMultiplier * weaponSpeedMult * moveFactor * reactionPace * dt;
         const moved = this.moveCharacterWithElevation(
           e.x,
           e.y,
@@ -3425,26 +3613,28 @@ export class TwilightEngine {
           e.attackAnimKind = meleeKind;
           const giantMult = e.giantTimer > 0 ? 1.3 : 1.0;
           const meleeDmg = Math.round(heldMeleeDef.damage * giantMult);
-          this.slashes.push({
-            x: e.x,
-            y: e.y,
-            angle: aimAngle,
-            arc: heldMeleeDef.arc,
-            reach: heldMeleeDef.reach,
-            color: e.color,
-            life: animDur,
-            maxLife: animDur,
-            isUltimate: false,
-            style: meleeKind === 'greatsword' ? 'sweep' : meleeKind === 'claw' ? 'claw' : 'thrust',
-          });
+          if (meleeKind !== 'shield') {
+            this.slashes.push({
+              x: e.x,
+              y: e.y,
+              angle: aimAngle,
+              arc: heldMeleeDef.arc,
+              reach: heldMeleeDef.reach,
+              color: e.color,
+              life: animDur,
+              maxLife: animDur,
+              isUltimate: false,
+              style: meleeKind === 'greatsword' ? 'sweep' : meleeKind === 'claw' ? 'claw' : 'thrust',
+            });
+          }
           if (targetIsPlayer) {
             if (meleeKind === 'shield') {
               const pushed = this.moveCharacterWithElevation(
                 p.x,
                 p.y,
                 p.elevation,
-                Math.cos(aimAngle) * 36,
-                Math.sin(aimAngle) * 36,
+                Math.cos(aimAngle) * SHIELD_BASH_DISTANCE,
+                Math.sin(aimAngle) * SHIELD_BASH_DISTANCE,
                 p.radius
               );
               p.x = pushed.x;
@@ -3453,7 +3643,7 @@ export class TwilightEngine {
             }
             this.damagePlayer(meleeDmg, true, e.id, e.x, e.y);
           } else if (targetEntity) {
-            const knockPower = meleeKind === 'shield' ? 750 : 140;
+            const knockPower = meleeKind === 'shield' ? SHIELD_BASH_DISTANCE / 0.05 : 140;
             this.damageEnemy(
               targetEntity,
               meleeDmg,
@@ -3468,7 +3658,7 @@ export class TwilightEngine {
               e.y
             );
             if (meleeKind === 'shield' && targetEntity.hp > 0) {
-              targetEntity.stunTimer = Math.max(targetEntity.stunTimer, 0.3);
+              targetEntity.stunTimer = Math.max(targetEntity.stunTimer, 0.18);
             }
           }
         } else if (postPickupWeapon.type === 'gun' && canHitRanged && postPickupWeapon.reloadTimer <= 0) {
@@ -3722,40 +3912,14 @@ export class TwilightEngine {
       drawSlashEffect(ctx, s);
     }
 
-    // 10. 電腦敵我士兵（皆 100 血，與玩家共用雙手武器欄、氣條集氣線與主動技能狀態）
+    // 10. 電腦敵我士兵及技能狀態
     for (const e of this.enemies) {
-      if (e.chargingMelee && e.qi > 0) {
-        const chargeRem = clamp(e.qi / e.maxQi, 0, 1);
-        for (let i = 0; i < 6; i++) {
-          const ang = (i / 6) * Math.PI * 2 + this.time * 5;
-          const outerDist = e.radius + 36 * chargeRem;
-          const innerDist = Math.max(e.radius * 0.5, outerDist - 12);
-          ctx.beginPath();
-          ctx.moveTo(e.x + Math.cos(ang) * outerDist, e.y + Math.sin(ang) * outerDist);
-          ctx.lineTo(e.x + Math.cos(ang) * innerDist, e.y + Math.sin(ang) * innerDist);
-          ctx.strokeStyle = e.color;
-          ctx.lineWidth = 2.2;
-          ctx.stroke();
-        }
+      if (!e.chargingMelee && e.qi < e.maxQi - 0.5) {
+        drawQiRecovery(ctx, e.x, e.y, e.radius, this.time);
       }
 
-      if (e.royalShieldTimer > 0) {
-        ctx.beginPath();
-        ctx.arc(e.x, e.y, e.radius + 7, 0, Math.PI * 2);
-        ctx.strokeStyle = '#38BDF8';
-        ctx.lineWidth = 2.5;
-        ctx.fillStyle = 'rgba(56, 189, 248, 0.16)';
-        ctx.fill();
-        ctx.stroke();
-      }
-
-      if (e.vampireTimer > 0) {
-        ctx.beginPath();
-        ctx.arc(e.x, e.y, e.radius + 6, 0, Math.PI * 2);
-        ctx.strokeStyle = '#F43F5E';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      }
+      const skillVisuals = this.getActorSkillVisuals(e);
+      this.drawActorSkillEffects(ctx, e, skillVisuals);
 
       const eActive = e.weapons[e.activeHand];
       const eGun = this.getEnemyGun(e);
@@ -3778,7 +3942,9 @@ export class TwilightEngine {
       drawCharacter(ctx, {
         x: e.x,
         y: e.y,
-        radius: e.radius,
+        radius: e.baseRadius * skillVisuals.sizeScale,
+        morphScale: skillVisuals.sizeScale,
+        shadowDodge: skillVisuals.shadowDodge,
         angle: e.angle,
         bodyColor: e.hitFlash > 0 ? '#FFFFFF' : e.characterSkin.bodyColor,
         role: e.isAlly ? 'ALLY' : 'ENEMY',
@@ -3797,7 +3963,12 @@ export class TwilightEngine {
         attackAnimProgress: eAtkProg,
         attackAnimKind: e.attackAnimKind,
         gunfireTimer: e.gunfireTimer,
+        eagleEyeRemaining: e.eagleEyeTimer,
       });
+
+      if (e.royalShieldTimer > 0) {
+        drawRoyalShield(ctx, e, this.time);
+      }
 
       const bw = 40;
       const bx = e.x - bw / 2;
@@ -3821,7 +3992,7 @@ export class TwilightEngine {
             : 'rgba(254, 243, 199, 0.95)';
       drawOutlinedText(
         ctx,
-        e.name,
+        e.name.replace(/\s*[（(]預設[）)]$/, ''),
         e.x,
         by - 5,
         nameplateColor,
@@ -3831,64 +4002,17 @@ export class TwilightEngine {
       );
     }
 
-    // 11. 玩家角色與集氣線條 / 氣場特效
+    // 11. 玩家角色及技能狀態
     const p = this.player;
     const facHex = p.characterSkin.bodyColor || FACTIONS[p.faction].accentHex;
 
     if (p.hp > 0) {
-      if (p.chargingMelee && this.chargeSessionAllowed && !p.chargeReady) {
-        for (let i = 0; i < 8; i++) {
-          const ang = (i / 8) * Math.PI * 2 + this.time * 4;
-          const cycle = (this.time * 3.5 + i * 0.25) % 1;
-          const outerDist = p.radius + 44 * (1 - cycle);
-          const innerDist = Math.max(p.radius * 0.5, outerDist - 16);
-          ctx.beginPath();
-          ctx.moveTo(p.x + Math.cos(ang) * outerDist, p.y + Math.sin(ang) * outerDist);
-          ctx.lineTo(p.x + Math.cos(ang) * innerDist, p.y + Math.sin(ang) * innerDist);
-          ctx.strokeStyle = FACTIONS[p.faction].accentHex;
-          ctx.lineWidth = 2.6;
-          ctx.stroke();
-        }
+      if (!this.chargeSessionAllowed && p.qi < p.maxQi - 0.5) {
+        drawQiRecovery(ctx, p.x, p.y, p.radius, this.time);
       }
 
-      if (p.chargeReady) {
-        const auraPulse = 1 + Math.sin(this.time * 14) * 0.08;
-        const auraColor = FACTIONS[p.faction].accentHex;
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, (p.radius + 14) * auraPulse, 0, Math.PI * 2);
-        ctx.fillStyle = `${auraColor}33`;
-        ctx.fill();
-        ctx.lineWidth = 3.5;
-        ctx.strokeStyle = auraColor;
-        ctx.stroke();
-
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, (p.radius + 22) * auraPulse, 0, Math.PI * 2);
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([6, 6]);
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      if (p.royalShieldTimer > 0) {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.radius + 8, 0, Math.PI * 2);
-        ctx.strokeStyle = '#38BDF8';
-        ctx.lineWidth = 3;
-        ctx.fillStyle = 'rgba(56, 189, 248, 0.16)';
-        ctx.fill();
-        ctx.stroke();
-      }
-
-      if (p.vampireTimer > 0) {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.radius + 6, 0, Math.PI * 2);
-        ctx.strokeStyle = '#F43F5E';
-        ctx.lineWidth = 2.5;
-        ctx.stroke();
-      }
+      const skillVisuals = this.getActorSkillVisuals(p);
+      this.drawActorSkillEffects(ctx, p, skillVisuals);
 
       const weapon = p.weapons[p.activeHand];
       const isReloading = weapon.type === 'gun' && weapon.reloadTimer > 0;
@@ -3902,7 +4026,9 @@ export class TwilightEngine {
       drawCharacter(ctx, {
         x: p.x,
         y: p.y,
-        radius: p.radius,
+        radius: p.baseRadius * skillVisuals.sizeScale,
+        morphScale: skillVisuals.sizeScale,
+        shadowDodge: skillVisuals.shadowDodge,
         angle: p.angle,
         bodyColor: p.invulnTimer > 0 && Math.floor(this.time * 16) % 2 === 0 ? '#FFFFFF' : facHex,
         role: 'PLAYER',
@@ -3921,7 +4047,12 @@ export class TwilightEngine {
         attackAnimProgress: playerAtkProg,
         attackAnimKind: p.attackAnimKind,
         gunfireTimer: p.gunfireTimer,
+        eagleEyeRemaining: p.eagleEyeTimer,
       });
+
+      if (p.royalShieldTimer > 0) {
+        drawRoyalShield(ctx, p, this.time);
+      }
 
       if (isReloading) {
         const barW = 42;
@@ -3940,6 +4071,7 @@ export class TwilightEngine {
 
     // 13. 陣營近武波動（黃色光彈與深紫藍長龍黑龍波）
     drawProjectiles(ctx, this.projectiles, this.time);
+    drawSkillTraces(ctx, this.skillTraces, this.time);
     drawParticles(ctx, this.particles);
 
     // 14. 高 z-index 樹葉（依不同地圖呈現相應樹冠）
@@ -3960,10 +4092,21 @@ export class TwilightEngine {
     if (this.status === 'PLAYING') {
       const weapon = p.weapons[p.activeHand];
       const radiusPx = weapon.type === 'gun' ? this.getPlayerGunSpread(weapon.def) * GUN_AIM.spreadScale : 12;
+      let { x: aimX, y: aimY } = this.mouseScreen;
+      if (weapon.type === 'gun' && weapon.def.kind === 'rifle' && weapon.reloadTimer <= 0 && weapon.ammoInMag > 0) {
+        const playerScreenX = width / 2 + (p.x - this.camera.x) * this.camera.zoom;
+        const playerScreenY = height / 2 + (p.y - this.camera.y) * this.camera.zoom;
+        const dx = aimX - playerScreenX;
+        const dy = aimY - playerScreenY;
+        const recoil = this.getPlayerRifleDrift();
+        aimX = playerScreenX + dx * Math.cos(recoil) - dy * Math.sin(recoil);
+        aimY = playerScreenY + dx * Math.sin(recoil) + dy * Math.cos(recoil);
+      }
+
       drawCrosshair(
         ctx,
-        this.mouseScreen.x,
-        this.mouseScreen.y,
+        aimX,
+        aimY,
         this.time,
         radiusPx,
         weapon.type === 'gun' && weapon.reloadTimer > 0,
@@ -4001,7 +4144,7 @@ export class TwilightEngine {
     }
     if (p.eagleEyeTimer > 0) {
       buffs.push(`鷹眼術 ${p.eagleEyeTimer.toFixed(1)}s`);
-      activeTimedSkills.push({ id: 'eagleEye', name: '鷹眼術', remaining: p.eagleEyeTimer, duration: 8.0, color: '#FB7185' });
+      activeTimedSkills.push({ id: 'eagleEye', name: '鷹眼術', remaining: p.eagleEyeTimer, duration: EAGLE_EYE_DURATION, color: '#FB7185' });
     }
     if (p.shadowCloneTimer > 0) {
       buffs.push(`影分身 ${p.shadowCloneTimer.toFixed(1)}s`);

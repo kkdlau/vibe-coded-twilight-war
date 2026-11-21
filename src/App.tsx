@@ -10,6 +10,7 @@ import {
   upsertCustomMap,
 } from './game/customMaps';
 import { CharacterSkin, FactionId, RunRecord } from './game/types';
+import type { AiDifficulty } from './game/tuning';
 
 const STORAGE_KEY = 'twilight_rpg_records_v2';
 const OLD_REP_STORAGE_KEY = 'twilight_rpg_reputation_v1';
@@ -54,6 +55,7 @@ export default function App() {
   const [selectedFaction, setSelectedFaction] = useState<FactionId>('royal');
   const [selectedCharacter, setSelectedCharacter] = useState<CharacterSkin | null>(null);
   const [selectedMapId, setSelectedMapId] = useState<string>('tokyo_shrine');
+  const [aiDifficulty, setAiDifficulty] = useState<AiDifficulty>('standard');
   const [factionMapChoice, setFactionMapChoice] = useState<string>('random');
   const [records, setRecords] = useState<RunRecord[]>(() => loadRecords());
   const [reputations, setReputations] = useState<Record<FactionId, number>>(() => loadReputations());
@@ -130,6 +132,7 @@ export default function App() {
         characterSkin={selectedCharacter}
         mapId={selectedMapId}
         customMap={activeCustomMap}
+        aiDifficulty={aiDifficulty}
         initialReputations={reputations}
         onReputationsChange={handleReputationsChange}
         onBackToFaction={() => setScreen('faction')}
@@ -144,6 +147,8 @@ export default function App() {
       <FactionRoomView
         faction={selectedFaction}
         initialMapChoice={factionMapChoice}
+        aiDifficulty={aiDifficulty}
+        onDifficultyChange={setAiDifficulty}
         customMaps={customMaps}
         reputations={reputations}
         onBackToLobby={() => setScreen('lobby')}

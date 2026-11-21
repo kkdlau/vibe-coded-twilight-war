@@ -9,6 +9,7 @@ import { sfx } from '../audio/sfx';
 import { FACTIONS } from '../game/data';
 import { CustomMapData } from '../game/customMaps';
 import { TwilightEngine } from '../game/engine';
+import type { AiDifficulty } from '../game/tuning';
 import { CharacterSkin, FactionId, HudSnapshot, RunRecord } from '../game/types';
 import { CharacterAvatarSvg, SkillIconSvg, WeaponIconSvg } from './WeaponArt';
 
@@ -17,12 +18,16 @@ interface GameCanvasViewProps {
   characterSkin: CharacterSkin;
   mapId: string;
   customMap?: CustomMapData;
+  aiDifficulty: AiDifficulty;
   initialReputations: Record<FactionId, number>;
   onReputationsChange: (reps: Record<FactionId, number>) => void;
   onBackToFaction: () => void;
   onExitLobby: () => void;
   onSaveRecord: (record: RunRecord) => void;
 }
+
+const OUTCOME_TITLE_DELAY_MS = 2400;
+const OUTCOME_PANEL_DELAY_MS = 850;
 
 function normalizeControlCode(e: KeyboardEvent): string {
   if (e.code && e.code !== 'Unidentified') {
@@ -70,6 +75,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
   characterSkin,
   mapId,
   customMap,
+  aiDifficulty,
   initialReputations,
   onReputationsChange,
   onBackToFaction,
@@ -80,6 +86,8 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
   const [tabHeld, setTabHeld] = useState(false);
   const [hud, setHud] = useState<HudSnapshot | null>(null);
   const [runSeed, setRunSeed] = useState(1);
+  const [outcomePhase, setOutcomePhase] = useState<'title' | 'panel' | null>(null);
+  const outcome = hud?.status === 'VICTORY' || hud?.status === 'GAME_OVER' ? hud.status : null;
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<TwilightEngine | null>(null);
@@ -107,7 +115,8 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       initRepsRef.current,
       (snap) => setHud(snap),
       (reps) => repCallbackRef.current(reps),
-      customMapRef.current
+      customMapRef.current,
+      aiDifficulty
     );
     engineRef.current = engine;
 
@@ -119,6 +128,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
     window.addEventListener('resize', resize);
 
     const onKeyDown = (e: KeyboardEvent) => {
+      if (engine.status === 'VICTORY' || engine.status === 'GAME_OVER') return;
       if (e.code === 'Tab' || e.key === 'Tab') {
         e.preventDefault();
         setTabHeld(true);
@@ -133,6 +143,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
+      if (engine.status === 'VICTORY' || engine.status === 'GAME_OVER') return;
       if (e.code === 'Tab' || e.key === 'Tab') {
         e.preventDefault();
         setTabHeld(false);
@@ -176,7 +187,22 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
     };
-  }, [faction, characterSkin, mapId, runSeed]);
+  }, [faction, characterSkin, mapId, aiDifficulty, runSeed]);
+
+  useEffect(() => {
+    setOutcomePhase(null);
+    if (!outcome) return;
+    setTabHeld(false);
+    let panelTimer: number | undefined;
+    const titleTimer = window.setTimeout(() => {
+      setOutcomePhase('title');
+      panelTimer = window.setTimeout(() => setOutcomePhase('panel'), OUTCOME_PANEL_DELAY_MS);
+    }, OUTCOME_TITLE_DELAY_MS);
+    return () => {
+      window.clearTimeout(titleTimer);
+      window.clearTimeout(panelTimer);
+    };
+  }, [outcome, runSeed]);
 
   useEffect(() => {
     if (!hud) return;
@@ -523,75 +549,77 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
         </div>
       )}
 
-      {/* GAME OVER / VICTORY MODAL */}
-      {(hud?.status === 'GAME_OVER' || hud?.status === 'VICTORY') && p && (
-        <div className="fixed inset-0 bg-black/78 backdrop-blur-xs flex items-center justify-center p-4 z-40">
-          <div className="w-full max-w-md bg-[#111827] border border-slate-700 rounded-xl p-7 shadow-2xl">
-            <div className="text-xs text-slate-400 mb-1">
-              {hud.mapName} · {facInfo.name} · 戰役結算
-            </div>
-            <h2
-              className={`text-3xl font-bold mb-2 ${
-                hud.status === 'VICTORY' ? 'text-amber-400' : 'text-rose-400'
-              }`}
-            >
-              {hud.status === 'VICTORY' ? '戰場制霸 · 陣營勝利！' : '三命耗盡 · 戰死沙場'}
-            </h2>
-            <p className="text-sm text-slate-300 mb-6">
-              {hud.status === 'VICTORY'
-                ? faction === 'mercenary'
-                  ? '你已清除全場所有敵我勢力，以孤狼之姿稱霸戰場！'
-                  : `你已協助${facInfo.name}清除全數非己方勢力，奪下本場勝利！`
-                : '結算統計已寫入本地戰績殿堂，準備好再次出戰了嗎？'}
-            </p>
+      {outcome && outcomePhase && hud && p && (
+        <div className="match-outcome fixed inset-0 z-40 flex flex-col items-center overflow-y-auto bg-[#080d18]/75 px-4 pb-4 pt-[min(18vh,8rem)]">
+          <h2
+            role="status"
+            className={`match-outcome-title mb-4 text-center text-4xl font-bold tracking-wider sm:text-5xl ${
+              outcome === 'VICTORY' ? 'text-amber-300' : 'text-rose-300'
+            }`}
+          >
+            {outcome === 'VICTORY' ? '遊戲勝利' : '遊戲失敗'}
+          </h2>
+          {outcomePhase === 'panel' && (
+            <div className="match-outcome-panel w-full max-w-md rounded-xl border border-slate-700 bg-[#111827] p-5 shadow-2xl sm:p-7">
+              <div className="mb-2 text-xs text-slate-400">
+                {hud.mapName} · {facInfo.name} · 戰役結算
+              </div>
+              <p className="text-sm text-slate-300 mb-6">
+                {hud.status === 'VICTORY'
+                  ? faction === 'mercenary'
+                    ? '你已清除全場所有敵我勢力，以孤狼之姿稱霸戰場！'
+                    : `你已協助${facInfo.name}清除全數非己方勢力，奪下本場勝利！`
+                  : '結算統計已寫入本地戰績殿堂，準備好再次出戰了嗎？'}
+              </p>
 
-            <div className="grid grid-cols-2 gap-3 mb-6 font-mono-num">
-              <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
-                <div className="text-xs text-slate-400">最終積分</div>
-                <div className="text-xl font-bold text-white">{p.score}</div>
-              </div>
-              <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
-                <div className="text-xs text-slate-400">總傷害輸出</div>
-                <div className="text-xl font-bold text-amber-400">{p.totalDamage}</div>
-              </div>
-              <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
-                <div className="text-xs text-slate-400">擊殺數 / 最高連殺</div>
-                <div className="text-lg font-bold text-sky-400">
-                  {p.kills} / {p.maxCombo}
+              <div className="grid grid-cols-2 gap-3 mb-6 font-mono-num">
+                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+                  <div className="text-xs text-slate-400">最終積分</div>
+                  <div className="text-xl font-bold text-white">{p.score}</div>
+                </div>
+                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+                  <div className="text-xs text-slate-400">總傷害輸出</div>
+                  <div className="text-xl font-bold text-amber-400">{p.totalDamage}</div>
+                </div>
+                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+                  <div className="text-xs text-slate-400">擊殺數 / 最高連殺</div>
+                  <div className="text-lg font-bold text-sky-400">
+                    {p.kills} / {p.maxCombo}
+                  </div>
+                </div>
+                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+                  <div className="text-xs text-slate-400">三方獨立聲望</div>
+                  <div className="text-xs font-bold text-emerald-400 mt-1">
+                    皇 {p.reputations.royal} / 影 {p.reputations.shadow} / 三 {p.reputations.mercenary}
+                  </div>
                 </div>
               </div>
-              <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
-                <div className="text-xs text-slate-400">三方獨立聲望</div>
-                <div className="text-xs font-bold text-emerald-400 mt-1">
-                  皇 {p.reputations.royal} / 影 {p.reputations.shadow} / 三 {p.reputations.mercenary}
-                </div>
-              </div>
-            </div>
 
-            <div className="flex flex-col gap-2.5">
-              <div className="flex gap-3">
+              <div className="flex flex-col gap-2.5">
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setRunSeed((s) => s + 1)}
+                    className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm rounded-lg cursor-pointer"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    再戰一局
+                  </button>
+                  <button
+                    onClick={onBackToFaction}
+                    className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-sky-300 text-sm font-medium rounded-lg cursor-pointer"
+                  >
+                    陣營界面
+                  </button>
+                </div>
                 <button
-                  onClick={() => setRunSeed((s) => s + 1)}
-                  className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm rounded-lg cursor-pointer"
+                  onClick={onExitLobby}
+                  className="w-full py-2.5 border border-slate-700 hover:bg-slate-800 text-slate-200 text-sm font-medium rounded-lg cursor-pointer"
                 >
-                  <RotateCcw className="w-4 h-4" />
-                  再戰一局
-                </button>
-                <button
-                  onClick={onBackToFaction}
-                  className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-sky-300 text-sm font-medium rounded-lg cursor-pointer"
-                >
-                  陣營界面
+                  返回大廳
                 </button>
               </div>
-              <button
-                onClick={onExitLobby}
-                className="w-full py-2.5 border border-slate-700 hover:bg-slate-800 text-slate-200 text-sm font-medium rounded-lg cursor-pointer"
-              >
-                返回大廳
-              </button>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>

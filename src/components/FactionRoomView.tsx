@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { ArrowLeft, ChevronDown, MapPin, Play, Shuffle, Swords } from 'lucide-react';
 import { BIOME_OPTIONS, CustomMapData } from '../game/customMaps';
 import { FACTIONS, FACTION_CHARACTERS, MAP_CATALOG, getReputationQiMultiplier } from '../game/data';
+import { AI_DIFFICULTY, type AiDifficulty } from '../game/tuning';
 import { CharacterSkin, FactionId, MeleeKind } from '../game/types';
 import { MiniMapPreview } from './MiniMapPreview';
 import { CharacterAvatarSvg, FactionLogoSvg, WeaponIconSvg } from './WeaponArt';
@@ -9,6 +10,8 @@ import { CharacterAvatarSvg, FactionLogoSvg, WeaponIconSvg } from './WeaponArt';
 interface FactionRoomViewProps {
   faction: FactionId;
   initialMapChoice: string;
+  aiDifficulty: AiDifficulty;
+  onDifficultyChange: (difficulty: AiDifficulty) => void;
   customMaps: CustomMapData[];
   reputations: Record<FactionId, number>;
   onBackToLobby: () => void;
@@ -29,6 +32,8 @@ function pickRandomMapId(): string {
 export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
   faction,
   initialMapChoice,
+  aiDifficulty,
+  onDifficultyChange,
   customMaps,
   reputations,
   onBackToLobby,
@@ -145,7 +150,7 @@ export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
                 <Swords className="w-4 h-4 text-amber-400 shrink-0" />
                 <span>陣營近戰集氣技能</span>
               </div>
-              <span className="text-[11px] text-slate-400">長按左鍵集氣至 0 釋放</span>
+              <span className="text-[11px] text-slate-400">點擊左鍵攻擊，按住集氣，氣滿後鬆開施放</span>
             </div>
 
             <div className="flex-1 min-h-0 flex flex-col justify-evenly divide-y divide-slate-800/80">
@@ -218,6 +223,20 @@ export const FactionRoomView: React.FC<FactionRoomViewProps> = ({
                 <ChevronDown className="pointer-events-none w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
               </div>
             </div>
+          </div>
+
+          <div className="flex shrink-0 items-center justify-between gap-3">
+            <label htmlFor="ai-difficulty" className="text-xs font-semibold text-slate-200">電腦難度</label>
+            <select
+              id="ai-difficulty"
+              value={aiDifficulty}
+              onChange={(event) => onDifficultyChange(event.target.value as AiDifficulty)}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-slate-100"
+            >
+              {Object.entries(AI_DIFFICULTY).map(([value, setting]) => (
+                <option key={value} value={value}>{setting.label}</option>
+              ))}
+            </select>
           </div>
 
           {/* Map Preview Container: Show mystery panel on Random, real MiniMapPreview with Zoom/Scroll when specific map chosen */}
