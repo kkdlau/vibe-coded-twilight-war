@@ -939,12 +939,10 @@ export class TwilightEngine {
     if (bElev - aElev >= 2.0) return false;
     const totalD = dist(ax, ay, bx, by);
     if (totalD <= 18) return true;
-    const seg = this.traceBulletSegment(ax, ay, Math.atan2(by - ay, bx - ax), totalD, aElev, false, {
-      elev: bElev,
-      dist: totalD,
-    });
+    const seg = this.traceBulletSegment(ax, ay, Math.atan2(by - ay, bx - ax), totalD, aElev, false);
     const reachedDist = dist(ax, ay, seg.x2, seg.y2);
-    return reachedDist >= totalD - 20;
+    if (reachedDist < totalD - 20) return false;
+    return bElev - seg.elevAt(Math.min(reachedDist, totalD)) < 2.0;
   }
 
   /**
@@ -1024,69 +1022,10 @@ export class TwilightEngine {
     };
   }
 
-  private findWallOrPinchEndpoint(
-    x1: number,
-    y1: number,
-    angle: number,
-    maxDist: number
-  ): { x2: number; y2: number; hitWall: boolean } {
-    const vx = Math.cos(angle);
-    const vy = Math.sin(angle);
-    const wallHit = this.findEarliestWallHit(x1, y1, x1 + vx * maxDist, y1 + vy * maxDist);
-    const wallDist = wallHit ? dist(x1, y1, wallHit.x, wallHit.y) : maxDist;
-    let remaining = Math.min(maxDist, wallDist);
-    let curX = x1;
-    let curY = y1;
-    const stepSize = 4;
-    while (remaining > 0) {
-      const prevX = curX;
-      const prevY = curY;
-      const prevGx = clamp(Math.floor(prevX / TILE), 0, this.map.cols - 1);
-      const prevGy = clamp(Math.floor(prevY / TILE), 0, this.map.rows - 1);
-      const step = Math.min(stepSize, remaining);
-      curX += vx * step;
-      curY += vy * step;
-      remaining -= step;
-      if (curX < 0 || curX > this.map.width || curY < 0 || curY > this.map.height) {
-        return { x2: clamp(curX, 0, this.map.width), y2: clamp(curY, 0, this.map.height), hitWall: false };
-      }
-      const curGx = clamp(Math.floor(curX / TILE), 0, this.map.cols - 1);
-      const curGy = clamp(Math.floor(curY / TILE), 0, this.map.rows - 1);
-      if (
-        curGx !== prevGx &&
-        curGy !== prevGy &&
-        this.isSolidWallCell(curGx, prevGy) &&
-        this.isSolidWallCell(prevGx, curGy)
-      ) {
-        return { x2: prevX, y2: prevY, hitWall: true };
-      }
-    }
-    if (wallHit && wallDist <= maxDist) {
-      return { x2: wallHit.x, y2: wallHit.y, hitWall: true };
-    }
-    return { x2: curX, y2: curY, hitWall: false };
-  }
-
-  private canBulletReachPoint(
-    ax: number,
-    ay: number,
-    aElev: number,
-    bx: number,
-    by: number,
-    bElev: number
-  ): boolean {
-    const totalD = dist(ax, ay, bx, by);
-    if (totalD <= 2) return true;
-    const seg = this.traceBulletSegment(ax, ay, Math.atan2(by - ay, bx - ax), totalD, aElev, false, {
-      elev: bElev,
-      dist: totalD,
-    });
-    return dist(ax, ay, seg.x2, seg.y2) >= totalD - 2;
-  }
-
   /**
-   * 子彈射線高度阻擋物理：
-   * - 可由高處往低處射，但經過低處空地後再遇大箱／高台仍會依 3D 射線高度與最小經過地形受阻
+   * 子彈射線高度阻擋物理（單調下降高度模型）：
+   * - 子彈以 startElev 出發，可越過 Δh <= 1.0 的低矮掩體（小木箱／欄杆）而不會抬升高度
+   * - 一旦經過較矮地形或箱體表面，bulletElev 會永久降至該表面高度，之後不可再爬升回原本高度
    * - 高度差 > 1.0 且 < 2.0（如大箱子）：子彈深入邊緣約 0.5 格處停止
    * - 高度差 >= 2.0 格（如貨櫃、2層山、實牆）：子彈在邊緣即停止（0 穿透）
    */
@@ -1096,9 +1035,8 @@ export class TwilightEngine {
     angle: number,
     maxDist: number,
     startElev: number,
-    emitBurst = true,
-    targetAim?: { elev: number; dist: number }
-  ): { x1: number; y1: number; x2: number; y2: number } {
+    emitBurst = true
+  ): { x1: number; y1: number; x2: number; y2: number; endElev: number; elevAt: (distFromStart: number) => number } {
     const stepSize = 4;
     let curX = x1;
     let curY = y1;
@@ -1107,9 +1045,24 @@ export class TwilightEngine {
     const wallHit = this.findEarliestWallHit(x1, y1, x1 + vx * maxDist, y1 + vy * maxDist);
     const wallDist = wallHit ? dist(x1, y1, wallHit.x, wallHit.y) : maxDist;
     const effectiveMaxDist = Math.min(maxDist, wallDist);
-    let minTraversedElev = startElev;
-    let leftStartCrate = startElev < 1.0;
-    let leftStartPlatform = false;
+    let bulletElev = startElev;
+    const elevDrops: { dist: number; elev: number }[] = [{ dist: 0, elev: startElev }];
+    const elevAt = (distFromStart: number): number => {
+      let e = startElev;
+      for (const drop of elevDrops) {
+        if (drop.dist <= distFromStart) e = drop.elev;
+        else break;
+      }
+      return e;
+    };
+    const buildResult = (x2: number, y2: number) => ({
+      x1,
+      y1,
+      x2,
+      y2,
+      endElev: bulletElev,
+      elevAt,
+    });
     let remaining = effectiveMaxDist;
     let traveled = 0;
     let penetratingHalfTile = false;
@@ -1127,12 +1080,7 @@ export class TwilightEngine {
       traveled += step;
 
       if (curX < 0 || curX > this.map.width || curY < 0 || curY > this.map.height) {
-        return {
-          x1,
-          y1,
-          x2: clamp(curX, 0, this.map.width),
-          y2: clamp(curY, 0, this.map.height),
-        };
+        return buildResult(clamp(curX, 0, this.map.width), clamp(curY, 0, this.map.height));
       }
 
       const curGx = clamp(Math.floor(curX / TILE), 0, this.map.cols - 1);
@@ -1144,73 +1092,55 @@ export class TwilightEngine {
         this.isSolidWallCell(prevGx, curGy)
       ) {
         if (emitBurst) this.spawnBurst(prevX, prevY, '#E2E8F0', 4);
-        return { x1, y1, x2: prevX, y2: prevY };
+        return buildResult(prevX, prevY);
       }
 
       const h = this.getHeightAtPoint(curX, curY);
-      if (!h.isCrate && !penetratingHalfTile) {
-        leftStartCrate = true;
-        const effectiveFloor = startElev < 0 ? h.terrainHeight : Math.max(0, h.terrainHeight);
-        minTraversedElev = Math.min(minTraversedElev, effectiveFloor);
-      }
-      if (h.totalHeight < startElev - 0.01) {
-        leftStartPlatform = true;
-        leftStartCrate = true;
-      }
-
-      let refElev = minTraversedElev;
-      if (targetAim) {
-        if (targetAim.elev > startElev) {
-          // 仰射時子彈不可憑空抬升越障，仍受起點與經過最低地形約束
-          refElev = minTraversedElev;
-        } else if (!leftStartPlatform) {
-          // 尚在射擊者自身站台範圍內，不自我遮擋
-          refElev = startElev;
-        } else {
-          // 離開高處站台並越過低地後，依 3D 彈道斜率線性下降至目標高度
-          const frac = targetAim.dist > 0 ? clamp(traveled / targetAim.dist, 0, 1) : 1;
-          refElev = startElev + (targetAim.elev - startElev) * frac;
+      if (!h.isWall && !penetratingHalfTile) {
+        const rawSurface = h.isCrate ? h.totalHeight : h.terrainHeight;
+        const effectiveSurface = startElev < 0 ? rawSurface : Math.max(0, rawSurface);
+        if (effectiveSurface < bulletElev) {
+          bulletElev = effectiveSurface;
+          elevDrops.push({ dist: traveled, elev: bulletElev });
         }
       }
 
-      const heightDiff = h.totalHeight - refElev;
-      const crateBlocks = h.isCrate && (leftStartCrate || h.totalHeight > startElev) && heightDiff > 1.0;
-      const cliffBlocks = !h.isCrate && heightDiff > 1.0;
-      const immediateElevBlock = (!h.isCrate || leftStartCrate || h.totalHeight > startElev) && heightDiff >= 2.0;
-
-      if (h.isWall || immediateElevBlock) {
+      const heightDiff = h.totalHeight - bulletElev;
+      if (h.isWall || heightDiff >= 2.0) {
         if (emitBurst) this.spawnBurst(prevX, prevY, '#E2E8F0', 4);
-        return { x1, y1, x2: prevX, y2: prevY };
+        return buildResult(prevX, prevY);
       }
 
+      const blocksHalfTile = heightDiff > 1.0;
       if (penetratingHalfTile) {
-        if (!crateBlocks && !cliffBlocks) {
+        if (!blocksHalfTile) {
           // Exited the narrow 1.5 ridge cleanly
           penetratingHalfTile = false;
+          penetrationLeft = TILE * 0.49;
           continue;
         }
         penetrationLeft -= step;
         if (penetrationLeft <= 0) {
           if (emitBurst) this.spawnBurst(curX, curY, '#E2E8F0', 4);
-          return { x1, y1, x2: curX, y2: curY };
+          return buildResult(curX, curY);
         }
-      } else if (crateBlocks || cliffBlocks) {
+      } else if (blocksHalfTile) {
         // 高度差 > 1.0 且 < 2.0（例如 1.5 格大箱）：深入邊緣約 0.5 格後才停下
         penetratingHalfTile = true;
         penetrationLeft -= step;
         if (penetrationLeft <= 0) {
           if (emitBurst) this.spawnBurst(curX, curY, '#E2E8F0', 4);
-          return { x1, y1, x2: curX, y2: curY };
+          return buildResult(curX, curY);
         }
       }
     }
 
     if (wallHit && wallDist <= maxDist) {
       if (emitBurst) this.spawnBurst(wallHit.x, wallHit.y, '#E2E8F0', 4);
-      return { x1, y1, x2: wallHit.x, y2: wallHit.y };
+      return buildResult(wallHit.x, wallHit.y);
     }
 
-    return { x1, y1, x2: curX, y2: curY };
+    return buildResult(curX, curY);
   }
 
   private spawnMapWeapons() {
@@ -1629,30 +1559,23 @@ export class TwilightEngine {
         const a = aimAngle + spreadOffset;
         const muzzleX = p.x + Math.cos(a) * muzzleDist;
         const muzzleY = p.y + Math.sin(a) * muzzleDist;
-        const preSeg = this.traceBulletSegment(p.x, p.y, a, muzzleDist, p.elevation, false);
-        const reachedMuzzle = dist(p.x, p.y, preSeg.x2, preSeg.y2) >= muzzleDist - 0.5;
-        const seg = reachedMuzzle
-          ? this.traceBulletSegment(muzzleX, muzzleY, a, infiniteRange, p.elevation, false)
-          : preSeg;
-        const wallEnd = reachedMuzzle
-          ? this.findWallOrPinchEndpoint(muzzleX, muzzleY, a, infiniteRange)
-          : { x2: preSeg.x2, y2: preSeg.y2, hitWall: true };
+        const fullSeg = this.traceBulletSegment(p.x, p.y, a, infiniteRange, p.elevation, false);
+        const fullSegDist = dist(p.x, p.y, fullSeg.x2, fullSeg.y2);
+        const reachedMuzzle = fullSegDist >= muzzleDist - 0.5;
 
-        let segEndX = seg.x2;
-        let segEndY = seg.y2;
+        let segEndX = fullSeg.x2;
+        let segEndY = fullSeg.y2;
 
         // 槍械子彈碰人即止，不可一子彈攻擊兩人，且不得隔實牆、對角牆縫或地形高箱遮擋擦邊命中！
         const candidates: { enemy: EnemyEntity; t: number; perpDist: number; hitX: number; hitY: number }[] = [];
         for (const e of this.enemies) {
           if (e.elevation - p.elevation >= 2.0) continue;
-          const res = this.getHitscanContact({ x1: seg.x1, y1: seg.y1, x2: wallEnd.x2, y2: wallEnd.y2 }, e);
-          if (
-            res.hit &&
-            !this.findEarliestWallHit(res.hitX, res.hitY, e.x, e.y) &&
-            this.canBulletReachPoint(seg.x1, seg.y1, p.elevation, res.hitX, res.hitY, e.elevation)
-          ) {
-            candidates.push({ enemy: e, ...res });
-          }
+          const res = this.getHitscanContact(fullSeg, e);
+          if (!res.hit) continue;
+          if (this.findEarliestWallHit(res.hitX, res.hitY, e.x, e.y)) continue;
+          const hitDist = dist(fullSeg.x1, fullSeg.y1, res.hitX, res.hitY);
+          if (e.elevation - fullSeg.elevAt(hitDist) >= 2.0) continue;
+          candidates.push({ enemy: e, ...res });
         }
         candidates.sort((c1, c2) => c1.t - c2.t);
 
@@ -1683,13 +1606,17 @@ export class TwilightEngine {
 
           segEndX = hitInfo.hitX;
           segEndY = hitInfo.hitY;
-        } else if (reachedMuzzle && dist(muzzleX, muzzleY, seg.x2, seg.y2) < infiniteRange - 1) {
-          this.spawnBurst(seg.x2, seg.y2, '#E2E8F0', 4);
+        } else if (reachedMuzzle && fullSegDist < infiniteRange - 1) {
+          this.spawnBurst(fullSeg.x2, fullSeg.y2, '#E2E8F0', 4);
         }
 
+        const endDist = dist(p.x, p.y, segEndX, segEndY);
+        const beamStartX = reachedMuzzle && endDist > muzzleDist ? muzzleX : p.x;
+        const beamStartY = reachedMuzzle && endDist > muzzleDist ? muzzleY : p.y;
+
         this.beams.push({
-          x1: seg.x1,
-          y1: seg.y1,
+          x1: beamStartX,
+          y1: beamStartY,
           x2: segEndX,
           y2: segEndY,
           color: gun.color,
@@ -3513,17 +3440,12 @@ export class TwilightEngine {
       const a = aimAngle + (Math.random() - 0.5) * spreadRad;
       const muzzleX = e.x + Math.cos(a) * muzzleDist;
       const muzzleY = e.y + Math.sin(a) * muzzleDist;
-      const preSeg = this.traceBulletSegment(e.x, e.y, a, muzzleDist, e.elevation, false);
-      const reachedMuzzle = dist(e.x, e.y, preSeg.x2, preSeg.y2) >= muzzleDist - 0.5;
-      const seg = reachedMuzzle
-        ? this.traceBulletSegment(muzzleX, muzzleY, a, maxRange, e.elevation, false)
-        : preSeg;
-      const wallEnd = reachedMuzzle
-        ? this.findWallOrPinchEndpoint(muzzleX, muzzleY, a, maxRange)
-        : { x2: preSeg.x2, y2: preSeg.y2, hitWall: true };
+      const fullSeg = this.traceBulletSegment(e.x, e.y, a, maxRange, e.elevation, false);
+      const fullSegDist = dist(e.x, e.y, fullSeg.x2, fullSeg.y2);
+      const reachedMuzzle = fullSegDist >= muzzleDist - 0.5;
 
-      let segEndX = seg.x2;
-      let segEndY = seg.y2;
+      let segEndX = fullSeg.x2;
+      let segEndY = fullSeg.y2;
 
       type Candidate =
         | { kind: 'player'; t: number; perpDist: number; hitX: number; hitY: number }
@@ -3532,13 +3454,12 @@ export class TwilightEngine {
       const candidates: Candidate[] = [];
 
       if (p.hp > 0 && areHostile(e.faction, e.id, p.faction, 'player') && p.elevation - e.elevation < 2.0) {
-        const res = this.getHitscanContact({ x1: seg.x1, y1: seg.y1, x2: wallEnd.x2, y2: wallEnd.y2 }, p);
-        if (
-          res.hit &&
-          !this.findEarliestWallHit(res.hitX, res.hitY, p.x, p.y) &&
-          this.canBulletReachPoint(seg.x1, seg.y1, e.elevation, res.hitX, res.hitY, p.elevation)
-        ) {
-          candidates.push({ kind: 'player', ...res });
+        const res = this.getHitscanContact(fullSeg, p);
+        if (res.hit && !this.findEarliestWallHit(res.hitX, res.hitY, p.x, p.y)) {
+          const hitDist = dist(fullSeg.x1, fullSeg.y1, res.hitX, res.hitY);
+          if (p.elevation - fullSeg.elevAt(hitDist) < 2.0) {
+            candidates.push({ kind: 'player', ...res });
+          }
         }
       }
 
@@ -3546,13 +3467,12 @@ export class TwilightEngine {
         if (other.id === e.id) continue;
         if (!areHostile(e.faction, e.id, other.faction, other.id)) continue;
         if (other.elevation - e.elevation >= 2.0) continue;
-        const res = this.getHitscanContact({ x1: seg.x1, y1: seg.y1, x2: wallEnd.x2, y2: wallEnd.y2 }, other);
-        if (
-          res.hit &&
-          !this.findEarliestWallHit(res.hitX, res.hitY, other.x, other.y) &&
-          this.canBulletReachPoint(seg.x1, seg.y1, e.elevation, res.hitX, res.hitY, other.elevation)
-        ) {
-          candidates.push({ kind: 'enemy', enemy: other, ...res });
+        const res = this.getHitscanContact(fullSeg, other);
+        if (res.hit && !this.findEarliestWallHit(res.hitX, res.hitY, other.x, other.y)) {
+          const hitDist = dist(fullSeg.x1, fullSeg.y1, res.hitX, res.hitY);
+          if (other.elevation - fullSeg.elevAt(hitDist) < 2.0) {
+            candidates.push({ kind: 'enemy', enemy: other, ...res });
+          }
         }
       }
 
@@ -3586,13 +3506,17 @@ export class TwilightEngine {
             e.y
           );
         }
-      } else if (reachedMuzzle && dist(muzzleX, muzzleY, seg.x2, seg.y2) < maxRange - 1) {
-        this.spawnBurst(seg.x2, seg.y2, '#E2E8F0', 4);
+      } else if (reachedMuzzle && fullSegDist < maxRange - 1) {
+        this.spawnBurst(fullSeg.x2, fullSeg.y2, '#E2E8F0', 4);
       }
 
+      const endDist = dist(e.x, e.y, segEndX, segEndY);
+      const beamStartX = reachedMuzzle && endDist > muzzleDist ? muzzleX : e.x;
+      const beamStartY = reachedMuzzle && endDist > muzzleDist ? muzzleY : e.y;
+
       this.beams.push({
-        x1: seg.x1,
-        y1: seg.y1,
+        x1: beamStartX,
+        y1: beamStartY,
         x2: segEndX,
         y2: segEndY,
         color: e.color,
@@ -4450,11 +4374,11 @@ export class TwilightEngine {
     }
   }
 
-  private isBlackDragonBlockedAt(x: number, y: number, startElev: number): boolean {
+  private isBlackDragonBlockedAt(x: number, y: number, currentElev: number): boolean {
     if (x < 10 || x > this.map.width - 10 || y < 10 || y > this.map.height - 10) return true;
     const h = this.getHeightAtPoint(x, y);
     if (h.isWall) return true;
-    if (h.totalHeight > startElev && h.totalHeight - startElev >= 1.0) return true;
+    if (h.totalHeight > currentElev && h.totalHeight - currentElev >= 1.0) return true;
     return false;
   }
 
@@ -4482,8 +4406,15 @@ export class TwilightEngine {
           const prevY = proj.y;
           let bounced = false;
 
+          const curH = this.getHeightAtPoint(proj.x, proj.y);
+          if (!curH.isWall) {
+            const rawSurface = curH.isCrate ? curH.totalHeight : curH.terrainHeight;
+            const effectiveSurface = proj.startElevation < 0 ? rawSurface : Math.max(0, rawSurface);
+            proj.minTraversedElevation = Math.min(proj.minTraversedElevation, effectiveSurface);
+          }
+
           const nextX = proj.x + proj.vx * subDt;
-          if (this.isBlackDragonBlockedAt(nextX, proj.y, proj.startElevation)) {
+          if (this.isBlackDragonBlockedAt(nextX, proj.y, proj.minTraversedElevation)) {
             proj.vx = -proj.vx;
             bounced = true;
           } else {
@@ -4491,7 +4422,7 @@ export class TwilightEngine {
           }
 
           const nextY = proj.y + proj.vy * subDt;
-          if (this.isBlackDragonBlockedAt(proj.x, nextY, proj.startElevation)) {
+          if (this.isBlackDragonBlockedAt(proj.x, nextY, proj.minTraversedElevation)) {
             proj.vy = -proj.vy;
             bounced = true;
           } else {
@@ -4590,13 +4521,13 @@ export class TwilightEngine {
         }
 
         const h = this.getHeightAtPoint(proj.x, proj.y);
-        if (!h.isCrate) {
-          const effectiveFloor = proj.startElevation < 0 ? h.terrainHeight : Math.max(0, h.terrainHeight);
-          proj.minTraversedElevation = Math.min(proj.minTraversedElevation, effectiveFloor);
+        if (!h.isWall) {
+          const rawSurface = h.isCrate ? h.totalHeight : h.terrainHeight;
+          const effectiveSurface = proj.startElevation < 0 ? rawSurface : Math.max(0, rawSurface);
+          proj.minTraversedElevation = Math.min(proj.minTraversedElevation, effectiveSurface);
         }
-        const crateBlocks = h.isCrate && proj.minTraversedElevation < 1.5 && h.totalHeight - proj.minTraversedElevation > 1.0;
-        const cliffBlocks = !h.isCrate && h.totalHeight - proj.minTraversedElevation > 1.0;
-        if (h.isWall || crateBlocks || cliffBlocks) {
+        const heightDiff = h.totalHeight - proj.minTraversedElevation;
+        if (h.isWall || heightDiff > 1.0) {
           this.spawnBurst(proj.x, proj.y, proj.color, 4);
           destroyed = true;
           break;
@@ -4606,7 +4537,7 @@ export class TwilightEngine {
           p.hp > 0 && proj.ownerId !== 'player' &&
           !proj.hitIds.has('player') &&
           (!proj.noFriendlyFire || areHostile(proj.ownerFaction, proj.ownerId, p.faction, 'player'));
-        if (canHitPlayer && p.elevation - proj.startElevation < 2.0) {
+        if (canHitPlayer && p.elevation - proj.minTraversedElevation < 2.0) {
           const hit = segmentCircleHit(proj.prevX, proj.prevY, proj.x, proj.y, p.x, p.y, p.radius + proj.radius * 0.5);
           if (hit.hit) {
             proj.hitIds.add('player');
@@ -4623,7 +4554,7 @@ export class TwilightEngine {
 
         for (const e of [...this.enemies]) {
           if (e.id === proj.ownerId || proj.hitIds.has(e.id)) continue;
-          if (e.elevation - proj.startElevation >= 2.0) continue;
+          if (e.elevation - proj.minTraversedElevation >= 2.0) continue;
 
           const hit = segmentCircleHit(
             proj.prevX,

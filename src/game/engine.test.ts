@@ -3721,7 +3721,7 @@ describe('Igloo diagonal corner occlusion and AI crosshair bloom/spread parity',
 });
 
 describe('3D elevation LoS/bullet occlusion and AI mouse-turn & gunfire cadence nerf', () => {
-  it('blocks elevated-to-low LoS and bullets over open ground behind high crates (industrial_warehouse 20,11 -> 16,16 -> 16,18)', () => {
+  it('blocks elevated-to-low LoS and drops bullet elevation permanently across open ground (industrial_warehouse 20,11 -> 16,16)', () => {
     const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
     const internals = engine as unknown as {
       hasLineOfSight: (ax: number, ay: number, ae: number, bx: number, by: number, be: number, r: number) => boolean;
@@ -3733,7 +3733,7 @@ describe('3D elevation LoS/bullet occlusion and AI mouse-turn & gunfire cadence 
         d: number,
         e: number,
         b?: boolean
-      ) => { x1: number; y1: number; x2: number; y2: number };
+      ) => { x1: number; y1: number; x2: number; y2: number; endElev: number };
     };
 
     // Shooter standing on (20,11) 2x2 1.5 crate -> open 0.0 aisle -> (16,16) 2x2 1.5 crate -> target at (16,18) 0.0 ground
@@ -3744,12 +3744,13 @@ describe('3D elevation LoS/bullet occlusion and AI mouse-turn & gunfire cadence 
     expect(internals.hasLineOfSight(sx, sy, 1.5, tx, ty, 0, 9.5 * TILE)).toBe(false);
     expect(internals.canRangedHitTarget(sx, sy, 1.5, tx, ty, 0)).toBe(false);
 
-    // Directional ray from (20,11) toward (16,18) drops over open ground and stops inside (16,16) crate
+    // Directional ray from (20,11) toward (16,18) drops to 0.0 over open ground and stops inside (16,16) crate
     const shotAng = Math.atan2(ty - sy, tx - sx);
     const seg = internals.traceBulletSegment(sx, sy, shotAng, 12 * TILE, 1.5, false);
+    expect(seg.endElev).toBe(0);
     expect(Math.hypot(seg.x2 - sx, seg.y2 - sy)).toBeLessThan(Math.hypot(tx - sx, ty - sy) - 10);
 
-    // Actual player rifle shot from (20,11) toward enemy at (16,18) (even with cursor placed past enemy) deals 0 damage
+    // Actual player sniper shot from (20,11) toward enemy at (16,18) deals 0 damage
     const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
     engine.enemies = [enemy];
     enemy.x = tx;
@@ -3773,9 +3774,9 @@ describe('3D elevation LoS/bullet occlusion and AI mouse-turn & gunfire cadence 
     engine.setMouseDown(false);
     expect(enemy.hp).toBe(100);
 
-    // Meanwhile, target standing ON TOP of (16,16) (1.5) or on the 0.0 aisle between (20,11) & (16,16) IS visible and hittable!
+    // Target ON TOP of (16,16) (1.5) is visible (LoS=true), yet UNHITTABLE because bullet dropped to 0.0 over the open aisle!
     expect(internals.hasLineOfSight(sx, sy, 1.5, 17.0 * TILE, 17.0 * TILE, 1.5, 9.5 * TILE)).toBe(true);
-    expect(internals.canRangedHitTarget(sx, sy, 1.5, 17.0 * TILE, 17.0 * TILE, 1.5)).toBe(true);
+    expect(internals.canRangedHitTarget(sx, sy, 1.5, 17.0 * TILE, 17.0 * TILE, 1.5)).toBe(false);
     enemy.x = 17.0 * TILE;
     enemy.y = 17.0 * TILE;
     enemy.elevation = 1.5;
@@ -3784,10 +3785,23 @@ describe('3D elevation LoS/bullet occlusion and AI mouse-turn & gunfire cadence 
     engine.setMouseDown(true);
     engine.update(1 / 60, 1280, 720);
     engine.setMouseDown(false);
+    expect(enemy.hp).toBe(100);
+
+    // Target standing in the 0.0 open aisle between (20,11) and (16,16) IS visible and hittable
+    enemy.x = 18.5 * TILE;
+    enemy.y = 14.5 * TILE;
+    enemy.elevation = 0;
+    expect(internals.hasLineOfSight(sx, sy, 1.5, enemy.x, enemy.y, 0, 9.5 * TILE)).toBe(true);
+    expect(internals.canRangedHitTarget(sx, sy, 1.5, enemy.x, enemy.y, 0)).toBe(true);
+    engine.player.attackCooldown = 0;
+    engine.player.angle = Math.atan2(enemy.y - sy, enemy.x - sx);
+    engine.setMouseDown(true);
+    engine.update(1 / 60, 1280, 720);
+    engine.setMouseDown(false);
     expect(enemy.hp).toBeLessThan(100);
   });
 
-  it('prevents 2.0 plateau shooter from seeing/hitting 0.0 targets behind another 2.0 plateau while allowing 2.0-to-2.0 valley dueling', () => {
+  it('drops bullet elevation across a lower valley so far 2.0 plateaus cannot be hit, while same-plateau and high-to-valley shots hit', () => {
     const map = createBlankCustomMap('雙高台對射測試', 'desert_outdoor', 24, 18);
     map.factionSpawns.royal = [{ gx: 2, gy: 9 }];
     map.factionSpawns.shadow = [{ gx: 21, gy: 9 }];
@@ -3807,9 +3821,145 @@ describe('3D elevation LoS/bullet occlusion and AI mouse-turn & gunfire cadence 
     expect(internals.hasLineOfSight(5.5 * TILE, 9.5 * TILE, 2.0, 16.5 * TILE, 9.5 * TILE, 0, 14 * TILE)).toBe(false);
     expect(internals.canRangedHitTarget(5.5 * TILE, 9.5 * TILE, 2.0, 16.5 * TILE, 9.5 * TILE, 0)).toBe(false);
 
-    // 2.0 plateau -> 2.0 target standing atop East 2.0 plateau at (14.5, 9.5) across the 0.0 valley IS CLEAR
+    // 2.0 plateau -> East 2.0 plateau across the 0.0 valley: LoS stays clear, but bullets drop to 0.0 and CANNOT climb back to 2.0 (even on cliff edge)
     expect(internals.hasLineOfSight(5.5 * TILE, 9.5 * TILE, 2.0, 14.5 * TILE, 9.5 * TILE, 2.0, 14 * TILE)).toBe(true);
-    expect(internals.canRangedHitTarget(5.5 * TILE, 9.5 * TILE, 2.0, 14.5 * TILE, 9.5 * TILE, 2.0)).toBe(true);
+    expect(internals.canRangedHitTarget(5.5 * TILE, 9.5 * TILE, 2.0, 14.5 * TILE, 9.5 * TILE, 2.0)).toBe(false);
+    expect(internals.canRangedHitTarget(5.5 * TILE, 9.5 * TILE, 2.0, 13.2 * TILE, 9.5 * TILE, 2.0)).toBe(false);
+
+    const enemy = engine.enemies.find((e) => e.faction === 'shadow')!;
+    engine.enemies = [enemy];
+    enemy.hp = 100;
+    enemy.royalShieldTimer = 0;
+    enemy.shadowCloneTimer = 0;
+    enemy.x = 13.2 * TILE;
+    enemy.y = 9.5 * TILE;
+    enemy.elevation = 2.0;
+
+    engine.player.x = 5.5 * TILE;
+    engine.player.y = 9.5 * TILE;
+    engine.player.elevation = 2.0;
+    engine.player.activeHand = 0;
+    gunInHand(engine).def = GUNS.find((g) => g.kind === 'sniper')!;
+    gunInHand(engine).ammoInMag = 5;
+    engine.player.attackCooldown = 0;
+    engine.player.swapTimer = 0;
+    engine.player.angle = 0;
+    engine.setMouseDown(true);
+    engine.update(1 / 60, 1280, 720);
+    engine.setMouseDown(false);
+    expect(enemy.hp).toBe(100);
+
+    // Same-plateau 2.0 -> 2.0 and high-to-valley 2.0 -> 0.0 remain hittable
+    expect(internals.canRangedHitTarget(4.5 * TILE, 9.5 * TILE, 2.0, 6.2 * TILE, 9.5 * TILE, 2.0)).toBe(true);
+    expect(internals.canRangedHitTarget(5.5 * TILE, 9.5 * TILE, 2.0, 9.5 * TILE, 9.5 * TILE, 0)).toBe(true);
+
+    enemy.x = 9.5 * TILE;
+    enemy.y = 9.5 * TILE;
+    enemy.elevation = 0;
+    engine.player.attackCooldown = 0;
+    engine.setMouseDown(true);
+    engine.update(1 / 60, 1280, 720);
+    engine.setMouseDown(false);
+    expect(enemy.hp).toBeLessThan(100);
+  });
+
+  it('never raises bullet elevation when clearing +1.0 small crates, drops bullet elevation onto lower crates, and drops Holy Orbs in valleys', () => {
+    // 1. 0.0 bullet clearing 1.0 small crate stays at 0.0 and is still blocked by 1.5 big crate / 2.0 container behind it
+    const coverMap = createBlankCustomMap('低掩體不升高度', 'warehouse_indoor', 24, 18);
+    coverMap.factionSpawns.royal = [{ gx: 2, gy: 2 }];
+    coverMap.factionSpawns.shadow = [{ gx: 21, gy: 2 }];
+    coverMap.factionSpawns.mercenary = [{ gx: 12, gy: 16 }];
+    coverMap.obstacles.push({ gx: 8, gy: 9, gw: 1, gh: 1, elevation: 1.0, kind: 'crate', style: 'small_crate' });
+
+    const engClear = new TwilightEngine('royal', FACTION_CHARACTERS.royal[0], coverMap.id, { royal: 10, shadow: 10, mercenary: 10 }, () => {}, () => {}, coverMap);
+    const traceClear = (engClear as unknown as {
+      traceBulletSegment: (x1: number, y1: number, a: number, d: number, e: number, b?: boolean) => { x2: number; endElev: number };
+    }).traceBulletSegment.bind(engClear);
+
+    const overSmall = traceClear(6.5 * TILE, 9.5 * TILE, 0, 5 * TILE, 0, false);
+    expect(overSmall.x2).toBeGreaterThan(11.4 * TILE);
+    expect(overSmall.endElev).toBe(0);
+
+    // Add 1.5 big crate right behind the 1.0 small crate -> bullet did NOT rise to 1.0, so 1.5 still stops it ~0.49*TILE deep
+    const bigBehindMap = createBlankCustomMap('小箱後大箱', 'warehouse_indoor', 24, 18);
+    bigBehindMap.factionSpawns = structuredClone(coverMap.factionSpawns);
+    bigBehindMap.obstacles.push(
+      { gx: 8, gy: 9, gw: 1, gh: 1, elevation: 1.0, kind: 'crate', style: 'small_crate' },
+      { gx: 9, gy: 8, gw: 2, gh: 2, elevation: 1.5, kind: 'crate', style: 'default' }
+    );
+    const engBig = new TwilightEngine('royal', FACTION_CHARACTERS.royal[0], bigBehindMap.id, { royal: 10, shadow: 10, mercenary: 10 }, () => {}, () => {}, bigBehindMap);
+    const traceBig = (engBig as unknown as {
+      traceBulletSegment: (x1: number, y1: number, a: number, d: number, e: number, b?: boolean) => { x2: number; endElev: number };
+    }).traceBulletSegment.bind(engBig);
+    const hitBigBehindSmall = traceBig(6.5 * TILE, 9.5 * TILE, 0, 6 * TILE, 0, false);
+    expect(hitBigBehindSmall.endElev).toBe(0);
+    expect(hitBigBehindSmall.x2).toBeGreaterThan(9 * TILE + TILE * 0.4);
+    expect(hitBigBehindSmall.x2).toBeLessThanOrEqual(9 * TILE + TILE * 0.6);
+
+    // Add 2.0 container right behind the 1.0 small crate -> stops immediately at 9*TILE outer edge
+    const contBehindMap = createBlankCustomMap('小箱後貨櫃', 'warehouse_indoor', 24, 18);
+    contBehindMap.factionSpawns = structuredClone(coverMap.factionSpawns);
+    contBehindMap.obstacles.push(
+      { gx: 8, gy: 9, gw: 1, gh: 1, elevation: 1.0, kind: 'crate', style: 'small_crate' },
+      { gx: 9, gy: 8, gw: 2, gh: 2, elevation: 2.0, kind: 'crate', style: 'container' }
+    );
+    const engCont = new TwilightEngine('royal', FACTION_CHARACTERS.royal[0], contBehindMap.id, { royal: 10, shadow: 10, mercenary: 10 }, () => {}, () => {}, contBehindMap);
+    const traceCont = (engCont as unknown as {
+      traceBulletSegment: (x1: number, y1: number, a: number, d: number, e: number, b?: boolean) => { x2: number; endElev: number };
+    }).traceBulletSegment.bind(engCont);
+    const hitContBehindSmall = traceCont(6.5 * TILE, 9.5 * TILE, 0, 6 * TILE, 0, false);
+    expect(hitContBehindSmall.endElev).toBe(0);
+    expect(hitContBehindSmall.x2).toBeLessThanOrEqual(9 * TILE);
+
+    // 2. 2.0 bullet traversing a 1.0 small crate drops to 1.0, so a 3.0 stacked container behind it blocks at edge
+    //    AND Holy Orb crossing a 0.0 valley drops to 0.0 and is blocked by the opposite 2.0 plateau
+    const dropMap = createBlankCustomMap('階梯式跌落與聖光彈', 'desert_outdoor', 24, 18);
+    dropMap.factionSpawns = structuredClone(coverMap.factionSpawns);
+    for (let gy = 4; gy <= 6; gy++) {
+      for (let gx = 4; gx <= 5; gx++) dropMap.tileGrid[gy][gx] = { elev: 2.0, style: 'pyramid' };
+    }
+    for (let gy = 4; gy <= 5; gy++) {
+      for (let gx = 7; gx <= 8; gx++) dropMap.tileGrid[gy][gx] = { elev: 1.0, style: 'pyramid' };
+    }
+    dropMap.obstacles.push(
+      { gx: 6, gy: 5, gw: 1, gh: 1, elevation: 1.0, kind: 'crate', style: 'small_crate' },
+      { gx: 7, gy: 4, gw: 2, gh: 2, elevation: 2.0, kind: 'crate', style: 'container' } // 1.0 + 2.0 = 3.0
+    );
+    for (let gy = 12; gy <= 14; gy++) {
+      for (let gx = 4; gx <= 6; gx++) dropMap.tileGrid[gy][gx] = { elev: 2.0, style: 'pyramid' };
+      for (let gx = 11; gx <= 13; gx++) dropMap.tileGrid[gy][gx] = { elev: 2.0, style: 'pyramid' };
+    }
+
+    const engDrop = new TwilightEngine('royal', FACTION_CHARACTERS.royal[0], dropMap.id, { royal: 10, shadow: 10, mercenary: 10 }, () => {}, () => {}, dropMap);
+    const traceDrop = (engDrop as unknown as {
+      traceBulletSegment: (x1: number, y1: number, a: number, d: number, e: number, b?: boolean) => { x2: number; endElev: number };
+    }).traceBulletSegment.bind(engDrop);
+    const crateDrop = traceDrop(4.5 * TILE, 5.5 * TILE, 0, 6 * TILE, 2.0, false);
+    expect(crateDrop.endElev).toBe(1.0);
+    expect(crateDrop.x2).toBeLessThanOrEqual(7 * TILE);
+
+    const enemy = engDrop.enemies.find((e) => e.faction === 'shadow')!;
+    engDrop.enemies = [enemy];
+    enemy.hp = 100;
+    enemy.stunTimer = 99;
+    enemy.royalShieldTimer = 0;
+    enemy.shadowCloneTimer = 0;
+    enemy.x = 12.5 * TILE;
+    enemy.y = 13.5 * TILE;
+    enemy.elevation = 2.0;
+
+    engDrop.player.x = 5.5 * TILE;
+    engDrop.player.y = 13.5 * TILE;
+    engDrop.player.elevation = 2.0;
+    engDrop.player.activeHand = 1;
+    meleeInHand(engDrop).def = MELEES.find((m) => m.kind === 'greatsword')!;
+    engDrop.player.qi = engDrop.player.maxQi;
+    engDrop.setMouseDown(true);
+    engDrop.update(2.05, 1280, 720);
+    engDrop.player.angle = 0;
+    engDrop.setMouseDown(false);
+    for (let i = 0; i < 45; i++) engDrop.update(1 / 60, 1280, 720);
+    expect(enemy.hp).toBe(100);
   });
 
   it('nerfs AI gun fire rate and enforces finite mouse turn rate before opening fire', () => {
