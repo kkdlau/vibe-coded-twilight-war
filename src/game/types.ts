@@ -368,6 +368,7 @@ export interface EnemyEntity {
   hitFlash: number;
   gunfireTimer: number;
   crosshairBloom: number;
+  bloomDelayTimer: number;
   lastAimAngle: number;
   attackAnimTimer: number;
   attackAnimDuration: number;

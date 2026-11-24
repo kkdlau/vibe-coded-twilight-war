@@ -48,6 +48,7 @@ import {
   RESPAWN_DELAY_SECONDS,
   RELOAD_CUES,
   RIFLE_RECOIL,
+  SNIPER_AIM,
   getGunSpread,
 } from './tuning';
 import { CustomMapData, buildArenaMapFromCustom } from './customMaps';
@@ -179,6 +180,7 @@ export class TwilightEngine {
   private chargeSessionAllowed = false;
   private meleeHeldSeconds = 0;
   private crosshairBloom = 0;
+  private crosshairBloomDelay = 0;
   private rifleRecoilAngle = 0;
   private viewport = { width: 1280, height: 720 };
   private respawnTimer = 0;
@@ -1254,10 +1256,21 @@ export class TwilightEngine {
     const weapon = this.player.weapons[this.player.activeHand];
     if (this.status === 'PLAYING' && weapon.type === 'gun') {
       const gun = weapon.def;
-      this.crosshairBloom = Math.min(
-        gun.maxCrosshair - gun.baseCrosshair,
-        this.crosshairBloom + Math.min(18, Math.max(0, moveDist - 2) * 0.09)
-      );
+      if (gun.kind === 'sniper') {
+        const delta = Math.max(0, moveDist - SNIPER_AIM.pointerDeadzonePx) * SNIPER_AIM.pointerMoveScale;
+        if (delta > 0) {
+          this.crosshairBloom = Math.min(
+            gun.maxCrosshair - gun.baseCrosshair,
+            this.crosshairBloom + Math.min(SNIPER_AIM.pointerMoveStepCap, delta)
+          );
+          this.crosshairBloomDelay = SNIPER_AIM.settleDelaySeconds;
+        }
+      } else {
+        this.crosshairBloom = Math.min(
+          gun.maxCrosshair - gun.baseCrosshair,
+          this.crosshairBloom + Math.min(18, Math.max(0, moveDist - 2) * 0.09)
+        );
+      }
     }
     if (this.status === 'PLAYING') {
       const { x, y } = this.getWorldPointer();
@@ -1367,6 +1380,7 @@ export class TwilightEngine {
 
   private resetGunFeedback() {
     this.crosshairBloom = 0;
+    this.crosshairBloomDelay = 0;
     this.rifleRecoilAngle = 0;
     this.player.gunfireTimer = 0;
   }
@@ -1627,7 +1641,9 @@ export class TwilightEngine {
       }
 
       this.crosshairBloom = Math.min(gun.maxCrosshair - gun.baseCrosshair, this.crosshairBloom + gun.bloomPerShot);
-      if (gun.kind === 'rifle') {
+      if (gun.kind === 'sniper') {
+        this.crosshairBloomDelay = Math.max(this.crosshairBloomDelay, SNIPER_AIM.settleDelaySeconds);
+      } else if (gun.kind === 'rifle') {
         this.rifleRecoilAngle = Math.min(RIFLE_RECOIL.maxAngle, this.rifleRecoilAngle + RIFLE_RECOIL.kick);
       }
 
@@ -2492,6 +2508,7 @@ export class TwilightEngine {
       hitFlash: 0,
       gunfireTimer: 0,
       crosshairBloom: 0,
+      bloomDelayTimer: 0,
       lastAimAngle: 0,
       attackAnimTimer: 0,
       attackAnimDuration: 0,
@@ -2533,6 +2550,7 @@ export class TwilightEngine {
     }
     e.activeHand = targetHand;
     e.crosshairBloom = 0;
+    e.bloomDelayTimer = 0;
     e.chargingMelee = false;
     e.chargeReady = false;
     const swapDur = getWeaponSwapDuration(e.weapons[targetHand].def.kind);
@@ -2579,6 +2597,7 @@ export class TwilightEngine {
           e.weapons[targetHand] = equipGun(pk.gunDef, pk.ammoInMag ?? pk.gunDef.magSize);
           if (e.activeHand === targetHand) {
             e.crosshairBloom = 0;
+            e.bloomDelayTimer = 0;
             e.chargingMelee = false;
             e.chargeReady = false;
           }
@@ -2799,7 +2818,13 @@ export class TwilightEngine {
     }
 
     const weapon = p.weapons[p.activeHand];
-    this.crosshairBloom = Math.max(0, this.crosshairBloom - GUN_AIM.bloomRecovery * dt);
+    const isSniper = weapon.type === 'gun' && weapon.def.kind === 'sniper';
+    if (isSniper && this.crosshairBloomDelay > 0) {
+      this.crosshairBloomDelay = Math.max(0, this.crosshairBloomDelay - dt);
+    } else {
+      const recoveryRate = isSniper ? SNIPER_AIM.bloomRecovery : GUN_AIM.bloomRecovery;
+      this.crosshairBloom = Math.max(0, this.crosshairBloom - recoveryRate * dt);
+    }
     this.rifleRecoilAngle *= Math.exp(-RIFLE_RECOIL.recovery * dt);
 
     this.updateReloads(dt);
@@ -2841,6 +2866,13 @@ export class TwilightEngine {
     p.angle = Math.atan2(worldMouseY - p.y, worldMouseX - p.x);
     const playerMovedDist = dist(prevPlayerX, prevPlayerY, p.x, p.y);
     if (playerMovedDist > 0.12) {
+      if (isSniper && weapon.type === 'gun') {
+        const walkCap = Math.min(weapon.def.maxCrosshair - weapon.def.baseCrosshair, SNIPER_AIM.bodyMoveBloomCap);
+        if (this.crosshairBloom <= walkCap) {
+          this.crosshairBloom = Math.min(walkCap, this.crosshairBloom + playerMovedDist * SNIPER_AIM.bodyMoveScale);
+          this.crosshairBloomDelay = Math.max(this.crosshairBloomDelay, SNIPER_AIM.settleDelaySeconds);
+        }
+      }
       this.distanceSinceStep += playerMovedDist;
       if (this.distanceSinceStep >= PLAYER_MOVEMENT.stepDistance) {
         this.distanceSinceStep %= PLAYER_MOVEMENT.stepDistance;
@@ -3527,6 +3559,9 @@ export class TwilightEngine {
     }
 
     e.crosshairBloom = Math.min(gunDef.maxCrosshair - gunDef.baseCrosshair, clampedBloom + gunDef.bloomPerShot);
+    if (gunDef.kind === 'sniper') {
+      e.bloomDelayTimer = Math.max(e.bloomDelayTimer, SNIPER_AIM.settleDelaySeconds);
+    }
   }
 
   /**
@@ -3782,7 +3817,14 @@ export class TwilightEngine {
       if (e.hp <= 0) continue;
       const combat = AI_COMBAT[e.archetype];
       e.gunfireTimer = Math.max(0, e.gunfireTimer - dt);
-      e.crosshairBloom = Math.max(0, e.crosshairBloom - GUN_AIM.bloomRecovery * dt);
+      const aiHeldWeapon = e.weapons[e.activeHand];
+      const aiHoldingSniper = aiHeldWeapon.type === 'gun' && aiHeldWeapon.def.kind === 'sniper';
+      if (aiHoldingSniper && e.bloomDelayTimer > 0) {
+        e.bloomDelayTimer = Math.max(0, e.bloomDelayTimer - dt);
+      } else {
+        const recoveryRate = aiHoldingSniper ? SNIPER_AIM.bloomRecovery : GUN_AIM.bloomRecovery;
+        e.crosshairBloom = Math.max(0, e.crosshairBloom - recoveryRate * dt);
+      }
       e.hitFlash = Math.max(0, e.hitFlash - dt);
       e.swapTimer = Math.max(0, e.swapTimer - dt);
       e.attackAnimTimer = Math.max(0, e.attackAnimTimer - dt);
@@ -4206,10 +4248,21 @@ export class TwilightEngine {
         const aimDelta = Math.abs(angleDiff(e.lastAimAngle, e.angle));
         const sweepRefDist = losTargetPos ? clamp(bestLosDist, GUN_AIM.nearDistance, 400) : 220;
         const equivMoveDist = aimDelta * sweepRefDist;
-        e.crosshairBloom = Math.min(
-          activeWeapon.def.maxCrosshair - activeWeapon.def.baseCrosshair,
-          e.crosshairBloom + Math.min(18, Math.max(0, equivMoveDist - 2) * 0.09)
-        );
+        if (activeWeapon.def.kind === 'sniper') {
+          const delta = Math.max(0, equivMoveDist - SNIPER_AIM.pointerDeadzonePx) * SNIPER_AIM.pointerMoveScale;
+          if (delta > 0) {
+            e.crosshairBloom = Math.min(
+              activeWeapon.def.maxCrosshair - activeWeapon.def.baseCrosshair,
+              e.crosshairBloom + Math.min(SNIPER_AIM.pointerMoveStepCap, delta)
+            );
+            e.bloomDelayTimer = SNIPER_AIM.settleDelaySeconds;
+          }
+        } else {
+          e.crosshairBloom = Math.min(
+            activeWeapon.def.maxCrosshair - activeWeapon.def.baseCrosshair,
+            e.crosshairBloom + Math.min(18, Math.max(0, equivMoveDist - 2) * 0.09)
+          );
+        }
       }
       e.lastAimAngle = e.angle;
 
@@ -4278,6 +4331,16 @@ export class TwilightEngine {
 
       const enemyMovedDist = dist(prevEX, prevEY, e.x, e.y);
       if (enemyMovedDist > 0.12) {
+        if (activeWeapon.type === 'gun' && activeWeapon.def.kind === 'sniper') {
+          const walkCap = Math.min(
+            activeWeapon.def.maxCrosshair - activeWeapon.def.baseCrosshair,
+            SNIPER_AIM.bodyMoveBloomCap
+          );
+          if (e.crosshairBloom <= walkCap) {
+            e.crosshairBloom = Math.min(walkCap, e.crosshairBloom + enemyMovedDist * SNIPER_AIM.bodyMoveScale);
+            e.bloomDelayTimer = Math.max(e.bloomDelayTimer, SNIPER_AIM.settleDelaySeconds);
+          }
+        }
         const stepPhase = PLAYER_MOVEMENT.stepDistance * 0.085;
         const previousStep = Math.floor(e.walkPhase / stepPhase);
         e.walkPhase += enemyMovedDist * 0.085;

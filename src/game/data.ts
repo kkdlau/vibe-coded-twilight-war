@@ -473,14 +473,14 @@ export const GUNS: GunDef[] = [
     damage: 100,
     fireRate: 1.2,
     magSize: 1,
-    reloadTime: 2.10,
+    reloadTime: 2.50,
     moveSpeedMult: 0.62,
-    baseCrosshair: 6,
-    maxCrosshair: 18,
+    baseCrosshair: 8.5,
+    maxCrosshair: 23,
     bloomPerShot: 9.0,
     pellets: 1,
     color: '#A78BFA',
-    description: '1 發彈匣，射擊後按 R 或再按左鍵裝彈。遠距精準，命中正中心最高 100 傷害，移動與裝彈較慢。',
+    description: '1 發彈匣（裝彈 2.5 秒），射擊後按 R 或再按左鍵裝彈。移動準心或走位時準星適度擴散、停穩稍候即快速收縮；中遠距精準、10 格以上超遠距準星明顯放大，命中正中心最高 100 傷害。',
   },
 ];
 

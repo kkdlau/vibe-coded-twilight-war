@@ -25,6 +25,7 @@ import {
   RESPAWN_DELAY_SECONDS,
   ROYAL_SHIELD_PADDING,
   SHIELD_BASH_DISTANCE,
+  SNIPER_AIM,
   getGunSpread,
   type AiDifficulty,
 } from './tuning';
@@ -2172,7 +2173,7 @@ describe('Architectural parity: 100 HP, zero passives, independent player respaw
     // Move player out of LoS so we observe the completed reload cleanly before next shot
     engine.player.x = 26.5 * TILE;
     engine.player.y = 1.5 * TILE;
-    for (let i = 0; i < 23; i++) engine.update(0.1, 1280, 720);
+    for (let i = 0; i < 28; i++) engine.update(0.1, 1280, 720);
     expect(sniperSlot.type === 'gun' && sniperSlot.reloadTimer).toBe(0);
     expect(sniperSlot.type === 'gun' && sniperSlot.ammoInMag).toBe(1);
   });
@@ -2552,6 +2553,89 @@ describe('Solid height-10 trees, zero bush vision penalty, continuous rifle shri
     }
     const recoveredBloom = (engine as unknown as { crosshairBloom: number }).crosshairBloom;
     expect(recoveredBloom).toBeLessThan(flickBloom);
+  });
+
+  it('expands sniper crosshair on pointer & body movement, delays before shrinking, and reduces baseline pinpoint accuracy', () => {
+    const pistol = GUNS.find((g) => g.kind === 'pistol')!;
+    const rifle = GUNS.find((g) => g.kind === 'rifle')!;
+    const sniper = GUNS.find((g) => g.kind === 'sniper')!;
+    expect(sniper.baseCrosshair).toBe(8.5);
+    expect(sniper.maxCrosshair).toBe(23);
+    expect(sniper.reloadTime).toBe(2.5);
+
+    const { engine } = createTestEngine('royal', 'industrial_warehouse', 10);
+    engine.enemies = [];
+    engine.player.x = 12 * TILE;
+    engine.player.y = 19.3 * TILE;
+    engine.player.elevation = 0;
+    const camState = (engine as unknown as { camera: { x: number; y: number; zoom: number } }).camera;
+    camState.x = engine.player.x;
+    camState.y = engine.player.y;
+    camState.zoom = 1;
+    const getSpread = (engine as unknown as { getPlayerGunSpread: (g: typeof sniper) => number }).getPlayerGunSpread.bind(engine);
+
+    // 1. Sniper rested spread at 360px is tighter than pistol yet looser than old 6-base pinpoint, and widens noticeably by 10 tiles
+    engine.player.activeHand = 0;
+    engine.setMousePos(1000, 360);
+    (engine as unknown as { resetGunFeedback: () => void }).resetGunFeedback();
+    const restedSniper = getSpread(sniper);
+    const restedPistol = getSpread(pistol);
+    expect(restedSniper).toBeLessThan(restedPistol);
+    expect(restedSniper).toBeGreaterThan(getGunSpread('sniper', 6, 360, 1) * 1.15);
+
+    const restedSniper7_5 = getGunSpread('sniper', sniper.baseCrosshair, 7.5 * TILE, 1);
+    const restedSniper10 = getGunSpread('sniper', sniper.baseCrosshair, 10 * TILE, 1);
+    const restedPistol10 = getGunSpread('pistol', pistol.baseCrosshair, 10 * TILE, 1);
+    expect(restedSniper10).toBeGreaterThan(restedSniper7_5 * 1.3);
+    expect(restedSniper10 * GUN_AIM.spreadScale).toBeGreaterThanOrEqual(15);
+    expect(restedSniper10 * GUN_AIM.spreadScale).toBeLessThanOrEqual(20);
+    expect(restedSniper10).toBeLessThan(restedPistol10);
+
+    // 2. Rapid pointer flick expands sniper bloom much more than rifle for the same flick
+    gunInHand(engine).def = rifle;
+    engine.setMousePos(880, 360);
+    (engine as unknown as { resetGunFeedback: () => void }).resetGunFeedback();
+    engine.setMousePos(1000, 360);
+    const rifleFlickBloom = (engine as unknown as { crosshairBloom: number }).crosshairBloom;
+
+    gunInHand(engine).def = sniper;
+    engine.setMousePos(880, 360);
+    (engine as unknown as { resetGunFeedback: () => void }).resetGunFeedback();
+    engine.setMousePos(1000, 360);
+    const sniperFlickBloom = (engine as unknown as { crosshairBloom: number }).crosshairBloom;
+    expect(sniperFlickBloom).toBeGreaterThan(rifleFlickBloom);
+    expect(getSpread(sniper)).toBeGreaterThan(restedSniper * 2);
+
+    // 3. Immediately after stopping pointer motion, sniper bloom holds steady during settleDelaySeconds
+    engine.update(SNIPER_AIM.settleDelaySeconds * 0.45, 1280, 720);
+    expect((engine as unknown as { crosshairBloom: number }).crosshairBloom).toBeCloseTo(sniperFlickBloom, 5);
+
+    // 4. After settle delay expires, holding still briskly shrinks sniper bloom back to 0 within ~0.35s
+    for (let i = 0; i < 7; i++) engine.update(0.05, 1280, 720);
+    expect((engine as unknown as { crosshairBloom: number }).crosshairBloom).toBe(0);
+    camState.x = engine.player.x;
+    camState.y = engine.player.y;
+    camState.zoom = 1;
+    expect(getSpread(sniper)).toBeCloseTo(restedSniper, 5);
+
+    // 5. Walking (WASD) while holding sniper blooms crosshair (capped at bodyMoveBloomCap) and delays recovery until stopping
+    engine.setKey('KeyA', true);
+    for (let i = 0; i < 25; i++) engine.update(1 / 60, 1280, 720);
+    const walkBloom = (engine as unknown as { crosshairBloom: number }).crosshairBloom;
+    expect(walkBloom).toBeGreaterThan(1.5);
+    expect(walkBloom).toBeLessThanOrEqual(SNIPER_AIM.bodyMoveBloomCap);
+    for (let i = 0; i < 80; i++) engine.update(1 / 60, 1280, 720);
+    expect((engine as unknown as { crosshairBloom: number }).crosshairBloom).toBeLessThanOrEqual(
+      SNIPER_AIM.bodyMoveBloomCap
+    );
+    const cappedWalkBloom = (engine as unknown as { crosshairBloom: number }).crosshairBloom;
+    engine.setKey('KeyA', false);
+
+    engine.update(SNIPER_AIM.settleDelaySeconds * 0.45, 1280, 720);
+    expect((engine as unknown as { crosshairBloom: number }).crosshairBloom).toBeCloseTo(cappedWalkBloom, 5);
+
+    for (let i = 0; i < 20; i++) engine.update(0.05, 1280, 720);
+    expect((engine as unknown as { crosshairBloom: number }).crosshairBloom).toBe(0);
   });
 
   it('prevents pistol hold-to-autofire (semi-auto only) and enforces longer shot interval than rifle', () => {

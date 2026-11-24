@@ -94,6 +94,7 @@
 - **半自動小槍、步槍與玩家／AI 共同動態準心擴散**：
   - **制式小槍 (`pistol`)**：嚴格**半自動單發**（`fireRate: 2.0`，約 `0.50s` 間隔），玩家按住左鍵不會連發。手槍射擊間隔明顯長於步槍（`5.5`/s）。`shotgun` 與 `sniper` 亦為半自動，僅 `rifle` 支援按住連續射擊。步槍後座會累積準星偏移及散布，停止射擊後逐步回穩。
   - **突擊步槍 (`rifle`)**：與小槍共用距離曲線（`{ near: 0.35, far: 1.75 }`），最細靜止準心嚴格為小槍的 **`1.1×`**（`baseCrosshair: 12.1` vs `11`）。準心每幀**持續收縮**（`bloomRecovery: 20`），僅在連發射擊（`bloomPerShot: 14`）或大幅快速甩動游標（`Math.min(18, Math.max(0, moveDist - 2) * 0.09)`）時擴張速度大於收縮速度，上限 `maxCrosshair: 70`。
+  - **精準狙擊槍 (`sniper`)**：彈匣 `1` 發、裝彈時間 `reloadTime: 2.50s`，基準準心 `baseCrosshair: 8.5`（上限 `maxCrosshair: 23`、`AIM_BY_GUN.sniper = { near: 0.42, knee: 1.45, longRangeExtra: 3.30 }`；中近至 `7.5` 格精準（`12.3px`），`10` 格 `480px` 以上超遠距靜止準星明顯放大至約 `17.0px` 以提升超遠距難度，但仍嚴格精準於小槍 `26.7px`）。移動滑鼠游標（`pointerMoveScale: 0.12`、死區 `2.5px`、單步上限 `12`）或角色走位（`bodyMoveScale: 0.05`、走位擴散上限 `bodyMoveBloomCap: 5.5`）時準心適度擴散，並重置停穩延遲（`settleDelaySeconds: 0.08s`）；停穩後先經過延遲再以 `bloomRecovery: 72/s` 快速收縮至基準準心（滿擴散約 `0.28s`、走位停低約 `0.16s` 回穩），防止無停頓甩槍即瞄即射。
   - **AI 動態準心、擬人滑鼠轉向與節奏平衡 (`AI_COMBAT.aimTurnSpeed` / `AI_GUN_AIM`)**：
     - 電腦士兵持有與玩家相同之 `crosshairBloom` 與 `lastAimAngle` 機制：每幀以 `GUN_AIM.bloomRecovery`（`20/s`）收縮準心、轉向瞄準時累積擺動擴散、開火套用 `getGunSpread`（含 `eagleEye` `0.45×` 與 `AI_GUN_AIM.spreadMult = 1.65` 手抖放大）並累加 `bloomPerShot`，切換手位或換槍時歸零。
     - 模擬玩家手持滑鼠操作：電腦具有有限轉身角速度（`4.0–6.4 rad/s`）、持續微幅跟槍偏擺（`aimWobbleRad = 0.11`）、須轉向至目標角度容差（`0.28 rad`）內才開火，且各槍械射擊間隔套用節奏倍率（小槍 `1.55×`、步槍 `1.85×`、散彈 `1.50×`、狙擊 `1.45×`），避免瞬間轉身鎖頭與高頻壓制。

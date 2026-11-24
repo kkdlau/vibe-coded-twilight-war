@@ -19,7 +19,7 @@ const AIM_BY_GUN = {
   pistol: { near: 0.35, knee: 2.15, longRangeExtra: 1.65, pelletRadius: 0 },
   rifle: { near: 0.35, knee: 2.15, longRangeExtra: 1.65, pelletRadius: 0 },
   shotgun: { near: 0.32, knee: 4.35, longRangeExtra: 1.55, pelletRadius: 10 },
-  sniper: { near: 0.35, knee: 1.02, longRangeExtra: 0.50, pelletRadius: 0 },
+  sniper: { near: 0.42, knee: 1.45, longRangeExtra: 3.30, pelletRadius: 0 },
 } satisfies Record<GunKind, { near: number; knee: number; longRangeExtra: number; pelletRadius: number }>;
 
 export function getGunSpread(kind: GunKind, aimRadius: number, distance: number, focus: number): number {
@@ -38,6 +38,16 @@ export const RIFLE_RECOIL = {
   maxAngle: 0.075,
   recovery: 2.8,
   eagleEyeMultiplier: 0.45,
+};
+
+export const SNIPER_AIM = {
+  pointerMoveScale: 0.12,
+  pointerMoveStepCap: 12,
+  pointerDeadzonePx: 2.5,
+  bodyMoveScale: 0.05,
+  bodyMoveBloomCap: 5.5,
+  settleDelaySeconds: 0.08,
+  bloomRecovery: 72,
 };
 
 export const RELOAD_CUES = [
