@@ -2,14 +2,17 @@ import {
   AmmoSpawn,
   BridgeRect,
   BushProp,
+  CardinalDir,
   FactionId,
   FarmTileCell,
   FloorStyle,
   GridTile,
+  IglooProp,
   MapId,
   Obstacle,
   ObstacleStyle,
   PlatformStyle,
+  PushableIceBlock,
   RailTrackCell,
   StairRect,
   TerrainTileCell,
@@ -97,7 +100,13 @@ function createTileWallLine(
   return result;
 }
 
-export type MapBiome = 'shrine_outdoor' | 'castle_indoor' | 'desert_outdoor' | 'warehouse_indoor' | 'bamboo_outdoor';
+export type MapBiome =
+  | 'shrine_outdoor'
+  | 'castle_indoor'
+  | 'desert_outdoor'
+  | 'warehouse_indoor'
+  | 'bamboo_outdoor'
+  | 'glacier_outdoor';
 
 export function biomeToDefaultFloor(biome: MapBiome): FloorStyle {
   switch (biome) {
@@ -109,6 +118,8 @@ export function biomeToDefaultFloor(biome: MapBiome): FloorStyle {
       return 'warehouse_steel';
     case 'bamboo_outdoor':
       return 'bamboo_moss';
+    case 'glacier_outdoor':
+      return 'glacier_ice';
     case 'shrine_outdoor':
     default:
       return 'shrine_dirt';
@@ -117,6 +128,110 @@ export function biomeToDefaultFloor(biome: MapBiome): FloorStyle {
 
 export function createFloorGrid(cols: number, rows: number, baseFloor: FloorStyle): FloorStyle[][] {
   return Array.from({ length: rows }, () => Array.from({ length: cols }, () => baseFloor));
+}
+
+export function getIglooCellMask(
+  gx: number,
+  gy: number,
+  direction: CardinalDir = 'south'
+): {
+  occupied: GridTile[];
+  walls: GridTile[];
+  interior: GridTile[];
+  entrance: GridTile;
+} {
+  // 標準朝南 ('south') 5×5 空間配置為精確 3 / 5 / 5 / 5 / 3：
+  // 列 0 (後牆 3 格): (1,0), (2,0), (3,0)
+  // 列 1 (左右牆 + 3 格內室 = 5): 牆(0,1),(4,1) | 內室(1..3, 1)
+  // 列 2 (左右牆 + 3 格內室 = 5): 牆(0,2),(4,2) | 內室(1..3, 2)
+  // 列 3 (左右牆 + 3 格內室 = 5): 牆(0,3),(4,3) | 內室(1..3, 3)
+  // 列 4 (入口左右牆 + 中央 1 格通道 = 3): 牆(1,4),(3,4) | 入口(2,4)
+  const rotate = (lx: number, ly: number): GridTile => {
+    switch (direction) {
+      case 'north':
+        return { gx: gx + (4 - lx), gy: gy + (4 - ly) };
+      case 'east':
+        return { gx: gx + ly, gy: gy + lx };
+      case 'west':
+        return { gx: gx + (4 - ly), gy: gy + lx };
+      case 'south':
+      default:
+        return { gx: gx + lx, gy: gy + ly };
+    }
+  };
+
+  const canonicalWalls: [number, number][] = [
+    [1, 0],
+    [2, 0],
+    [3, 0],
+    [0, 1],
+    [4, 1],
+    [0, 2],
+    [4, 2],
+    [0, 3],
+    [4, 3],
+    [1, 4],
+    [3, 4],
+  ];
+  const canonicalInterior: [number, number][] = [];
+  for (let ly = 1; ly <= 3; ly++) {
+    for (let lx = 1; lx <= 3; lx++) {
+      canonicalInterior.push([lx, ly]);
+    }
+  }
+
+  const walls = canonicalWalls.map(([lx, ly]) => rotate(lx, ly));
+  const interior = canonicalInterior.map(([lx, ly]) => rotate(lx, ly));
+  const entrance = rotate(2, 4);
+  const occupied = [...walls, ...interior, entrance];
+  return { occupied, walls, interior, entrance };
+}
+
+export function compileIglooWalls(igloo: IglooProp): Obstacle[] {
+  const baseGx = Math.round(igloo.x / TILE);
+  const baseGy = Math.round(igloo.y / TILE);
+  const { walls } = getIglooCellMask(baseGx, baseGy, igloo.direction);
+  const wallElev = Math.max(10, igloo.elevation + 10);
+  return walls.map((w) => ({
+    x: w.gx * TILE,
+    y: w.gy * TILE,
+    w: TILE,
+    h: TILE,
+    elevation: wallElev,
+    kind: 'wall',
+    style: 'igloo_wall',
+    direction: igloo.direction,
+  }));
+}
+
+export function makePushableIceBlock(
+  id: string,
+  gx: number,
+  gy: number,
+  baseElev = 0
+): PushableIceBlock {
+  const x = gx * TILE;
+  const y = gy * TILE;
+  return {
+    id,
+    x,
+    y,
+    w: 2 * TILE,
+    h: 2 * TILE,
+    baseElev,
+    elevation: baseElev + 1.5,
+    pushDir: null,
+    pushTimer: 0,
+    slideTimer: 0,
+    slideDuration: 0.16,
+    slideStartX: x,
+    slideStartY: y,
+    slideEndX: x,
+    slideEndY: y,
+    slideDir: null,
+    pusherId: null,
+    pusherFaction: null,
+  };
 }
 
 export interface ArenaMap {
@@ -132,10 +247,16 @@ export interface ArenaMap {
   stairs: StairRect[];
   waterTiles: GridTile[];
   waterTileKeys: Set<string>;
+  floatingIceTiles?: GridTile[];
+  floatingIceTileKeys?: Set<string>;
   bridges: BridgeRect[];
   stoneRoads: GridTile[];
   railTracks: RailTrackCell[];
   farmTiles?: FarmTileCell[];
+  iceVents?: GridTile[];
+  campfires?: GridTile[];
+  igloos?: IglooProp[];
+  pushableIceBlocks?: PushableIceBlock[];
   obstacles: Obstacle[];
   bushes: BushProp[];
   trees: TreeProp[];
@@ -396,7 +517,6 @@ function createEuropeanCastleMap(): ArenaMap {
   ];
   const pillars: Obstacle[] = pillarCoords.map(([gx, gy]) => ({
     ...tRect(gx, gy, 1, 1),
-    blocksBullets: true,
     elevation: 10,
     kind: 'wall',
     style: 'castle_pillar',
@@ -1050,7 +1170,6 @@ function createBambooFortressMap(): ArenaMap {
   ];
   const bambooWalls: Obstacle[] = bambooCoords.map(([gx, gy]) => ({
     ...tRect(gx, gy, 1, 1),
-    blocksBullets: true,
     elevation: 10,
     kind: 'wall',
     style: 'bamboo',
@@ -1492,7 +1611,272 @@ function createStanleyIslandMap(): ArenaMap {
   };
 }
 
+/**
+ * 8. 極地・裂隙冰川（非對稱冰原）
+ * - 西北雙層冰川高台與東南鋸齒冰脊形成非對稱立體高低差，無縫冰階貼靠冰崖
+ * - 中央蜿蜒冰川水道裂隙以天然「浮冰」聚落連通東西兩岸
+ * - 皇家與天影出生點設置溫暖「篝火」，東側平坦雪原駐立極地「冰屋」，戰場散落「可推動冰塊」與「冰氣孔」
+ */
+function createGlacierRiftMap(): ArenaMap {
+  const cols = 32;
+  const rows = 24;
+  const tileGrid = createTerrainGrid(cols, rows);
+  const floorGrid = createFloorGrid(cols, rows, 'glacier_ice');
+
+  // 混搭局部深灰岩磚凍石區（東北高坡邊與西南棧點）
+  for (let gy = 1; gy <= 4; gy++) {
+    for (let gx = 25; gx <= 30; gx++) {
+      floorGrid[gy][gx] = 'castle_stone';
+    }
+  }
+  for (let gy = 18; gy <= 22; gy++) {
+    for (let gx = 2; gx <= 7; gx++) {
+      floorGrid[gy][gx] = 'castle_stone';
+    }
+  }
+
+  // 西北不規則雙層冰川高台（1.0 -> 2.0）
+  paintTerrainRows(
+    tileGrid,
+    2,
+    [
+      [3, 8],
+      [2, 9],
+      [2, 9],
+      [2, 9],
+      [2, 9],
+      [2, 8],
+      [3, 7],
+    ],
+    1.0,
+    'glacier_ice'
+  );
+  paintTerrainRect(tileGrid, 4, 4, 3, 2, 2.0, 'glacier_ice');
+  tileGrid[6][5] = { elev: 2.0, style: 'glacier_ice' };
+
+  // 中西冰川岩島（+1.0）
+  paintTerrainRows(
+    tileGrid,
+    11,
+    [
+      [11, 13],
+      [11, 14],
+      [11, 13],
+      [12, 13],
+    ],
+    1.0,
+    'glacier_ice'
+  );
+
+  // 東南鋸齒雙層冰脊（1.0 -> 2.0）
+  paintTerrainRows(
+    tileGrid,
+    13,
+    [
+      [24, 28],
+      [23, 29],
+      [23, 29],
+      [23, 29],
+      [23, 28],
+      [24, 28],
+      [25, 27],
+    ],
+    1.0,
+    'glacier_ice'
+  );
+  paintTerrainRect(tileGrid, 26, 15, 2, 3, 2.0, 'glacier_ice');
+
+  // 蜿蜒冰川裂隙河道
+  const waterTiles: GridTile[] = [];
+  const waterTileKeys = new Set<string>();
+  const riftBounds: [number, number][] = [
+    [15, 16], // 0
+    [15, 16], // 1
+    [15, 16], // 2
+    [15, 16], // 3
+    [15, 16], // 4
+    [15, 17], // 5
+    [15, 17], // 6 (北側浮冰群連通)
+    [15, 17], // 7
+    [15, 17], // 8
+    [16, 18], // 9
+    [16, 18], // 10
+    [16, 18], // 11
+    [16, 18], // 12
+    [16, 18], // 13
+    [17, 19], // 14
+    [17, 19], // 15
+    [17, 19], // 16 (南側浮冰群連通)
+    [17, 19], // 17
+    [17, 19], // 18
+    [18, 20], // 19
+    [18, 20], // 20
+    [18, 20], // 21
+    [18, 20], // 22
+    [18, 20], // 23
+  ];
+  for (let gy = 0; gy < rows; gy++) {
+    const [x0, x1] = riftBounds[gy];
+    for (let gx = x0; gx <= x1; gx++) {
+      waterTiles.push({ gx, gy });
+      waterTileKeys.add(`${gx},${gy}`);
+    }
+  }
+
+  // 天然浮冰踏橋群（僅覆蓋於水面上，形成不規則有機通行冰洲）
+  const floatingIceTiles: GridTile[] = [
+    // 北側水道浮冰連通帶
+    { gx: 15, gy: 5 },
+    { gx: 16, gy: 5 },
+    { gx: 15, gy: 6 },
+    { gx: 16, gy: 6 },
+    { gx: 17, gy: 6 },
+    { gx: 16, gy: 7 },
+    { gx: 17, gy: 7 },
+    // 中段孤立裝飾浮冰
+    { gx: 16, gy: 11 },
+    { gx: 17, gy: 11 },
+    // 南側水道浮冰連通帶
+    { gx: 18, gy: 15 },
+    { gx: 19, gy: 15 },
+    { gx: 17, gy: 16 },
+    { gx: 18, gy: 16 },
+    { gx: 19, gy: 16 },
+    { gx: 17, gy: 17 },
+    { gx: 18, gy: 17 },
+    // 南端零星飄浮冰
+    { gx: 18, gy: 21 },
+    { gx: 19, gy: 21 },
+  ];
+  const floatingIceTileKeys = new Set(floatingIceTiles.map((f) => `${f.gx},${f.gy}`));
+
+  const snowPine: [string, string, string, string] = ['#0F4C5C', '#1E607A', '#3891A6', '#BAE6FD'];
+
+  // 東側平坦冰原冰屋（3/5/5/5/3，入口朝西望向裂隙北渡口）
+  const igloos: IglooProp[] = [
+    { ...tRect(22, 5, 5, 5), direction: 'west', elevation: 0 },
+  ];
+
+  const obstacles: Obstacle[] = [
+    // 黑／白多面寒岩掩體（2×2 = +2.0、1×1 = +1.5，疊加於所在地形）
+    { ...tRect(5, 14, 2, 2), elevation: 2.0, kind: 'crate', style: 'rock_large', colorVariant: 'white' },
+    { ...tRect(20, 2, 2, 2), elevation: 2.0, kind: 'crate', style: 'rock_large', colorVariant: 'black' },
+    { ...tRect(12, 12, 1, 1), elevation: 2.5, kind: 'crate', style: 'rock_small', colorVariant: 'white' },
+    { ...tRect(9, 18, 1, 1), elevation: 1.5, kind: 'crate', style: 'rock_small', colorVariant: 'white' },
+    { ...tRect(21, 19, 1, 1), elevation: 1.5, kind: 'crate', style: 'rock_small', colorVariant: 'white' },
+    { ...tRect(27, 19, 1, 1), elevation: 2.5, kind: 'crate', style: 'rock_small', colorVariant: 'white' },
+    { ...tRect(11, 8, 1, 1), elevation: 1.5, kind: 'crate', style: 'rock_small', colorVariant: 'black' },
+    { ...tRect(27, 8, 1, 1), elevation: 1.5, kind: 'crate', style: 'rock_small', colorVariant: 'black' },
+    // 靛青石砌哨牆（10）
+    ...createTileWallLine(3, 18, 4, 18, 'stone_wall_blue'),
+    ...createTileWallLine(29, 7, 29, 8, 'stone_wall_blue'),
+    ...compileIglooWalls(igloos[0]),
+  ];
+
+  // 可推動寒冰方塊（2×2，+1.5）
+  const pushableIceBlocks: PushableIceBlock[] = [
+    makePushableIceBlock('glacier_push_1', 8, 8, 0),
+    makePushableIceBlock('glacier_push_2', 9, 15, 0),
+    makePushableIceBlock('glacier_push_3', 23, 10, 0),
+  ];
+
+  // 出生點營地篝火（皇家西南、天影東北）
+  const campfires: GridTile[] = [
+    { gx: 4, gy: 20 },
+    { gx: 28, gy: 3 },
+  ];
+
+  const iceVents: GridTile[] = [
+    { gx: 12, gy: 6 },
+    { gx: 14, gy: 11 },
+    { gx: 15, gy: 17 },
+    { gx: 21, gy: 11 },
+    { gx: 27, gy: 14 },
+    { gx: 7, gy: 17 },
+  ];
+
+  return {
+    id: 'glacier_rift',
+    cols,
+    rows,
+    width: cols * TILE,
+    height: rows * TILE,
+    biome: 'glacier_outdoor',
+    name: '極地・裂隙冰川',
+    floorGrid,
+    tileGrid,
+    stairs: [
+      // 西北冰川高台 0.5 & 1.5 冰階
+      { ...tRect(10, 5, 1, 1), elevation: 0.5, direction: 'west', style: 'glacier_ice' },
+      { ...tRect(5, 9, 1, 1), elevation: 0.5, direction: 'north', style: 'glacier_ice' },
+      { ...tRect(1, 5, 1, 1), elevation: 0.5, direction: 'east', style: 'glacier_ice' },
+      { ...tRect(3, 5, 1, 1), elevation: 1.5, direction: 'east', style: 'glacier_ice' },
+      { ...tRect(7, 4, 1, 1), elevation: 1.5, direction: 'west', style: 'glacier_ice' },
+      // 中西冰岩島 0.5 冰階
+      { ...tRect(10, 12, 1, 1), elevation: 0.5, direction: 'east', style: 'glacier_ice' },
+      { ...tRect(12, 15, 1, 1), elevation: 0.5, direction: 'north', style: 'glacier_ice' },
+      // 東南冰脊 0.5 & 1.5 冰階
+      { ...tRect(22, 16, 1, 1), elevation: 0.5, direction: 'east', style: 'glacier_ice' },
+      { ...tRect(26, 12, 1, 1), elevation: 0.5, direction: 'south', style: 'glacier_ice' },
+      { ...tRect(25, 16, 1, 1), elevation: 1.5, direction: 'east', style: 'glacier_ice' },
+      { ...tRect(28, 16, 1, 1), elevation: 1.5, direction: 'west', style: 'glacier_ice' },
+    ],
+    waterTiles,
+    waterTileKeys,
+    floatingIceTiles,
+    floatingIceTileKeys,
+    bridges: [],
+    stoneRoads: [],
+    railTracks: [],
+    iceVents,
+    campfires,
+    igloos,
+    pushableIceBlocks,
+    obstacles,
+    bushes: [
+      { ...tRect(9, 11, 1, 1) },
+      { ...tRect(21, 14, 1, 1) },
+      { ...tRect(12, 20, 1, 1) },
+    ],
+    trees: [
+      { ...tRect(2, 12, 1, 1), canopyRadius: 44, foliagePalette: snowPine },
+      { ...tRect(11, 2, 1, 1), canopyRadius: 42, foliagePalette: snowPine },
+      { ...tRect(23, 1, 1, 1), canopyRadius: 44, foliagePalette: snowPine },
+      { ...tRect(29, 21, 1, 1), canopyRadius: 44, foliagePalette: snowPine },
+      { ...tRect(13, 21, 1, 1), canopyRadius: 42, foliagePalette: snowPine },
+      { ...tRect(7, 22, 1, 1), canopyRadius: 42, foliagePalette: snowPine },
+    ],
+    weaponSpawns: [
+      { ...tCenter(5, 5), kind: 'gun', weaponId: 'sniper' },
+      { ...tCenter(12, 7), kind: 'gun', weaponId: 'rifle' },
+      { ...tCenter(27, 16), kind: 'gun', weaponId: 'rifle' },
+      { ...tCenter(15, 19), kind: 'gun', weaponId: 'shotgun' },
+      { ...tCenter(21, 12), kind: 'melee', weaponId: 'greatsword' },
+      { ...tCenter(8, 13), kind: 'melee', weaponId: 'claw' },
+    ],
+    ammoSpawns: [
+      { ...tCenter(6, 16), respawnTimer: 0, active: true },
+      { ...tCenter(20, 5), respawnTimer: 0, active: true },
+      { ...tCenter(24, 15), respawnTimer: 0, active: true },
+      { ...tCenter(13, 19), respawnTimer: 0, active: true },
+    ],
+    shieldSpawns: [
+      { ...tCenter(13, 12), respawnTimer: 0, active: true },
+      { ...tCenter(21, 7), respawnTimer: 0, active: true },
+      { ...tCenter(7, 20), respawnTimer: 0, active: true },
+    ],
+    factionSpawns: {
+      royal: [tCenter(3, 20), tCenter(5, 21)],
+      shadow: [tCenter(27, 2), tCenter(29, 3)],
+      mercenary: [tCenter(1, 2), tCenter(12, 13), tCenter(22, 22), tCenter(30, 11)],
+    },
+  };
+}
+
 function attachFloorGrid(map: ArenaMap): ArenaMap {
+  if (map.floorGrid && map.floorGrid.length === map.rows && map.floorGrid[0]?.length === map.cols) {
+    return map;
+  }
   const baseFloor = biomeToDefaultFloor(map.biome);
   const floorGrid = createFloorGrid(map.cols, map.rows, baseFloor);
   for (let gy = 0; gy < map.rows; gy++) {
@@ -1525,6 +1909,9 @@ export function createArenaMap(mapId: MapId | string): ArenaMap {
       break;
     case 'stanley_island':
       raw = createStanleyIslandMap();
+      break;
+    case 'glacier_rift':
+      raw = createGlacierRiftMap();
       break;
     case 'tokyo_shrine':
     default:

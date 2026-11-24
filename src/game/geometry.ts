@@ -96,6 +96,56 @@ export function segmentCircleHit(
   };
 }
 
+export function segmentIntersectsRect(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  rect: { x: number; y: number; w: number; h: number },
+  eps = 1e-6
+): { hit: boolean; t: number; hitX: number; hitY: number } {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  let tmin = 0;
+  let tmax = 1;
+
+  if (Math.abs(dx) < 1e-9) {
+    if (x1 < rect.x - eps || x1 > rect.x + rect.w + eps) {
+      return { hit: false, t: 1, hitX: x2, hitY: y2 };
+    }
+  } else {
+    const inv = 1 / dx;
+    let t1 = (rect.x - eps - x1) * inv;
+    let t2 = (rect.x + rect.w + eps - x1) * inv;
+    if (t1 > t2) [t1, t2] = [t2, t1];
+    tmin = Math.max(tmin, t1);
+    tmax = Math.min(tmax, t2);
+    if (tmin > tmax) return { hit: false, t: 1, hitX: x2, hitY: y2 };
+  }
+
+  if (Math.abs(dy) < 1e-9) {
+    if (y1 < rect.y - eps || y1 > rect.y + rect.h + eps) {
+      return { hit: false, t: 1, hitX: x2, hitY: y2 };
+    }
+  } else {
+    const inv = 1 / dy;
+    let t1 = (rect.y - eps - y1) * inv;
+    let t2 = (rect.y + rect.h + eps - y1) * inv;
+    if (t1 > t2) [t1, t2] = [t2, t1];
+    tmin = Math.max(tmin, t1);
+    tmax = Math.min(tmax, t2);
+    if (tmin > tmax) return { hit: false, t: 1, hitX: x2, hitY: y2 };
+  }
+
+  const t = clamp(tmin, 0, 1);
+  return {
+    hit: true,
+    t,
+    hitX: x1 + dx * t,
+    hitY: y1 + dy * t,
+  };
+}
+
 /**
  * 光暈戰記陣營敵對規則：
  * - 第三勢力 (mercenary)：以「所有人（包含其他第三勢力）」為敵人

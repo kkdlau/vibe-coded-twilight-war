@@ -9,7 +9,8 @@ export type MapId =
   | 'industrial_warehouse'
   | 'western_railway'
   | 'bamboo_fortress'
-  | 'stanley_island';
+  | 'stanley_island'
+  | 'glacier_rift';
 
 export type GunKind = 'pistol' | 'rifle' | 'shotgun' | 'sniper';
 export type MeleeKind = 'knife' | 'claw' | 'greatsword' | 'shield';
@@ -115,11 +116,16 @@ export type FloorStyle =
   | 'desert_sand'
   | 'castle_stone'
   | 'warehouse_steel'
-  | 'grass_ground';
+  | 'grass_ground'
+  | 'glacier_ice';
 
 export type PlatformStyle =
   | 'default'
   | 'shrine_floor'
+  | 'shrine_dirt'
+  | 'bamboo_moss'
+  | 'warehouse_steel'
+  | 'glacier_ice'
   | 'hill'
   | 'mud_pit'
   | 'pyramid'
@@ -128,9 +134,11 @@ export type PlatformStyle =
   | 'grass_ground'
   | 'rail_track';
 
+export type CardinalDir = 'north' | 'south' | 'east' | 'west';
+
 export interface StairRect extends Rect {
   elevation: number; // 所在底層高度 +0.5（例：-1.0 -> -0.5、0.0 -> 0.5、1.0 -> 1.5、2.0 -> 2.5）
-  direction: 'north' | 'south' | 'east' | 'west';
+  direction: CardinalDir;
   style?: PlatformStyle;
 }
 
@@ -142,6 +150,7 @@ export type ObstacleStyle =
   | 'obelisk'
   | 'container'
   | 'house'
+  | 'igloo_wall'
   | 'stone_wall_tan'
   | 'stone_wall_green'
   | 'stone_wall_red'
@@ -153,11 +162,33 @@ export type ObstacleStyle =
   | 'train_car';
 
 export interface Obstacle extends Rect {
-  elevation: number; // 1.0 小木箱／欄杆, 1.5 大木箱／小石塊, 2.0 貨櫃／火車／大岩石, 10 實牆／房屋／竹林／石柱（子彈與視線統一依高度計算）
+  elevation: number; // 1.0 小木箱／欄杆, 1.5 大木箱／小石塊, 2.0 貨櫃／火車／大岩石, 10 實牆／房屋／冰屋／竹林／石柱（子彈與視線統一依高度計算）
   kind: 'crate' | 'wall';
   style?: ObstacleStyle;
   colorVariant?: string;
-  direction?: 'north' | 'south' | 'east' | 'west';
+  direction?: CardinalDir;
+}
+
+export interface IglooProp extends Rect {
+  direction: CardinalDir;
+  elevation: number; // 所在地形基準高（內部可行走），外牆自動編譯為 max(10, elevation + 10)
+}
+
+export interface PushableIceBlock extends Rect {
+  id: string;
+  baseElev: number; // 所在地形基準高
+  elevation: number; // baseElev + 1.5
+  pushDir: CardinalDir | null;
+  pushTimer: number;
+  slideTimer: number;
+  slideDuration: number;
+  slideStartX: number;
+  slideStartY: number;
+  slideEndX: number;
+  slideEndY: number;
+  slideDir: CardinalDir | null;
+  pusherId: string | null;
+  pusherFaction: FactionId | null;
 }
 
 export interface GridTile {
@@ -274,6 +305,7 @@ export interface PlayerState {
   giantTimer: number;
   blindTimer: number;
   blindDuration: number;
+  freezeTimer: number;
   invulnTimer: number;
   delayCancelBonus: number;
 }
@@ -331,9 +363,12 @@ export interface EnemyEntity {
   shrinkTimer: number;
   giantTimer: number;
   blindTimer: number;
+  freezeTimer: number;
   stunTimer: number;
   hitFlash: number;
   gunfireTimer: number;
+  crosshairBloom: number;
+  lastAimAngle: number;
   attackAnimTimer: number;
   attackAnimDuration: number;
   attackAnimKind: MeleeKind | null;
@@ -463,7 +498,7 @@ export interface PickupItem {
 }
 
 export interface TimedSkillHudItem {
-  id: 'royalShield' | 'eagleEye' | 'shadowClone' | 'vampire' | 'shrink' | 'giant';
+  id: 'royalShield' | 'eagleEye' | 'shadowClone' | 'vampire' | 'shrink' | 'giant' | 'frozen';
   name: string;
   remaining: number;
   duration: number;
@@ -514,7 +549,6 @@ export interface HudSnapshot {
     activeBuffText: string | null;
     activeTimedSkills: TimedSkillHudItem[];
   };
-  nearbyPickup: string | null;
   factionScores: Record<FactionId, number>;
 }
 

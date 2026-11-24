@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Grid, HelpCircle, Layers, MapPin, Package, PenTool, Shield, Trophy, X } from 'lucide-react';
+import { FLOOR_TERRAIN_BINDINGS, STANDALONE_TERRAIN_SPECS } from '../game/customMaps';
 import {
   FACTIONS,
   FACTION_CHARACTERS,
@@ -10,7 +11,7 @@ import {
   getWeaponSwapDuration,
 } from '../game/data';
 import { HelpCatalogVisualId, renderHelpPreview } from '../game/mapRenderer';
-import { FactionId, MapId, RunRecord } from '../game/types';
+import { FactionId, FloorStyle, MapId, RunRecord } from '../game/types';
 import { MiniMapPreview } from './MiniMapPreview';
 import { CharacterAvatarSvg, FactionLogoSvg, WeaponIconSvg } from './WeaponArt';
 
@@ -42,125 +43,165 @@ interface HelpGuideEntry {
   desc: string;
 }
 
-const FLOOR_GUIDE_ITEMS: HelpGuideEntry[] = [
+const FLOOR_GUIDE_META: Record<
+  FloorStyle,
   {
-    visualId: 'floor_shrine_dirt',
-    name: '江戶泥土地板',
+    floorVisualId: HelpCatalogVisualId;
+    floorDesc: string;
+    tierVisualId: HelpCatalogVisualId;
+    stairVisualId: HelpCatalogVisualId;
+  }
+> = {
+  shrine_dirt: {
+    floorVisualId: 'floor_shrine_dirt',
+    floorDesc: '溫潤砂礫黃土地板，可單格或矩形自由混搭鋪設，具備專屬「江戶土台」與「江戶土坡階梯」。',
+    tierVisualId: 'terrain_shrine_dirt',
+    stairVisualId: 'terrain_shrine_dirt_stair',
+  },
+  bamboo_moss: {
+    floorVisualId: 'floor_bamboo_moss',
+    floorDesc: '深翠苔蘚林地地板，可自由混搭鋪設，具備專屬「嵐山苔台」與「嵐山苔階」。',
+    tierVisualId: 'terrain_bamboo_moss',
+    stairVisualId: 'terrain_bamboo_moss_stair',
+  },
+  desert_sand: {
+    floorVisualId: 'floor_desert_sand',
+    floorDesc: '金色細沙與乾燥風蝕紋理地板，高度 0.0，具備專屬「切石高台」與「切石石階」。',
+    tierVisualId: 'terrain_platform',
+    stairVisualId: 'terrain_platform_stair',
+  },
+  castle_stone: {
+    floorVisualId: 'floor_castle_stone',
+    floorDesc: '淺灰工整切石地磚，適用室內廳堂或戶外混搭，具備專屬「聖殿石台」與「聖殿石階」。',
+    tierVisualId: 'terrain_castle_dais',
+    stairVisualId: 'terrain_castle_dais_stair',
+  },
+  warehouse_steel: {
+    floorVisualId: 'floor_warehouse_steel',
+    floorDesc: '深藍工業防滑鋼板地坪，踏步發出硬質聲響，具備專屬「鋼構高台」與「鋼構斜階」。',
+    tierVisualId: 'terrain_warehouse_steel',
+    stairVisualId: 'terrain_warehouse_steel_stair',
+  },
+  grass_ground: {
+    floorVisualId: 'terrain_grass',
+    floorDesc: '鮮綠柔軟草皮地板，與其他主題地板完全平權，具備專屬「土丘高地」與「土坡階梯」。',
+    tierVisualId: 'terrain_hill',
+    stairVisualId: 'terrain_hill_stair',
+  },
+  glacier_ice: {
+    floorVisualId: 'floor_glacier_ice',
+    floorDesc: '極地冰原晶瑩冰層地板，高度 0.0，具備專屬「極地冰川高地」與「極地冰川階梯」。',
+    tierVisualId: 'terrain_glacier',
+    stairVisualId: 'terrain_glacier_stair',
+  },
+};
+
+const FLOOR_GUIDE_ITEMS: HelpGuideEntry[] = (Object.keys(FLOOR_TERRAIN_BINDINGS) as FloorStyle[]).map((fs) => {
+  const b = FLOOR_TERRAIN_BINDINGS[fs];
+  return {
+    visualId: FLOOR_GUIDE_META[fs].floorVisualId,
+    name: b.floorLabel,
     elev: '0.0',
     footprint: '1×1 格',
-    desc: '溫潤砂礫黃土地板，可單格或矩形自由混搭鋪設，不帶任何戰鬥屬性加成。',
-  },
-  {
-    visualId: 'floor_bamboo_moss',
-    name: '嵐山林間苔土',
-    elev: '0.0',
-    footprint: '1×1 格',
-    desc: '深翠苔蘚林地地板，可自由混搭其他地板與土丘高地，與底層地形完全正交分離。',
-  },
-  {
-    visualId: 'floor_desert_sand',
-    name: '荒野沙海地板',
-    elev: '0.0',
-    footprint: '1×1 格',
-    desc: '金色細沙與乾燥風蝕紋理地板，可單格或區域拼貼，高度維持 0.0。',
-  },
-  {
-    visualId: 'floor_castle_stone',
-    name: '聖殿石磚地板',
-    elev: '0.0',
-    footprint: '1×1 格',
-    desc: '淺灰工整切石地磚，適用室內廳堂或混搭戶外造景，與草地、沙地可並存。',
-  },
-  {
-    visualId: 'floor_warehouse_steel',
-    name: '東港鋼板地板',
-    elev: '0.0',
-    footprint: '1×1 格',
-    desc: '深藍工業防滑鋼板地坪，踏步發出清脆硬質聲響，高度 0.0。',
-  },
-  {
-    visualId: 'terrain_grass',
-    name: '青綠草坪地板',
-    elev: '0.0',
-    footprint: '1×1 格',
-    desc: '鮮綠柔軟草皮地板，與其餘 5 種主題地板完全平權，支援任意單格／矩形混搭鋪設。',
-  },
-];
+    desc: FLOOR_GUIDE_META[fs].floorDesc,
+  };
+});
+
+const STANDALONE_TERRAIN_VISUALS: Record<
+  'shrine_floor' | 'mud_pit',
+  { tierVisualId: HelpCatalogVisualId; stairVisualId: HelpCatalogVisualId }
+> = {
+  shrine_floor: { tierVisualId: 'terrain_plank', stairVisualId: 'terrain_plank_stair' },
+  mud_pit: { tierVisualId: 'terrain_mud', stairVisualId: 'terrain_mud_stair' },
+};
 
 const TERRAIN_TIER_ITEMS: HelpGuideEntry[] = [
-  {
-    visualId: 'terrain_hill',
-    name: '土丘高地（可疊加）',
-    elev: '每層 +1.0',
-    footprint: '逐格連通',
+  ...(Object.keys(FLOOR_TERRAIN_BINDINGS) as FloorStyle[]).map((fs) => {
+    const b = FLOOR_TERRAIN_BINDINGS[fs];
+    return {
+      visualId: FLOOR_GUIDE_META[fs].tierVisualId,
+      name: b.terrainLabel,
+      elev: '每層 +1.0',
+      footprint: '逐格連通',
+      widePreview: true,
+      desc: b.terrainDesc,
+    };
+  }),
+  ...STANDALONE_TERRAIN_SPECS.map((sp) => ({
+    visualId: STANDALONE_TERRAIN_VISUALS[sp.id].tierVisualId,
+    name: sp.terrainLabel,
+    elev: sp.heightLabel,
+    footprint: sp.id === 'mud_pit' ? '逐格凹陷' : '逐格連通',
     widePreview: true,
-    desc: '自然山丘地形，支援任意多層疊加（1.0、2.0、3.0…）；上方可繼續疊加箱體、水域或竹林，保留原有地板而不互相覆蓋。',
-  },
-  {
-    visualId: 'terrain_platform',
-    name: '切石高台（可疊加）',
-    elev: '每層 +1.0',
-    footprint: '逐格高台',
-    widePreview: true,
-    desc: '遺跡與古堡的切石平台，支援逐層疊加（1.0、2.0、3.0…）；上方放置大箱或房屋時需確保所跨格位底層高度一致。',
-  },
-  {
-    visualId: 'terrain_plank',
-    name: '木板神社高台（可疊加）',
-    elev: '每層 +1.0',
-    footprint: '逐格連通',
-    widePreview: true,
-    desc: '斜面木板架高地台，支援多層疊加（1.0、2.0…），可搭配木板神社階梯或神社板塀。',
-  },
-  {
-    visualId: 'terrain_mud',
-    name: '泥坑窪地（可疊加負層）',
-    elev: '每層 -1.0',
-    footprint: '逐格凹陷',
-    widePreview: true,
-    desc: '向下凹陷的泥濘坑地，支援逐層深挖（-1.0、-2.0…）；平地（0.0）子彈越過泥坑不會受低窪影響，須經泥坡階梯進出。',
-  },
+    desc: sp.terrainDesc,
+  })),
 ];
 
 const TERRAIN_STAIR_ITEMS: HelpGuideEntry[] = [
-  {
-    visualId: 'terrain_hill_stair',
-    name: '土坡階梯（土丘對應階梯）',
+  ...(Object.keys(FLOOR_TERRAIN_BINDINGS) as FloorStyle[]).map((fs) => {
+    const b = FLOOR_TERRAIN_BINDINGS[fs];
+    return {
+      visualId: FLOOR_GUIDE_META[fs].stairVisualId,
+      name: `${b.stairLabel}（對應${b.terrainLabel.replace('（疊加）', '')}）`,
+      elev: '所在層 +0.5',
+      footprint: '1×1 格（按 R 轉向）',
+      desc: b.stairDesc,
+    };
+  }),
+  ...STANDALONE_TERRAIN_SPECS.map((sp) => ({
+    visualId: STANDALONE_TERRAIN_VISUALS[sp.id].stairVisualId,
+    name: `${sp.stairLabel}（對應${sp.terrainLabel.replace(/（疊加）|（下挖）/, '')}）`,
     elev: '所在層 +0.5',
     footprint: '1×1 格（按 R 轉向）',
-    desc: '專為土丘高地設計的平滑自然土坡（無階級橫紋），高度永遠為「所在底層 +0.5」，銜接相鄰兩層落差。',
-  },
-  {
-    visualId: 'terrain_platform_stair',
-    name: '切石石階（切石對應階梯）',
-    elev: '所在層 +0.5',
-    footprint: '1×1 格（按 R 轉向）',
-    desc: '專為切石高台設計的石砌階梯，高度固定為「所在底層 +0.5」，讓步兵以 |Δh| ≤ 0.5 規則攀登任意高台層級。',
-  },
-  {
-    visualId: 'terrain_plank_stair',
-    name: '木板神社階梯（神社高台對應階梯）',
-    elev: '所在層 +0.5',
-    footprint: '1×1 格（按 R 轉向）',
-    desc: '專為木板神社高台打造的木階斜坡，高度永遠為「所在底層 +0.5」，支援按 R 切換四向登台方向。',
-  },
-  {
-    visualId: 'terrain_mud_stair',
-    name: '泥坡階梯（泥坑對應階梯）',
-    elev: '所在層 +0.5',
-    footprint: '1×1 格（按 R 轉向）',
-    desc: '置於泥坑窪地內的平滑泥坡（如 -1.0 泥坑中為 -0.5），支援四向旋轉，提供部隊進出泥坑或深挖層的緩坡通道。',
-  },
+    desc: sp.stairDesc,
+  })),
 ];
 
 const OBJECT_GUIDE_ITEMS: HelpGuideEntry[] = [
+  {
+    visualId: 'object_ice_vent',
+    name: '冰氣孔（噴霧冰凍）',
+    elev: '所在地形 +0.0',
+    footprint: '1×1 格',
+    desc: '持續向外噴發極地冷霧的環境機關；任何玩家或電腦經過該高度踩踏即冰凍 5 秒（移速 -10%、近武攻速 -10%、中斷所有持續技能且無法集氣）。',
+  },
+  {
+    visualId: 'object_campfire',
+    name: '篝火（營地火堆）',
+    elev: '所在地形 +0.0',
+    footprint: '1×1 格',
+    desc: '疊於原石與交錯木柴上的動態營地火堆，可放於平地或高台出生點旁提供溫煦火光與動態火星粒子（可通行不擋彈道）。',
+  },
+  {
+    visualId: 'object_floating_ice',
+    name: '浮冰（僅限水域）',
+    elev: '所在地形 +0.0',
+    footprint: '1×1 格（自動拼合）',
+    widePreview: true,
+    desc: '僅能放置於水域格位之上的天然冰排，讓步兵得以踩踏跨越冰河裂隙！單格可獨立存在、相鄰時自動融接成整片冰洲，外露邊緣仍會縮進並明顯露出底層流水。',
+  },
   {
     visualId: 'terrain_river',
     name: '水域河道',
     elev: '0.0（隨地形層）',
     footprint: '1×1 格',
     widePreview: true,
-    desc: '疊加於地板與高台之上的流動水面物件！岸邊採透明漸層，既不會覆蓋底下的草地／沙地，也不會吃掉下方的 1.0 土丘高地；高度隨底層故 0.0 水面可穿透射擊（須架橋通行）。',
+    desc: '疊加於地板與高台之上的流動水面物件！岸邊採透明漸層，既不會覆蓋底下的草地／沙地，也不會吃掉下方的 1.0 土丘高地；高度隨底層故 0.0 水面可穿透射擊（須架橋或鋪浮冰通行）。',
+  },
+  {
+    visualId: 'object_pushable_ice',
+    name: '可推動寒冰塊',
+    elev: '所在層 +1.5',
+    footprint: '2×2 格（須等高基底）',
+    desc: '朝同一方向持續推頂片刻即可往該方向平滑移動 1 格（須為同高度平地、無牆無階梯）；若前方有人則會連人一併推走，推向實牆或高崖邊緣無路可退時將直接秒殺！',
+  },
+  {
+    visualId: 'object_igloo',
+    name: '極地冰屋（3/5/5/5/3）',
+    elev: '10（內室 +0.0）',
+    footprint: '3/5/5/5/3 格（按 R 轉向）',
+    widePreview: true,
+    desc: '佔地呈現「3/5/5/5/3」外廓的極地穹頂冰屋，支援 R 鍵 4 向旋轉入口；外圈 11 格為高度 10 實牆，中央入口通往 3×3 可自由走位掩護的內室（靠近時自動淡出屋頂以便觀察）。',
   },
   {
     visualId: 'object_bridge',
@@ -913,13 +954,13 @@ export const PortalView: React.FC<PortalViewProps> = ({
                     <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 space-y-1.5">
                       <div className="text-sm font-bold text-amber-400">彈道貫穿、死亡掉落與對等戰鬥規則</div>
                       <p className="text-slate-300">
-                        • 射向 1.5 格高大箱子時，子彈會穿透至外緣內 0.5 格處（站太靠箱緣仍會受傷）；≥ 2.0 格石牆/貨櫃則於邊緣即止。
+                        • 射向 1.5 格高大箱子時，子彈會穿透至外緣內 0.5 格處（站太靠箱緣仍會受傷）；≥ 2.0 格石牆/貨櫃則於邊緣即止。地形階梯須貼合並指向對應高台／泥坑且邊緣會自然融接。
                       </p>
                       <p className="text-slate-300">
-                        • 玩家與電腦同為 <strong>100 血</strong>且無陣營被動能力；玩家死亡掉落非預設武器並於出生點以制式小槍／小刀復活（三命制，不消耗後備兵力）。
+                        • 玩家與電腦同為 <strong>100 血</strong>且無陣營被動能力；踩過「冰氣孔」會陷入 <strong>5 秒冰凍</strong>（步速 -10%、近武攻速 -10%、中斷所有持續技能且無法集氣）。
                       </p>
                       <p className="text-slate-300">
-                        • 皇家 5 發黃色光彈可穿透敵人但會誤傷友軍、閃光瞬移可使敵對目標（含玩家）畫面閃白致盲；天影黑龍波傷 20/15 且絕不傷隊友。
+                        • 玩家死亡掉落非預設武器並於出生點以制式小槍／小刀復活；皇家光彈會誤傷友軍、閃光瞬移可致盲敵人（含玩家），天影黑龍波絕不傷隊友。
                       </p>
                     </div>
 

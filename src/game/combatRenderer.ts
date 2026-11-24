@@ -38,6 +38,8 @@ export interface CharacterRenderParams {
   eagleEyeRemaining?: number;
   shadowDodge?: ShadowDodge;
   morphScale?: number;
+  isPhantomClone?: boolean;
+  isFrozen?: boolean;
 }
 
 export function drawOutlinedText(
@@ -584,6 +586,7 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
     isReloading = false,
     reloadProgress = 0,
     isBlinded = false,
+    isFrozen = false,
     gunKind = 'pistol',
     meleeKind = 'knife',
     skin,
@@ -1341,6 +1344,26 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
 
   if (eagleEyeRemaining > 0 && !isBlinded) {
     drawEagleEyeVisor(ctx, bodyR, eagleEyeRemaining);
+  }
+
+  if (isFrozen) {
+    ctx.beginPath();
+    ctx.arc(0, 0, bodyR * 1.04, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(56, 189, 248, 0.36)';
+    ctx.fill();
+    ctx.lineWidth = 2.4;
+    ctx.strokeStyle = '#BAE6FD';
+    ctx.stroke();
+
+    // 寒冰結晶光澤稜線
+    ctx.strokeStyle = 'rgba(240, 249, 255, 0.85)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(-bodyR * 0.55, -bodyR * 0.25);
+    ctx.lineTo(-bodyR * 0.22, -bodyR * 0.58);
+    ctx.moveTo(bodyR * 0.12, bodyR * 0.48);
+    ctx.lineTo(bodyR * 0.52, bodyR * 0.14);
+    ctx.stroke();
   }
 
   ctx.restore();
