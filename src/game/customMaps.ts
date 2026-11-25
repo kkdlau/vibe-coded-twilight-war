@@ -1192,9 +1192,14 @@ export function validateCustomMap(data: CustomMapData): CustomMapValidationResul
   };
 }
 
+function getLocalStorage(): { getItem(k: string): string | null; setItem(k: string, v: string): void } | undefined {
+  return (globalThis as { localStorage?: { getItem(k: string): string | null; setItem(k: string, v: string): void } })
+    .localStorage;
+}
+
 export function loadCustomMaps(): CustomMapData[] {
   try {
-    const raw = localStorage.getItem(CUSTOM_MAPS_STORAGE_KEY);
+    const raw = getLocalStorage()?.getItem(CUSTOM_MAPS_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -1222,7 +1227,7 @@ export function loadCustomMaps(): CustomMapData[] {
 
 export function saveCustomMaps(maps: CustomMapData[]): void {
   try {
-    localStorage.setItem(CUSTOM_MAPS_STORAGE_KEY, JSON.stringify(maps));
+    getLocalStorage()?.setItem(CUSTOM_MAPS_STORAGE_KEY, JSON.stringify(maps));
   } catch {
     // ignore storage quota errors
   }

@@ -1,0 +1,223 @@
+import type { CustomMapData } from '../game/customMaps';
+import type { AiDifficulty } from '../game/tuning';
+import type {
+  CardinalDir,
+  EnemyArchetype,
+  FactionId,
+  HudSnapshot,
+  MeleeKind,
+  PickupKind,
+  WeaponHand,
+} from '../game/types';
+
+export const MAX_ROOM_PLAYERS = 8;
+export const ROOM_CODE_REGEX = /^[A-Z0-9]{6}$/;
+export const MAX_LOBBY_MSG_BYTES = 65_536;
+export const MAX_GAME_MSG_BYTES = 24_576;
+export const LOBBY_IDLE_TIMEOUT_MS = 5 * 60_000;
+export const POST_MATCH_CLEANUP_MS = 60_000;
+export const MAX_MATCH_DURATION_MS = 30 * 60_000;
+
+const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+export function generateRoomCode(): string {
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += ROOM_CODE_ALPHABET[Math.floor(Math.random() * ROOM_CODE_ALPHABET.length)];
+  }
+  return code;
+}
+
+export function normalizeRoomCode(raw: string): string | null {
+  const cleaned = raw.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return ROOM_CODE_REGEX.test(cleaned) ? cleaned : null;
+}
+
+export function sanitizeNickname(raw: string, fallback = '特戰隊員'): string {
+  const cleaned = raw.trim().replace(/\s+/g, ' ').slice(0, 18);
+  return cleaned.length > 0 ? cleaned : fallback;
+}
+
+export interface LobbyPlayerInfo {
+  peerId: string;
+  name: string;
+  faction: FactionId;
+  skinId: string;
+  isHost: boolean;
+}
+
+export type RoomPhase = 'lobby' | 'playing' | 'ended';
+
+export interface RoomLobbyState {
+  roomCode: string;
+  phase: RoomPhase;
+  hostPeerId: string;
+  maxPlayers: number;
+  mapId: string;
+  customMap?: CustomMapData;
+  difficulty: AiDifficulty;
+  players: LobbyPlayerInfo[];
+  expiresAt: number | null;
+}
+
+export interface RemotePlayerInput {
+  moveX: number;
+  moveY: number;
+  aimX: number;
+  aimY: number;
+  mouseDown: boolean;
+  clickSeq: number;
+  reloadSeq: number;
+  swapSeq: number;
+  pickupSeq: number;
+}
+
+export interface NetEquippedSlot {
+  t: 'g' | 'm';
+  id: string;
+  ammo?: number;
+  reload?: number;
+  dur?: number;
+}
+
+export interface NetActorSnapshot {
+  id: string;
+  peerId?: string;
+  isHuman: boolean;
+  name: string;
+  faction: FactionId;
+  skinId: string;
+  archetype?: EnemyArchetype;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  angle: number;
+  elev: number;
+  hp: number;
+  qi: number;
+  lives?: number;
+  respawn?: number;
+  score?: number;
+  dmg?: number;
+  kills?: number;
+  combo?: number;
+  maxCombo?: number;
+  reserve?: number;
+  hand: WeaponHand;
+  slots: [NetEquippedSlot, NetEquippedSlot];
+  swap?: number;
+  swapDur?: number;
+  gunfire?: number;
+  atkAnim?: number;
+  atkDur?: number;
+  atkKind?: MeleeKind | null;
+  charging?: boolean;
+  chargeReady?: boolean;
+  comboEmp?: boolean;
+  shield?: number;
+  shieldImp?: { angle: number; time: number };
+  eagle?: number;
+  shadow?: number;
+  vamp?: number;
+  shrink?: number;
+  giant?: number;
+  blind?: number;
+  blindDur?: number;
+  freeze?: number;
+  stun?: number;
+  invuln?: number;
+  hitFlash?: number;
+  bloom?: number;
+}
+
+export interface NetPickupSnapshot {
+  id: string;
+  x: number;
+  y: number;
+  kind: PickupKind;
+  itemId?: string;
+  ammo?: number;
+  dur?: number;
+}
+
+export interface NetProjectileSnapshot {
+  id: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  r: number;
+  color: string;
+  ownerId: string;
+  ownerFaction: FactionId;
+  isWave?: boolean;
+  isLightOrb?: boolean;
+  isBlackDragon?: boolean;
+  segs?: { x: number; y: number }[];
+}
+
+export interface NetIceBlockSnapshot {
+  id: string;
+  x: number;
+  y: number;
+  baseElev: number;
+  elev: number;
+  slideTimer: number;
+  slideDir: CardinalDir | null;
+}
+
+export type NetTransientEvent =
+  | { k: 'beam'; x1: number; y1: number; x2: number; y2: number; color: string; life: number; w: number }
+  | {
+      k: 'slash';
+      x: number;
+      y: number;
+      angle: number;
+      arc: number;
+      reach: number;
+      color: string;
+      life: number;
+      ult: boolean;
+      style: 'thrust' | 'claw' | 'sweep';
+    }
+  | { k: 'text'; x: number; y: number; text: string; color: string; scale: number; subtle?: boolean }
+  | { k: 'burst'; x: number; y: number; color: string; count: number }
+  | { k: 'trace'; kind: 'blink' | 'siphon'; fx: number; fy: number; tx: number; ty: number; dur: number }
+  | { k: 'sfx'; kind: 'gun' | 'melee' | 'hit' | 'down' | 'skill' | 'reload'; x: number; y: number; sub?: string; flag?: boolean };
+
+export interface NetWorldSnapshot {
+  seq: number;
+  t: number;
+  status: HudSnapshot['status'];
+  banner: string;
+  skillBanner: string | null;
+  factionScores: Record<FactionId, number>;
+  deploymentQueue: Record<FactionId, number>;
+  actors: NetActorSnapshot[];
+  pickups: NetPickupSnapshot[];
+  projectiles: NetProjectileSnapshot[];
+  iceBlocks: NetIceBlockSnapshot[];
+  events: NetTransientEvent[];
+}
+
+export type ClientToServerMsg =
+  | { type: 'update_profile'; name: string; faction: FactionId; skinId: string }
+  | { type: 'update_room_settings'; mapId: string; customMap?: CustomMapData; difficulty: AiDifficulty }
+  | { type: 'start_match'; mapId: string; customMap?: CustomMapData; difficulty: AiDifficulty }
+  | { type: 'match_ended' }
+  | { type: 'return_to_lobby' }
+  | { type: 'player_input'; input: RemotePlayerInput }
+  | { type: 'world_snapshot'; snapshot: NetWorldSnapshot }
+  | { type: 'ping'; clientTime: number };
+
+export type ServerToClientMsg =
+  | { type: 'welcome'; peerId: string; lobby: RoomLobbyState }
+  | { type: 'lobby_state'; lobby: RoomLobbyState }
+  | { type: 'match_started'; lobby: RoomLobbyState }
+  | { type: 'remote_input'; peerId: string; input: RemotePlayerInput }
+  | { type: 'world_snapshot'; snapshot: NetWorldSnapshot }
+  | { type: 'peer_left'; peerId: string; name: string }
+  | { type: 'room_closed'; reason: string }
+  | { type: 'error'; code: string; message: string }
+  | { type: 'pong'; clientTime: number };

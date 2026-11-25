@@ -4086,4 +4086,172 @@ describe('3D elevation LoS/bullet occlusion and AI mouse-turn & gunfire cadence 
   });
 });
 
+describe('Multiplayer Host & Client Snapshot Sync', () => {
+  it('spawns remote human peers on Host, drives movement/combat/reload/swap, and syncs snapshots cleanly to Clients', () => {
+    const hostSkin = FACTION_CHARACTERS.royal[0];
+    const allySkin = FACTION_CHARACTERS.royal[1];
+    const shadowSkin = FACTION_CHARACTERS.shadow[0];
+    const mpConfig: NonNullable<ConstructorParameters<typeof TwilightEngine>[8]> = {
+      role: 'host',
+      localPeerId: 'host01',
+      hostPeerId: 'host01',
+      peers: [
+        { peerId: 'host01', name: '房主', faction: 'royal', characterSkin: hostSkin, isHost: true },
+        { peerId: 'ally02', name: '隊友', faction: 'royal', characterSkin: allySkin, isHost: false },
+        { peerId: 'shad03', name: '影敵', faction: 'shadow', characterSkin: shadowSkin, isHost: false },
+      ],
+    };
+
+    let hostHud: HudSnapshot | null = null;
+    const host = new TwilightEngine(
+      'royal',
+      hostSkin,
+      'tokyo_shrine',
+      { royal: 10, shadow: 10, mercenary: 10 },
+      (snap) => {
+        hostHud = snap;
+      },
+      undefined,
+      undefined,
+      'standard',
+      mpConfig
+    );
+
+    const allyHuman = host.enemies.find((e) => e.isHumanPlayer && e.peerId === 'ally02')!;
+    const shadowHuman = host.enemies.find((e) => e.isHumanPlayer && e.peerId === 'shad03')!;
+    expect(allyHuman).toBeDefined();
+    expect(allyHuman.isAlly).toBe(true);
+    expect(shadowHuman).toBeDefined();
+    expect(shadowHuman.isAlly).toBe(false);
+
+    // Strip AI interference so we deterministically test remote human input + combat
+    host.enemies = [allyHuman, shadowHuman];
+    (host as unknown as { deploymentQueue: Record<FactionId, number> }).deploymentQueue = {
+      royal: 0,
+      shadow: 0,
+      mercenary: 0,
+    };
+
+    // Place both remote humans on flat open south lane facing each other
+    allyHuman.x = 10 * TILE;
+    allyHuman.y = 18.5 * TILE;
+    allyHuman.elevation = 0;
+    allyHuman.invulnTimer = 0;
+    shadowHuman.x = 13 * TILE;
+    shadowHuman.y = 18.5 * TILE;
+    shadowHuman.elevation = 0;
+    shadowHuman.invulnTimer = 0;
+
+    // 1. Remote human walks + aims + fires pistol at shadowHuman -> deals damage and produces beam event
+    host.setRemoteInput('ally02', {
+      moveX: 1,
+      moveY: 0,
+      aimX: shadowHuman.x,
+      aimY: shadowHuman.y,
+      mouseDown: true,
+      clickSeq: 1,
+      reloadSeq: 0,
+      swapSeq: 0,
+      pickupSeq: 0,
+    });
+    const startAllyX = allyHuman.x;
+    host.update(0.1, 1280, 720);
+    expect(allyHuman.x).toBeGreaterThan(startAllyX);
+    const firstGun = allyHuman.weapons[0];
+    if (firstGun.type !== 'gun') throw new Error('Expected gun');
+    expect(firstGun.ammoInMag).toBeLessThan(firstGun.def.magSize);
+
+    // 2. Remote human reloads from reserveAmmo (consumes reserveAmmo, NOT infinite)
+    host.setRemoteInput('ally02', {
+      moveX: 0,
+      moveY: 0,
+      aimX: shadowHuman.x,
+      aimY: shadowHuman.y,
+      mouseDown: false,
+      clickSeq: 1,
+      reloadSeq: 1,
+      swapSeq: 0,
+      pickupSeq: 0,
+    });
+    host.update(0.05, 1280, 720);
+    expect(allyHuman.weapons[0].type === 'gun' && allyHuman.weapons[0].reloadTimer).toBeGreaterThan(0);
+    for (let i = 0; i < 25; i++) host.update(0.05, 1280, 720);
+    expect(allyHuman.weapons[0].type === 'gun' && allyHuman.weapons[0].ammoInMag).toBe(
+      allyHuman.weapons[0].type === 'gun' ? allyHuman.weapons[0].def.magSize : 0
+    );
+
+    // 3. Remote human swaps hand (Q)
+    host.setRemoteInput('ally02', {
+      moveX: 0,
+      moveY: 0,
+      aimX: shadowHuman.x,
+      aimY: shadowHuman.y,
+      mouseDown: false,
+      clickSeq: 1,
+      reloadSeq: 1,
+      swapSeq: 1,
+      pickupSeq: 0,
+    });
+    host.update(0.05, 1280, 720);
+    expect(allyHuman.activeHand).toBe(1);
+
+    // 4. Snapshot exported from Host hydrates Client view accurately with relative ally detection
+    const snapshot = host.exportWorldSnapshot();
+    expect(snapshot.actors.some((a) => a.peerId === 'host01')).toBe(true);
+    expect(snapshot.actors.some((a) => a.peerId === 'ally02')).toBe(true);
+    expect(snapshot.actors.some((a) => a.peerId === 'shad03')).toBe(true);
+
+    let clientHud: HudSnapshot | null = null;
+    const client = new TwilightEngine(
+      'shadow',
+      shadowSkin,
+      'tokyo_shrine',
+      { royal: 0, shadow: 0, mercenary: 0 },
+      (snap) => {
+        clientHud = snap;
+      },
+      undefined,
+      undefined,
+      'standard',
+      { ...mpConfig, role: 'client', localPeerId: 'shad03' }
+    );
+    expect(client.enemies.length).toBe(0);
+
+    client.applyWorldSnapshot(snapshot);
+    client.update(0.05, 1280, 720);
+    expect(clientHud).not.toBeNull();
+    expect(client.player.faction).toBe('shadow');
+    const clientViewHost = client.enemies.find((e) => e.peerId === 'host01');
+    const clientViewAlly = client.enemies.find((e) => e.peerId === 'ally02');
+    expect(clientViewHost).toBeDefined();
+    expect(clientViewHost?.isAlly).toBe(false);
+    expect(clientViewAlly?.isAlly).toBe(false);
+
+    // Client on royal ('ally02') sees host01 as ally (isAlly === true) and shad03 as hostile
+    const allyClient = new TwilightEngine(
+      'royal',
+      allySkin,
+      'tokyo_shrine',
+      { royal: 0, shadow: 0, mercenary: 0 },
+      () => {},
+      undefined,
+      undefined,
+      'standard',
+      { ...mpConfig, role: 'client', localPeerId: 'ally02' }
+    );
+    allyClient.applyWorldSnapshot(snapshot);
+    expect(allyClient.enemies.find((e) => e.peerId === 'host01')?.isAlly).toBe(true);
+    expect(allyClient.enemies.find((e) => e.peerId === 'shad03')?.isAlly).toBe(false);
+
+    // 5. If Host loses match ('GAME_OVER') while Client ('shadow') survives, Client evaluates VICTORY
+    snapshot.status = 'GAME_OVER';
+    const hostActorInSnap = snapshot.actors.find((a) => a.peerId === 'host01')!;
+    hostActorInSnap.hp = 0;
+    hostActorInSnap.lives = 0;
+    client.applyWorldSnapshot(snapshot);
+    expect(client.status).toBe('VICTORY');
+    expect(hostHud).not.toBeNull();
+  });
+});
+
 

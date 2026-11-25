@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { FactionRoomView } from './components/FactionRoomView';
 import { GameCanvasView } from './components/GameCanvasView';
 import { MapEditorView } from './components/MapEditorView';
+import { ActiveMultiplayerSession, MultiplayerLobbyView } from './components/MultiplayerLobbyView';
 import { PortalView } from './components/PortalView';
 import {
   CustomMapData,
@@ -9,8 +10,10 @@ import {
   loadCustomMaps,
   upsertCustomMap,
 } from './game/customMaps';
+import { FACTION_CHARACTERS } from './game/data';
 import { CharacterSkin, FactionId, RunRecord } from './game/types';
 import type { AiDifficulty } from './game/tuning';
+import { normalizeRoomCode } from './net/protocol';
 
 const STORAGE_KEY = 'twilight_rpg_records_v2';
 const OLD_REP_STORAGE_KEY = 'twilight_rpg_reputation_v1';
@@ -51,19 +54,26 @@ function loadReputations(): Record<FactionId, number> {
 }
 
 export default function App() {
-  const [screen, setScreen] = useState<'lobby' | 'faction' | 'battle' | 'editor'>('lobby');
+  const [initialMpRoomCode] = useState<string>(() => {
+    if (typeof window === 'undefined') return '';
+    return normalizeRoomCode(new URLSearchParams(window.location.search).get('room') ?? '') ?? '';
+  });
+  const [screen, setScreen] = useState<'lobby' | 'faction' | 'battle' | 'editor' | 'mp_lobby'>(() =>
+    initialMpRoomCode ? 'mp_lobby' : 'lobby'
+  );
   const [selectedFaction, setSelectedFaction] = useState<FactionId>('royal');
   const [selectedCharacter, setSelectedCharacter] = useState<CharacterSkin | null>(null);
   const [selectedMapId, setSelectedMapId] = useState<string>('tokyo_shrine');
   const [aiDifficulty, setAiDifficulty] = useState<AiDifficulty>('standard');
   const [factionMapChoice, setFactionMapChoice] = useState<string>('random');
+  const [mpSession, setMpSession] = useState<ActiveMultiplayerSession | null>(null);
   const [records, setRecords] = useState<RunRecord[]>(() => loadRecords());
   const [reputations, setReputations] = useState<Record<FactionId, number>>(() => loadReputations());
   const [customMaps, setCustomMaps] = useState<CustomMapData[]>(() => loadCustomMaps());
 
   const activeCustomMap = useMemo(
-    () => customMaps.find((m) => m.id === selectedMapId),
-    [customMaps, selectedMapId]
+    () => (mpSession?.lobby.customMap ? mpSession.lobby.customMap : customMaps.find((m) => m.id === selectedMapId)),
+    [customMaps, mpSession, selectedMapId]
   );
 
   const handleReputationsChange = useCallback((nextReps: Record<FactionId, number>) => {
@@ -109,6 +119,35 @@ export default function App() {
     setCustomMaps((prev) => deleteCustomMap(prev, id));
   }, []);
 
+  const handleMpMatchStarted = useCallback((sess: ActiveMultiplayerSession) => {
+    const me = sess.lobby.players.find((pl) => pl.peerId === sess.localPeerId) ?? sess.lobby.players[0];
+    if (!me) return;
+    const skin =
+      FACTION_CHARACTERS[me.faction].find((s) => s.id === me.skinId) || FACTION_CHARACTERS[me.faction][0];
+    setSelectedFaction(me.faction);
+    setSelectedCharacter(skin);
+    setSelectedMapId(sess.lobby.mapId);
+    setAiDifficulty(sess.lobby.difficulty);
+    setMpSession(sess);
+    setScreen('battle');
+  }, []);
+
+  if (screen === 'mp_lobby') {
+    return (
+      <MultiplayerLobbyView
+        initialRoomCode={initialMpRoomCode}
+        customMaps={customMaps}
+        existingSession={mpSession}
+        onSessionUpdate={setMpSession}
+        onMatchStarted={handleMpMatchStarted}
+        onBackToPortal={() => {
+          setMpSession(null);
+          setScreen('lobby');
+        }}
+      />
+    );
+  }
+
   if (screen === 'editor') {
     return (
       <MapEditorView
@@ -135,9 +174,36 @@ export default function App() {
         aiDifficulty={aiDifficulty}
         initialReputations={reputations}
         onReputationsChange={handleReputationsChange}
-        onBackToFaction={() => setScreen('faction')}
-        onExitLobby={() => setScreen('lobby')}
+        onBackToFaction={() => {
+          mpSession?.transport.disconnect('Left room');
+          setMpSession(null);
+          setScreen('faction');
+        }}
+        onExitLobby={() => {
+          mpSession?.transport.disconnect('Left room');
+          setMpSession(null);
+          setScreen('lobby');
+        }}
         onSaveRecord={handleSaveRecord}
+        multiplayer={
+          mpSession
+            ? {
+                session: mpSession,
+                onReturnToMpLobby: (nextLobby) => {
+                  if (nextLobby) {
+                    setMpSession((prev) =>
+                      prev ? { ...prev, lobby: nextLobby, isHost: nextLobby.hostPeerId === prev.localPeerId } : null
+                    );
+                  }
+                  setScreen('mp_lobby');
+                },
+                onLeaveMultiplayer: () => {
+                  setMpSession(null);
+                  setScreen('mp_lobby');
+                },
+              }
+            : undefined
+        }
       />
     );
   }
@@ -153,6 +219,7 @@ export default function App() {
         reputations={reputations}
         onBackToLobby={() => setScreen('lobby')}
         onStartBattle={(fac, charSkin, mapId, mapChoice) => {
+          setMpSession(null);
           setSelectedFaction(fac);
           setSelectedCharacter(charSkin);
           setSelectedMapId(mapId);
@@ -169,12 +236,14 @@ export default function App() {
       reputations={reputations}
       customMapCount={customMaps.length}
       onSelectFaction={(fac, preselectedMapId) => {
+        setMpSession(null);
         setSelectedFaction(fac);
         setFactionMapChoice(preselectedMapId ?? 'random');
         if (preselectedMapId) setSelectedMapId(preselectedMapId);
         setScreen('faction');
       }}
       onOpenMapEditor={() => setScreen('editor')}
+      onOpenMultiplayer={() => setScreen('mp_lobby')}
       onClearRecords={handleClearRecords}
     />
   );

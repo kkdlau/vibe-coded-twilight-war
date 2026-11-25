@@ -6,11 +6,13 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { sfx } from '../audio/sfx';
-import { FACTIONS } from '../game/data';
+import { FACTIONS, FACTION_CHARACTERS } from '../game/data';
 import { CustomMapData } from '../game/customMaps';
 import { TwilightEngine } from '../game/engine';
 import type { AiDifficulty } from '../game/tuning';
-import { CharacterSkin, FactionId, HudSnapshot, RunRecord } from '../game/types';
+import { CharacterSkin, FactionId, HudSnapshot, MultiplayerEngineConfig, RunRecord } from '../game/types';
+import type { RoomLobbyState } from '../net/protocol';
+import type { ActiveMultiplayerSession } from './MultiplayerLobbyView';
 import { CharacterAvatarSvg, SkillIconSvg, WeaponIconSvg } from './WeaponArt';
 
 interface GameCanvasViewProps {
@@ -24,6 +26,11 @@ interface GameCanvasViewProps {
   onBackToFaction: () => void;
   onExitLobby: () => void;
   onSaveRecord: (record: RunRecord) => void;
+  multiplayer?: {
+    session: ActiveMultiplayerSession;
+    onReturnToMpLobby: (nextLobby?: RoomLobbyState) => void;
+    onLeaveMultiplayer: (reason?: string) => void;
+  };
 }
 
 const OUTCOME_TITLE_DELAY_MS = 2400;
@@ -77,23 +84,43 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
   onBackToFaction,
   onExitLobby,
   onSaveRecord,
+  multiplayer,
 }) => {
   const [muted, setMuted] = useState(sfx.muted);
   const [tabHeld, setTabHeld] = useState(false);
   const [hud, setHud] = useState<HudSnapshot | null>(null);
   const [runSeed, setRunSeed] = useState(1);
   const [outcomePhase, setOutcomePhase] = useState<'title' | 'panel' | null>(null);
+  const [mpRttMs, setMpRttMs] = useState<number | null>(null);
   const outcome = hud?.status === 'VICTORY' || hud?.status === 'GAME_OVER' ? hud.status : null;
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<TwilightEngine | null>(null);
   const recordSavedRef = useRef(false);
+  const matchEndedSentRef = useRef(false);
+  const seqsRef = useRef({ clickSeq: 0, reloadSeq: 0, swapSeq: 0, pickupSeq: 0 });
   const initRepsRef = useRef(initialReputations);
   initRepsRef.current = initialReputations;
   const repCallbackRef = useRef(onReputationsChange);
   repCallbackRef.current = onReputationsChange;
   const customMapRef = useRef(customMap);
   customMapRef.current = customMap;
+  const multiplayerRef = useRef(multiplayer);
+  multiplayerRef.current = multiplayer;
+
+  const mpRoomKey = multiplayer
+    ? `${multiplayer.session.lobby.roomCode}:${multiplayer.session.localPeerId}:${multiplayer.session.isHost ? 'h' : 'c'}`
+    : 'solo';
+
+  const sendClientInputNow = () => {
+    const mp = multiplayerRef.current;
+    const eng = engineRef.current;
+    if (!mp || mp.session.isHost || !eng) return;
+    mp.session.transport.send({
+      type: 'player_input',
+      input: eng.getLocalInputSnapshot(seqsRef.current),
+    });
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -104,6 +131,27 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
     canvas.focus();
     sfx.prepareGunshot();
     recordSavedRef.current = false;
+    matchEndedSentRef.current = false;
+    seqsRef.current = { clickSeq: 0, reloadSeq: 0, swapSeq: 0, pickupSeq: 0 };
+
+    const mp = multiplayerRef.current;
+    const mpConfig: MultiplayerEngineConfig | undefined = mp
+      ? {
+          role: mp.session.isHost ? 'host' : 'client',
+          localPeerId: mp.session.localPeerId,
+          hostPeerId: mp.session.lobby.hostPeerId,
+          peers: mp.session.lobby.players.map((pl) => ({
+            peerId: pl.peerId,
+            name: pl.name,
+            faction: pl.faction,
+            characterSkin:
+              FACTION_CHARACTERS[pl.faction].find((s) => s.id === pl.skinId) ||
+              FACTION_CHARACTERS[pl.faction][0],
+            isHost: pl.isHost,
+          })),
+        }
+      : undefined;
+
     const engine = new TwilightEngine(
       faction,
       characterSkin,
@@ -112,7 +160,8 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       (snap) => setHud(snap),
       (reps) => repCallbackRef.current(reps),
       customMapRef.current,
-      aiDifficulty
+      aiDifficulty,
+      mpConfig
     );
     engineRef.current = engine;
 
@@ -136,6 +185,12 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
         e.preventDefault();
       }
       engineRef.current?.setKey(norm, true);
+      if (mp && !mp.session.isHost && !e.repeat) {
+        if (norm === 'KeyR') seqsRef.current.reloadSeq += 1;
+        else if (norm === 'KeyQ') seqsRef.current.swapSeq += 1;
+        else if (norm === 'Space') seqsRef.current.pickupSeq += 1;
+        sendClientInputNow();
+      }
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
@@ -158,6 +213,58 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onBlur);
 
+    let offMpMsg: (() => void) | null = null;
+    let offMpClose: (() => void) | null = null;
+    let mpTickTimer: number | null = null;
+    let mpRttTimer: number | null = null;
+
+    if (mp) {
+      const { transport, isHost } = mp.session;
+      offMpMsg = transport.onMessage((msg) => {
+        if (msg.type === 'remote_input' && isHost) {
+          engine.setRemoteInput(msg.peerId, msg.input);
+        } else if (msg.type === 'peer_left' && isHost) {
+          engine.removeRemoteHuman(msg.peerId);
+        } else if (msg.type === 'world_snapshot' && !isHost) {
+          engine.applyWorldSnapshot(msg.snapshot);
+        } else if (msg.type === 'lobby_state' && msg.lobby.phase === 'lobby') {
+          multiplayerRef.current?.onReturnToMpLobby(msg.lobby);
+        } else if (msg.type === 'room_closed') {
+          multiplayerRef.current?.onLeaveMultiplayer(msg.reason);
+        }
+      });
+
+      offMpClose = transport.onClose((info) => {
+        multiplayerRef.current?.onLeaveMultiplayer(info.reason || '與房間的連線已中斷');
+      });
+
+      if (isHost) {
+        transport.send({ type: 'world_snapshot', snapshot: engine.exportWorldSnapshot() });
+        mpTickTimer = window.setInterval(() => {
+          if (engine.status === 'PLAYING' || engine.status === 'RESPAWNING' || engine.status === 'PAUSED') {
+            transport.send({ type: 'world_snapshot', snapshot: engine.exportWorldSnapshot() });
+          }
+        }, 50);
+      } else {
+        let lastSentJson = '';
+        let lastSentAt = 0;
+        mpTickTimer = window.setInterval(() => {
+          const inp = engine.getLocalInputSnapshot(seqsRef.current);
+          const json = JSON.stringify(inp);
+          const now = performance.now();
+          if (json !== lastSentJson || now - lastSentAt >= 400) {
+            lastSentJson = json;
+            lastSentAt = now;
+            transport.send({ type: 'player_input', input: inp });
+          }
+        }, 40);
+      }
+
+      mpRttTimer = window.setInterval(() => {
+        setMpRttMs(transport.getRttMs());
+      }, 1500);
+    }
+
     let rafId = 0;
     let lastTime = performance.now();
 
@@ -177,13 +284,17 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
 
     return () => {
       cancelAnimationFrame(rafId);
+      if (mpTickTimer !== null) window.clearInterval(mpTickTimer);
+      if (mpRttTimer !== null) window.clearInterval(mpRttTimer);
+      offMpMsg?.();
+      offMpClose?.();
       engine.clearInputs();
       window.removeEventListener('resize', resize);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
     };
-  }, [faction, characterSkin, mapId, aiDifficulty, runSeed]);
+  }, [faction, characterSkin, mapId, aiDifficulty, runSeed, mpRoomKey]);
 
   useEffect(() => {
     setOutcomePhase(null);
@@ -202,20 +313,29 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
 
   useEffect(() => {
     if (!hud) return;
-    if ((hud.status === 'GAME_OVER' || hud.status === 'VICTORY') && !recordSavedRef.current) {
-      recordSavedRef.current = true;
-      onSaveRecord({
-        id: `${Date.now()}`,
-        mode: hud.mode,
-        mapName: hud.mapName,
-        faction: hud.player.faction,
-        characterName: hud.player.characterSkin.name,
-        score: hud.player.score,
-        totalDamage: hud.player.totalDamage,
-        kills: hud.player.kills,
-        victory: hud.status === 'VICTORY',
-        timestamp: Date.now(),
-      });
+    if (hud.status === 'GAME_OVER' || hud.status === 'VICTORY') {
+      const mp = multiplayerRef.current;
+      const eng = engineRef.current;
+      if (mp?.session.isHost && eng && !matchEndedSentRef.current) {
+        matchEndedSentRef.current = true;
+        mp.session.transport.send({ type: 'world_snapshot', snapshot: eng.exportWorldSnapshot() });
+        mp.session.transport.send({ type: 'match_ended' });
+      }
+      if (!recordSavedRef.current) {
+        recordSavedRef.current = true;
+        onSaveRecord({
+          id: `${Date.now()}`,
+          mode: hud.mode,
+          mapName: hud.mapName,
+          faction: hud.player.faction,
+          characterName: hud.player.characterSkin.name,
+          score: hud.player.score,
+          totalDamage: hud.player.totalDamage,
+          kills: hud.player.kills,
+          victory: hud.status === 'VICTORY',
+          timestamp: Date.now(),
+        });
+      }
     }
   }, [hud, onSaveRecord]);
 
@@ -249,10 +369,19 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
           if (e.button === 0) {
             sfx.unlock();
             engineRef.current?.setMouseDown(true);
+            if (multiplayer && !multiplayer.session.isHost) {
+              seqsRef.current.clickSeq += 1;
+              sendClientInputNow();
+            }
           }
         }}
         onMouseUp={(e) => {
-          if (e.button === 0) engineRef.current?.setMouseDown(false);
+          if (e.button === 0) {
+            engineRef.current?.setMouseDown(false);
+            if (multiplayer && !multiplayer.session.isHost) {
+              sendClientInputNow();
+            }
+          }
         }}
         onContextMenu={(e) => e.preventDefault()}
       />
@@ -375,8 +504,18 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       {hud && p && (
         <div className="pointer-events-none fixed bottom-3 left-3 flex flex-col items-start gap-2">
           <div className="text-[11px] text-slate-200 bg-slate-950/78 px-3 py-1.5 rounded-lg border border-slate-800/90">
-            [Q] 切換 · [Esc] 放下武器 · [R] 裝彈 · [Space] 拾取 · [Tab] 遊戲進展 · [P] 暫停
+            [Q] 切換 · [Esc] 放下武器 · [R] 裝彈 · [Space] 拾取 · [Tab] 遊戲進展
+            {(!multiplayer || multiplayer.session.isHost) && ' · [P] 暫停'}
           </div>
+        </div>
+      )}
+
+      {/* BOTTOM-RIGHT: Multiplayer Room & Latency Indicator */}
+      {multiplayer && (
+        <div className="pointer-events-none fixed bottom-3 right-3 bg-slate-950/80 border border-slate-700/80 rounded-lg px-3 py-1.5 text-[11px] font-mono-num text-sky-300 shadow-lg">
+          房號 {multiplayer.session.lobby.roomCode} · {multiplayer.session.lobby.players.length} 人 ·{' '}
+          {multiplayer.session.isHost ? '房主' : '連線玩家'}
+          {mpRttMs !== null ? ` · ${mpRttMs}ms` : ''}
         </div>
       )}
 
@@ -517,24 +656,48 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
                 {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                 <span>{muted ? '開啟戰鬥音效' : '靜音戰鬥音效'}</span>
               </button>
-              <button
-                onClick={() => setRunSeed((s) => s + 1)}
-                className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm rounded-lg cursor-pointer"
-              >
-                重新開局
-              </button>
-              <button
-                onClick={onBackToFaction}
-                className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-sky-300 font-semibold text-sm rounded-lg cursor-pointer"
-              >
-                返回陣營界面（更換角色／地圖）
-              </button>
-              <button
-                onClick={onExitLobby}
-                className="w-full py-2.5 border border-slate-700 hover:bg-slate-800 text-slate-300 text-sm rounded-lg cursor-pointer"
-              >
-                返回遊戲大廳
-              </button>
+              {multiplayer ? (
+                <>
+                  {multiplayer.session.isHost && (
+                    <button
+                      onClick={() => multiplayer.session.transport.send({ type: 'return_to_lobby' })}
+                      className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-sky-300 font-semibold text-sm rounded-lg cursor-pointer"
+                    >
+                      結束本局並返回房間
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      multiplayer.session.transport.disconnect('Left room');
+                      multiplayer.onLeaveMultiplayer();
+                    }}
+                    className="w-full py-2.5 border border-rose-500/50 hover:bg-rose-950/60 text-rose-200 text-sm rounded-lg cursor-pointer"
+                  >
+                    離開多人房間
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => setRunSeed((s) => s + 1)}
+                    className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm rounded-lg cursor-pointer"
+                  >
+                    重新開局
+                  </button>
+                  <button
+                    onClick={onBackToFaction}
+                    className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-sky-300 font-semibold text-sm rounded-lg cursor-pointer"
+                  >
+                    返回陣營界面（更換角色／地圖）
+                  </button>
+                  <button
+                    onClick={onExitLobby}
+                    className="w-full py-2.5 border border-slate-700 hover:bg-slate-800 text-slate-300 text-sm rounded-lg cursor-pointer"
+                  >
+                    返回遊戲大廳
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -586,29 +749,56 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
                 </div>
               </div>
 
-              <div className="flex flex-col gap-2.5">
-                <div className="flex gap-3">
+              {multiplayer ? (
+                <div className="flex flex-col gap-2.5">
+                  {multiplayer.session.isHost ? (
+                    <button
+                      onClick={() => multiplayer.session.transport.send({ type: 'return_to_lobby' })}
+                      className="w-full flex items-center justify-center gap-2 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm rounded-lg cursor-pointer"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      返回多人房間（再戰一局）
+                    </button>
+                  ) : (
+                    <div className="w-full py-2.5 px-3 bg-slate-900 border border-slate-700 text-sky-200 text-xs font-semibold text-center rounded-lg">
+                      等待房主決定返回房間再開下一局...（戰局結束 60 秒無動作將自動清理房間）
+                    </div>
+                  )}
                   <button
-                    onClick={() => setRunSeed((s) => s + 1)}
-                    className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm rounded-lg cursor-pointer"
+                    onClick={() => {
+                      multiplayer.session.transport.disconnect('Left room');
+                      multiplayer.onLeaveMultiplayer();
+                    }}
+                    className="w-full py-2.5 border border-rose-500/50 hover:bg-rose-950/60 text-rose-200 text-sm font-medium rounded-lg cursor-pointer"
                   >
-                    <RotateCcw className="w-4 h-4" />
-                    再戰一局
-                  </button>
-                  <button
-                    onClick={onBackToFaction}
-                    className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-sky-300 text-sm font-medium rounded-lg cursor-pointer"
-                  >
-                    陣營界面
+                    離開房間
                   </button>
                 </div>
-                <button
-                  onClick={onExitLobby}
-                  className="w-full py-2.5 border border-slate-700 hover:bg-slate-800 text-slate-200 text-sm font-medium rounded-lg cursor-pointer"
-                >
-                  返回大廳
-                </button>
-              </div>
+              ) : (
+                <div className="flex flex-col gap-2.5">
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => setRunSeed((s) => s + 1)}
+                      className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm rounded-lg cursor-pointer"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      再戰一局
+                    </button>
+                    <button
+                      onClick={onBackToFaction}
+                      className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-sky-300 text-sm font-medium rounded-lg cursor-pointer"
+                    >
+                      陣營界面
+                    </button>
+                  </div>
+                  <button
+                    onClick={onExitLobby}
+                    className="w-full py-2.5 border border-slate-700 hover:bg-slate-800 text-slate-200 text-sm font-medium rounded-lg cursor-pointer"
+                  >
+                    返回大廳
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

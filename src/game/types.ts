@@ -314,6 +314,8 @@ export type EnemyArchetype = 'trooper' | 'rusher' | 'sniper' | 'phantom' | 'heav
 
 export interface EnemyEntity {
   id: string;
+  isHumanPlayer?: boolean;
+  peerId?: string;
   name: string;
   archetype: EnemyArchetype;
   faction: FactionId;
@@ -365,6 +367,7 @@ export interface EnemyEntity {
   blindTimer: number;
   freezeTimer: number;
   stunTimer: number;
+  invulnTimer?: number;
   hitFlash: number;
   gunfireTimer: number;
   crosshairBloom: number;
@@ -564,4 +567,19 @@ export interface RunRecord {
   kills: number;
   victory: boolean;
   timestamp: number;
+}
+
+export interface MultiplayerPeerDescriptor {
+  peerId: string;
+  name: string;
+  faction: FactionId;
+  characterSkin: CharacterSkin;
+  isHost: boolean;
+}
+
+export interface MultiplayerEngineConfig {
+  role: 'host' | 'client';
+  localPeerId: string;
+  hostPeerId: string;
+  peers: MultiplayerPeerDescriptor[];
 }

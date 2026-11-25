@@ -52,6 +52,13 @@ import {
   getGunSpread,
 } from './tuning';
 import { CustomMapData, buildArenaMapFromCustom } from './customMaps';
+import type {
+  NetActorSnapshot,
+  NetEquippedSlot,
+  NetTransientEvent,
+  NetWorldSnapshot,
+  RemotePlayerInput,
+} from '../net/protocol';
 import {
   ActorSkillVisuals,
   BeamTracer,
@@ -66,6 +73,8 @@ import {
   GunDef,
   HudSnapshot,
   MeleeKind,
+  MultiplayerEngineConfig,
+  MultiplayerPeerDescriptor,
   Particle,
   PickupItem,
   PlayerState,
@@ -81,6 +90,60 @@ export { snapToEightDirections };
 const DEFAULT_PISTOL = GUNS.find((gun) => gun.kind === 'pistol') || GUNS[0];
 const DEFAULT_KNIFE = MELEES.find((melee) => melee.kind === 'knife') || MELEES[0];
 const AI_FIXED_REPUTATION = 100;
+const ALL_SKINS_BY_ID = new Map<string, CharacterSkin>(
+  (['royal', 'shadow', 'mercenary'] as FactionId[])
+    .flatMap((fac) => FACTION_CHARACTERS[fac])
+    .map((skin) => [skin.id, skin])
+);
+const ALL_GUNS_BY_ID = new Map(GUNS.map((g) => [g.id, g]));
+const ALL_MELEES_BY_ID = new Map(MELEES.map((m) => [m.id, m]));
+
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
+interface RemoteHumanRuntime {
+  peerId: string;
+  entityId: string;
+  name: string;
+  faction: FactionId;
+  characterSkin: CharacterSkin;
+  lives: number;
+  maxLives: number;
+  reserveAmmo: number;
+  maxReserveAmmo: number;
+  score: number;
+  totalDamage: number;
+  kills: number;
+  comboCount: number;
+  maxCombo: number;
+  comboTimer: number;
+  respawnTimer: number;
+  rifleRecoilAngle: number;
+  chargeSessionAllowed: boolean;
+  meleeHeldSeconds: number;
+  lastAttackAt: number;
+  delayCancelReady: boolean;
+  comboEmpowerTimer: number;
+  delayCancelBonus: number;
+  prevAimX: number;
+  prevAimY: number;
+  wasMouseDown: boolean;
+  lastClickSeq: number;
+  lastReloadSeq: number;
+  lastSwapSeq: number;
+  lastPickupSeq: number;
+  input: RemotePlayerInput;
+}
+
+interface ClientLerpTarget {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  angle: number;
+  elev: number;
+}
 
 function equipGun(def: GunDef, ammoInMag = def.magSize): Extract<EquippedWeapon, { type: 'gun' }> {
   return {
@@ -204,6 +267,11 @@ export class TwilightEngine {
   }[] = [];
   private onHudUpdate: (snap: HudSnapshot) => void;
   private onReputationChange?: (reps: Record<FactionId, number>) => void;
+  private readonly multiplayer?: MultiplayerEngineConfig;
+  private remoteHumans = new Map<string, RemoteHumanRuntime>();
+  private netEvents: NetTransientEvent[] = [];
+  private snapshotSeq = 0;
+  private clientLerpTargets = new Map<string, ClientLerpTarget>();
 
   constructor(
     faction: FactionId,
@@ -213,11 +281,13 @@ export class TwilightEngine {
     onHudUpdate: (snap: HudSnapshot) => void,
     onReputationChange?: (reps: Record<FactionId, number>) => void,
     customMap?: CustomMapData,
-    private readonly difficulty: AiDifficulty = 'standard'
+    private readonly difficulty: AiDifficulty = 'standard',
+    multiplayer?: MultiplayerEngineConfig
   ) {
     this.mapId = mapId;
     this.onHudUpdate = onHudUpdate;
     this.onReputationChange = onReputationChange;
+    this.multiplayer = multiplayer;
 
     this.map = customMap ? buildArenaMapFromCustom(customMap) : createArenaMap(mapId);
     const fac = FACTIONS[faction];
@@ -294,19 +364,30 @@ export class TwilightEngine {
     this.camera.x = initCam.x;
     this.camera.y = initCam.y;
 
-    // 三大陣營各自擁有 10 名士兵總兵力（合計 30 人），同陣營場上最多 2 人
+    // 三大陣營各自擁有 10 名士兵總兵力（合計 30 人），同陣營場上最多 2 人（真人可自由組隊不受 2 人AI上限限制）
     this.deploymentQueue = {
       royal: 10,
       shadow: 10,
       mercenary: 10,
     };
-    this.deploymentQueue[faction] = 9; // 玩家已佔用己方陣營第 1 席
+    if (multiplayer) {
+      for (const peer of multiplayer.peers) {
+        this.deploymentQueue[peer.faction] = Math.max(0, this.deploymentQueue[peer.faction] - 1);
+      }
+      if (multiplayer.role === 'host') {
+        this.initRemoteHumans(multiplayer);
+      }
+    } else {
+      this.deploymentQueue[faction] = 9; // 玩家已佔用己方陣營第 1 席
+    }
 
     this.buildNavigationGraph();
     this.spawnMapWeapons();
     this.spawnMapAmmoPickups();
     this.spawnMapShieldPickups();
-    this.refillFieldUpToCap();
+    if (multiplayer?.role !== 'client') {
+      this.refillFieldUpToCap();
+    }
 
     const winObjective =
       faction === 'mercenary'
@@ -541,7 +622,10 @@ export class TwilightEngine {
   private refillFieldUpToCap() {
     const factions: FactionId[] = ['royal', 'shadow', 'mercenary'];
     for (const fac of factions) {
-      const reservedSlot = this.status === 'RESPAWNING' && this.player.faction === fac ? 1 : 0;
+      let reservedSlot = this.status === 'RESPAWNING' && this.player.faction === fac ? 1 : 0;
+      for (const rt of this.remoteHumans.values()) {
+        if (rt.faction === fac && rt.respawnTimer > 0) reservedSlot += 1;
+      }
       while (this.deploymentQueue[fac] > 0 && this.getActiveFactionCount(fac) + reservedSlot < 2) {
         this.deploymentQueue[fac] -= 1;
         const sp = this.pickBestDispersedSpawn(fac);
@@ -554,7 +638,50 @@ export class TwilightEngine {
 
   private checkVictoryCondition() {
     if (this.status !== 'PLAYING') return;
+    if (this.multiplayer?.role === 'client') return;
     const p = this.player;
+
+    if (this.multiplayer?.role === 'host') {
+      const units: { id: string; faction: FactionId }[] = [];
+      if (p.hp > 0 || p.lives > 0) {
+        units.push({ id: 'player', faction: p.faction });
+      }
+      for (const e of this.enemies) {
+        if (e.hp > 0) units.push({ id: e.id, faction: e.faction });
+      }
+      for (const rt of this.remoteHumans.values()) {
+        if (rt.respawnTimer > 0 && !units.some((u) => u.id === rt.entityId)) {
+          units.push({ id: rt.entityId, faction: rt.faction });
+        }
+      }
+      for (const fac of ['royal', 'shadow', 'mercenary'] as FactionId[]) {
+        for (let k = 0; k < this.deploymentQueue[fac]; k++) {
+          units.push({ id: `queued_${fac}_${k}`, faction: fac });
+        }
+      }
+
+      let anyHostilePair = false;
+      for (let i = 0; i < units.length && !anyHostilePair; i++) {
+        for (let j = i + 1; j < units.length; j++) {
+          if (areHostile(units[i].faction, units[i].id, units[j].faction, units[j].id)) {
+            anyHostilePair = true;
+            break;
+          }
+        }
+      }
+      if (anyHostilePair) return;
+
+      const hostSideSurvived =
+        p.hp > 0 ||
+        (p.faction !== 'mercenary' &&
+          units.some((u) => u.faction === p.faction));
+      this.status = hostSideSurvived ? 'VICTORY' : 'GAME_OVER';
+      if (this.status === 'VICTORY') sfx.levelUp();
+      this.clearInputs();
+      this.emitHud();
+      return;
+    }
+
     if (p.faction === 'mercenary') {
       const queuedLeft =
         this.deploymentQueue.royal + this.deploymentQueue.shadow + this.deploymentQueue.mercenary;
@@ -1253,6 +1380,14 @@ export class TwilightEngine {
     this.mouseScreen.x = x;
     this.mouseScreen.y = y;
 
+    if (this.multiplayer?.role === 'client') {
+      if (this.status === 'PLAYING') {
+        const ptr = this.getWorldPointer();
+        this.player.angle = Math.atan2(ptr.y - this.player.y, ptr.x - this.player.x);
+      }
+      return;
+    }
+
     const weapon = this.player.weapons[this.player.activeHand];
     if (this.status === 'PLAYING' && weapon.type === 'gun') {
       const gun = weapon.def;
@@ -1279,6 +1414,10 @@ export class TwilightEngine {
   }
 
   public setMouseDown(down: boolean) {
+    if (this.multiplayer?.role === 'client') {
+      this.mouseDown = this.status === 'PLAYING' ? down : false;
+      return;
+    }
     if (this.status !== 'PLAYING') {
       this.mouseDown = false;
       return;
@@ -1314,6 +1453,7 @@ export class TwilightEngine {
   }
 
   private handleKeyDownOnce(code: string) {
+    if (this.multiplayer?.role === 'client') return;
     if (code === 'KeyP') {
       if (this.status === 'PLAYING') {
         this.status = 'PAUSED';
@@ -1628,7 +1768,7 @@ export class TwilightEngine {
         const beamStartX = reachedMuzzle && endDist > muzzleDist ? muzzleX : p.x;
         const beamStartY = reachedMuzzle && endDist > muzzleDist ? muzzleY : p.y;
 
-        this.beams.push({
+        this.pushBeam({
           x1: beamStartX,
           y1: beamStartY,
           x2: segEndX,
@@ -1649,6 +1789,7 @@ export class TwilightEngine {
 
       this.camera.shake = Math.min(8, this.camera.shake + (gun.kind === 'shotgun' || gun.kind === 'sniper' ? 4.5 : 1.4));
       sfx.gunshot(gun.kind);
+      this.emitNetSfx('gun', p.x, p.y, gun.kind);
       const fxMuzzleX = p.x + Math.cos(p.angle) * muzzleDist;
       const fxMuzzleY = p.y + Math.sin(p.angle) * muzzleDist;
       if (!this.findEarliestWallHit(p.x, p.y, fxMuzzleX, fxMuzzleY)) {
@@ -1676,6 +1817,7 @@ export class TwilightEngine {
       p.attackAnimKind = melee.kind;
       if (p.comboEmpowerTimer > 0) p.comboEmpowerTimer = 0;
       sfx.ultimate();
+      this.emitNetSfx('skill', p.x, p.y);
       this.camera.shake = 8;
       this.executePlayerFactionMeleeSkill(weapon, comboMult);
       return;
@@ -1694,11 +1836,12 @@ export class TwilightEngine {
     } else {
       sfx.slash(melee.kind === 'greatsword');
     }
+    this.emitNetSfx('melee', p.x, p.y, melee.kind);
     const giantMult = p.giantTimer > 0 ? 1.3 : 1.0;
     const dmg = Math.round(melee.damage * comboMult * giantMult);
     if (melee.kind !== 'shield') {
       const style = melee.kind === 'knife' ? 'thrust' : melee.kind === 'claw' ? 'claw' : 'sweep';
-      this.slashes.push({
+      this.pushSlash({
         x: p.x,
         y: p.y,
         angle: p.angle,
@@ -1737,7 +1880,7 @@ export class TwilightEngine {
     if (mk === 'shield') {
       weapon.durability = p.maxShield;
       this.spawnText(p.x, p.y - 44, `${skillName}! (盾牌滿 100)`, '#38BDF8', 1.3);
-      this.slashes.push({
+      this.pushSlash({
         x: p.x,
         y: p.y,
         angle: p.angle,
@@ -1802,7 +1945,7 @@ export class TwilightEngine {
           p.elevation = this.getWalkableElevation(p.x, p.y);
           p.invulnTimer = Math.max(p.invulnTimer, 0.35);
         }
-        this.slashes.push({
+        this.pushSlash({
           x: p.x,
           y: p.y,
           angle: 0,
@@ -1864,7 +2007,7 @@ export class TwilightEngine {
         p.shadowCloneTimer = 6.5;
       } else {
         const dir = snapToEightDirections(p.angle);
-        this.slashes.push({
+        this.pushSlash({
           x: p.x,
           y: p.y,
           angle: dir.angle,
@@ -2029,6 +2172,22 @@ export class TwilightEngine {
     this.skillTraces.push({
       kind, fromX: from.x, fromY: from.y, destination: to, startedAt: this.time, duration,
     });
+    if (this.multiplayer?.role === 'host') {
+      this.netEvents.push({
+        k: 'trace',
+        kind,
+        fx: round1(from.x),
+        fy: round1(from.y),
+        tx: round1(to.x),
+        ty: round1(to.y),
+        dur: duration,
+      });
+    }
+  }
+
+  private getRemoteHumanByEntityId(entityId?: string): RemoteHumanRuntime | undefined {
+    if (!entityId || !entityId.startsWith('human_')) return undefined;
+    return this.remoteHumans.get(entityId.slice(6));
   }
 
   private applyVampireHealing(attacker: PlayerState | EnemyEntity, victim: { x: number; y: number }, damage: number, melee: boolean) {
@@ -2050,6 +2209,7 @@ export class TwilightEngine {
     hitOriginX?: number,
     hitOriginY?: number
   ) {
+    if ((enemy.invulnTimer ?? 0) > 0) return;
     const p = this.player;
     const isPlayerAttacker = attackerId === 'player';
     const isHostile = areHostile(attackerFaction, attackerId, enemy.faction, enemy.id);
@@ -2066,7 +2226,7 @@ export class TwilightEngine {
           this.onReputationChange?.({ ...p.reputations });
           this.spawnText(enemy.x, enemy.y - 32, '誤傷擊殺友軍! -1 聲望', '#F87171', 1.15);
         }
-        this.removeEnemy(enemy, false);
+        this.removeEnemy(enemy, false, attackerId);
       } else {
         this.spawnText(enemy.x, enemy.y - 24, `誤傷友軍 -${ffDmg}`, '#FCA5A5', 0.86, true);
       }
@@ -2185,9 +2345,20 @@ export class TwilightEngine {
         this.applyVampireHealing(p, enemy, finalDmg, isMelee);
       }
 
-      if (finalDmg > 0) sfx.hit(bullseye);
-    } else if (attackerEntity && attackerEntity.vampireTimer > 0 && finalDmg > 0) {
-      this.applyVampireHealing(attackerEntity, enemy, finalDmg, isMelee);
+      if (finalDmg > 0) {
+        sfx.hit(bullseye);
+        this.emitNetSfx('hit', enemy.x, enemy.y, undefined, bullseye);
+      }
+    } else {
+      const attackingHumanRuntime = this.getRemoteHumanByEntityId(attackerId);
+      if (attackingHumanRuntime && finalDmg > 0) {
+        attackingHumanRuntime.totalDamage += finalDmg;
+        attackingHumanRuntime.score += finalDmg;
+        this.emitNetSfx('hit', enemy.x, enemy.y, undefined, bullseye);
+      }
+      if (attackerEntity && attackerEntity.vampireTimer > 0 && finalDmg > 0) {
+        this.applyVampireHealing(attackerEntity, enemy, finalDmg, isMelee);
+      }
     }
 
     this.spawnBurst(enemy.x, enemy.y, finalDmg === 0 ? '#FFFFFF' : bullseye ? '#FBBF24' : '#F87171', bullseye ? 7 : 5);
@@ -2203,16 +2374,17 @@ export class TwilightEngine {
     }
 
     if (enemy.hp <= 0) {
-      this.removeEnemy(enemy, isPlayerAttacker);
+      this.removeEnemy(enemy, isPlayerAttacker, attackerId);
     }
   }
 
-  private removeEnemy(enemy: EnemyEntity, killedByPlayer: boolean) {
+  private removeEnemy(enemy: EnemyEntity, killedByPlayer: boolean, attackerId?: string) {
     const idx = this.enemies.indexOf(enemy);
     if (idx === -1) return;
     this.enemies.splice(idx, 1);
     this.spawnBurst(enemy.x, enemy.y, enemy.color, 14);
     sfx.soldierDown(this.nearbySoundVolume(enemy.x, enemy.y) * 0.75);
+    this.emitNetSfx('down', enemy.x, enemy.y);
 
     if (killedByPlayer) {
       const p = this.player;
@@ -2241,6 +2413,29 @@ export class TwilightEngine {
 
       p.score += 120 + p.comboCount * 15;
       this.factionScores[p.faction] += 25;
+    } else {
+      const killerRt = this.getRemoteHumanByEntityId(attackerId);
+      if (killerRt) {
+        killerRt.kills += 1;
+        killerRt.comboCount += 1;
+        killerRt.comboTimer = 4.0;
+        killerRt.maxCombo = Math.max(killerRt.maxCombo, killerRt.comboCount);
+        killerRt.score += 120 + killerRt.comboCount * 15;
+        this.factionScores[killerRt.faction] += 25;
+      }
+    }
+
+    if (enemy.isHumanPlayer && enemy.peerId) {
+      const victimRt = this.remoteHumans.get(enemy.peerId);
+      if (victimRt) {
+        victimRt.lives = Math.max(0, victimRt.lives - 1);
+        if (victimRt.lives > 0) {
+          victimRt.respawnTimer = RESPAWN_DELAY_SECONDS;
+          this.spawnText(enemy.x, enemy.y - 36, `${victimRt.name} 重傷撤離 (剩 ${victimRt.lives} 命)`, '#FBBF24', 1.0);
+        } else {
+          this.spawnText(enemy.x, enemy.y - 36, `${victimRt.name} 已陣亡淘汰`, '#F87171', 1.05);
+        }
+      }
     }
 
     // 場上武器數量固定：只有非預設武器（非小槍／非小刀）會在持有者陣亡時掉回地面，防彈盾保留剩餘耐久
@@ -2349,6 +2544,16 @@ export class TwilightEngine {
       this.status = 'RESPAWNING';
       this.respawnTimer = RESPAWN_DELAY_SECONDS;
       this.spawnBurst(p.x, p.y, FACTIONS[p.faction].accentHex, 16);
+    } else if (this.multiplayer?.role === 'host') {
+      const anyRemoteHumanActive = [...this.remoteHumans.values()].some(
+        (rt) => rt.lives > 0 || this.enemies.some((e) => e.id === rt.entityId && e.hp > 0)
+      );
+      if (anyRemoteHumanActive) {
+        this.spawnBurst(p.x, p.y, FACTIONS[p.faction].accentHex, 16);
+        this.checkVictoryCondition();
+      } else {
+        this.status = 'GAME_OVER';
+      }
     } else {
       this.status = 'GAME_OVER';
     }
@@ -2618,7 +2823,62 @@ export class TwilightEngine {
     }
   }
 
+  private emitNetSfx(
+    kind: Extract<NetTransientEvent, { k: 'sfx' }>['kind'],
+    x: number,
+    y: number,
+    sub?: string,
+    flag?: boolean
+  ) {
+    if (this.multiplayer?.role !== 'host') return;
+    this.netEvents.push({
+      k: 'sfx',
+      kind,
+      x: round1(x),
+      y: round1(y),
+      ...(sub !== undefined ? { sub } : {}),
+      ...(flag !== undefined ? { flag } : {}),
+    });
+  }
+
+  private pushBeam(beam: BeamTracer) {
+    this.beams.push(beam);
+    if (this.multiplayer?.role === 'host') {
+      this.netEvents.push({
+        k: 'beam',
+        x1: round1(beam.x1),
+        y1: round1(beam.y1),
+        x2: round1(beam.x2),
+        y2: round1(beam.y2),
+        color: beam.color,
+        life: beam.life,
+        w: beam.width,
+      });
+    }
+  }
+
+  private pushSlash(slash: SlashEffect) {
+    this.slashes.push(slash);
+    if (this.multiplayer?.role === 'host') {
+      this.netEvents.push({
+        k: 'slash',
+        x: round1(slash.x),
+        y: round1(slash.y),
+        angle: Number(slash.angle.toFixed(3)),
+        arc: Number(slash.arc.toFixed(3)),
+        reach: round1(slash.reach),
+        color: slash.color,
+        life: slash.life,
+        ult: slash.isUltimate,
+        style: slash.style,
+      });
+    }
+  }
+
   private spawnBurst(x: number, y: number, color: string, count: number) {
+    if (this.multiplayer?.role === 'host') {
+      this.netEvents.push({ k: 'burst', x: round1(x), y: round1(y), color, count });
+    }
     for (let i = 0; i < count; i++) {
       const a = Math.random() * Math.PI * 2;
       const spd = 60 + Math.random() * 200;
@@ -2636,6 +2896,17 @@ export class TwilightEngine {
   }
 
   private spawnText(x: number, y: number, text: string, color: string, scale = 1, subtle = false) {
+    if (this.multiplayer?.role === 'host') {
+      this.netEvents.push({
+        k: 'text',
+        x: round1(x),
+        y: round1(y),
+        text,
+        color,
+        scale,
+        ...(subtle ? { subtle: true } : {}),
+      });
+    }
     this.floatingTexts.push({
       x,
       y,
@@ -2892,6 +3163,10 @@ export class TwilightEngine {
   public update(dt: number, canvasWidth: number, canvasHeight: number) {
     this.viewport.width = canvasWidth;
     this.viewport.height = canvasHeight;
+    if (this.multiplayer?.role === 'client') {
+      this.updateClientView(dt, canvasWidth, canvasHeight);
+      return;
+    }
     if (!this.isBattleActive()) return;
 
     const respawningAtFrameStart = this.status === 'RESPAWNING';
@@ -2904,7 +3179,10 @@ export class TwilightEngine {
     if (this.activeSkillBannerTimer > 0) this.activeSkillBannerTimer = Math.max(0, this.activeSkillBannerTimer - dt);
     if (this.camera.shake > 0) this.camera.shake = Math.max(0, this.camera.shake - dt * 26);
 
-    if (!respawningAtFrameStart) this.updatePlayer(dt);
+    if (!respawningAtFrameStart && this.player.hp > 0) this.updatePlayer(dt);
+    if (this.multiplayer?.role === 'host') {
+      this.tickRemoteHumanRespawns(dt);
+    }
 
     this.map.ammoSpawns.forEach((as, idx) => {
       if (!as.active) {
@@ -3431,7 +3709,7 @@ export class TwilightEngine {
   private deflectShieldShot(target: PlayerState | EnemyEntity, x: number, y: number, incoming: number) {
     const normal = this.markShieldImpact(target, x, y);
     const outgoing = 2 * normal - incoming + Math.PI;
-    this.beams.push({
+    this.pushBeam({
       x1: x,
       y1: y,
       x2: x + Math.cos(outgoing) * 34,
@@ -3453,6 +3731,7 @@ export class TwilightEngine {
     const gunDef = gunWeapon.def;
     e.gunfireTimer = GUNFIRE_ANIMATION_SECONDS;
     sfx.gunshot(gunDef.kind, this.nearbySoundVolume(e.x, e.y) * 0.45);
+    this.emitNetSfx('gun', e.x, e.y, gunDef.kind);
     if (e.royalShieldTimer > 0) {
       e.royalShieldTimer = 0; // 自己用遠程攻擊也會破盾！
       this.spawnText(e.x, e.y - 26, '遠程開火破盾', '#38BDF8', 0.9);
@@ -3462,7 +3741,9 @@ export class TwilightEngine {
     const pellets = gunDef.kind === 'shotgun' ? gunDef.pellets : 1;
     const difficultySpreadMult =
       AI_DIFFICULTY[this.difficulty].aimSpreadMultiplier / AI_DIFFICULTY.standard.aimSpreadMultiplier;
-    const focus = (e.eagleEyeTimer > 0 ? 0.45 : 1) * AI_GUN_AIM.spreadMult * difficultySpreadMult;
+    const focus = e.isHumanPlayer
+      ? (e.eagleEyeTimer > 0 ? RIFLE_RECOIL.eagleEyeMultiplier : 1)
+      : (e.eagleEyeTimer > 0 ? 0.45 : 1) * AI_GUN_AIM.spreadMult * difficultySpreadMult;
     const clampedBloom = clamp(e.crosshairBloom, 0, gunDef.maxCrosshair - gunDef.baseCrosshair);
     const spreadRad = getGunSpread(gunDef.kind, gunDef.baseCrosshair + clampedBloom, targetDist, focus);
     const maxRange = Math.hypot(this.map.width, this.map.height) + TILE * 2;
@@ -3546,7 +3827,7 @@ export class TwilightEngine {
       const beamStartX = reachedMuzzle && endDist > muzzleDist ? muzzleX : e.x;
       const beamStartY = reachedMuzzle && endDist > muzzleDist ? muzzleY : e.y;
 
-      this.beams.push({
+      this.pushBeam({
         x1: beamStartX,
         y1: beamStartY,
         x2: segEndX,
@@ -3580,7 +3861,7 @@ export class TwilightEngine {
     if (mk === 'shield') {
       meleeWeapon.durability = 100;
       this.spawnBurst(e.x, e.y, '#38BDF8', 16);
-      this.slashes.push({
+      this.pushSlash({
         x: e.x,
         y: e.y,
         angle: aimAngle,
@@ -3648,7 +3929,7 @@ export class TwilightEngine {
           e.y = safeSpot.y;
           e.elevation = this.getWalkableElevation(e.x, e.y);
         }
-        this.slashes.push({
+        this.pushSlash({
           x: e.x,
           y: e.y,
           angle: 0,
@@ -3815,6 +4096,10 @@ export class TwilightEngine {
     for (const e of [...this.enemies]) {
       if (!this.isBattleActive()) return;
       if (e.hp <= 0) continue;
+      if (e.isHumanPlayer) {
+        this.updateRemoteHuman(e, dt);
+        continue;
+      }
       const combat = AI_COMBAT[e.archetype];
       e.gunfireTimer = Math.max(0, e.gunfireTimer - dt);
       const aiHeldWeapon = e.weapons[e.activeHand];
@@ -4371,7 +4656,7 @@ export class TwilightEngine {
           const giantMult = e.giantTimer > 0 ? 1.3 : 1.0;
           const meleeDmg = Math.round(heldMeleeDef.damage * giantMult);
           if (meleeKind !== 'shield') {
-            this.slashes.push({
+            this.pushSlash({
               x: e.x,
               y: e.y,
               angle: e.angle,
@@ -4891,6 +5176,1242 @@ export class TwilightEngine {
         p.eagleEyeTimer > 0,
         p.comboEmpowerTimer > 0
       );
+    }
+  }
+
+  private resolveSkinById(skinId: string, faction: FactionId): CharacterSkin {
+    return ALL_SKINS_BY_ID.get(skinId) || FACTION_CHARACTERS[faction][0];
+  }
+
+  private serializeWeaponSlot(w: EquippedWeapon): NetActorSnapshot['slots'][0] {
+    if (w.type === 'gun') {
+      return {
+        t: 'g',
+        id: w.def.id,
+        ammo: w.ammoInMag,
+        reload: w.reloadTimer > 0 ? round1(w.reloadTimer * 10) / 10 : 0,
+      };
+    }
+    return {
+      t: 'm',
+      id: w.def.id,
+      ...(w.def.kind === 'shield' ? { dur: Math.round(w.durability) } : {}),
+    };
+  }
+
+  private deserializeWeaponSlot(slot: NetEquippedSlot): EquippedWeapon {
+    if (slot.t === 'g') {
+      const def = ALL_GUNS_BY_ID.get(slot.id) || DEFAULT_PISTOL;
+      return {
+        type: 'gun',
+        def,
+        ammoInMag: clamp(slot.ammo ?? def.magSize, 0, def.magSize),
+        reloadTimer: Math.max(0, slot.reload ?? 0),
+      };
+    }
+    const def = ALL_MELEES_BY_ID.get(slot.id) || DEFAULT_KNIFE;
+    return {
+      type: 'melee',
+      def,
+      durability: def.kind === 'shield' ? clamp(slot.dur ?? 100, 0, 100) : 0,
+    };
+  }
+
+  private initRemoteHumans(multiplayer: MultiplayerEngineConfig) {
+    for (const peer of multiplayer.peers) {
+      if (peer.peerId === multiplayer.hostPeerId) continue;
+      const sp = this.pickBestDispersedSpawn(peer.faction);
+      const rt: RemoteHumanRuntime = {
+        peerId: peer.peerId,
+        entityId: `human_${peer.peerId}`,
+        name: peer.name,
+        faction: peer.faction,
+        characterSkin: peer.characterSkin,
+        lives: 3,
+        maxLives: 3,
+        reserveAmmo: 30,
+        maxReserveAmmo: 45,
+        score: 0,
+        totalDamage: 0,
+        kills: 0,
+        comboCount: 0,
+        maxCombo: 0,
+        comboTimer: 0,
+        respawnTimer: 0,
+        rifleRecoilAngle: 0,
+        chargeSessionAllowed: false,
+        meleeHeldSeconds: 0,
+        lastAttackAt: -10,
+        delayCancelReady: false,
+        comboEmpowerTimer: 0,
+        delayCancelBonus: 0.25,
+        prevAimX: sp.x + 120,
+        prevAimY: sp.y,
+        wasMouseDown: false,
+        lastClickSeq: 0,
+        lastReloadSeq: 0,
+        lastSwapSeq: 0,
+        lastPickupSeq: 0,
+        input: {
+          moveX: 0,
+          moveY: 0,
+          aimX: sp.x + 120,
+          aimY: sp.y,
+          mouseDown: false,
+          clickSeq: 0,
+          reloadSeq: 0,
+          swapSeq: 0,
+          pickupSeq: 0,
+        },
+      };
+      this.remoteHumans.set(peer.peerId, rt);
+      this.spawnRemoteHumanEntity(rt, true);
+    }
+  }
+
+  private spawnRemoteHumanEntity(rt: RemoteHumanRuntime, initial: boolean) {
+    const sp = this.pickBestDispersedSpawn(rt.faction);
+    const fac = FACTIONS[rt.faction];
+    const startGun = GUNS.find((g) => g.id === fac.startGunId) || DEFAULT_PISTOL;
+    const startMelee = MELEES.find((m) => m.id === fac.startMeleeId) || DEFAULT_KNIFE;
+    const elev = this.getWalkableElevation(sp.x, sp.y);
+    const entity: EnemyEntity = {
+      id: rt.entityId,
+      isHumanPlayer: true,
+      peerId: rt.peerId,
+      name: rt.name,
+      archetype: 'trooper',
+      faction: rt.faction,
+      isAlly: !areHostile(rt.faction, rt.entityId, this.player.faction, 'player'),
+      activeHand: 0,
+      weapons: [equipGun(startGun), { type: 'melee', def: startMelee, durability: 0 }],
+      swapTimer: 0,
+      swapDuration: 0,
+      x: sp.x,
+      y: sp.y,
+      vx: 0,
+      vy: 0,
+      baseRadius: CHAR_BASE_RADIUS,
+      radius: CHAR_BASE_RADIUS,
+      sizeScale: 1,
+      angle: 0,
+      walkPhase: 0,
+      moveIntensity: 0,
+      elevation: elev,
+      hp: 100,
+      maxHp: 100,
+      qi: 100,
+      maxQi: 100,
+      chargingMelee: false,
+      chargeReady: false,
+      speed: PLAYER_MOVEMENT.speed,
+      attackCooldown: 0,
+      aiTimer: 0,
+      lastSeenTargetPos: null,
+      alertTimer: 0,
+      hasLosToTarget: false,
+      visibleTargetId: null,
+      reactionTimer: 0,
+      focusedTargetId: null,
+      aggroLockTimer: 0,
+      pathTiles: [],
+      pathTimer: 0,
+      patrolAnchor: { x: sp.x, y: sp.y },
+      patrolTarget: null,
+      patrolTimer: 0,
+      royalShieldTimer: 0,
+      eagleEyeTimer: 0,
+      shadowCloneTimer: 0,
+      vampireTimer: 0,
+      shrinkTimer: 0,
+      giantTimer: 0,
+      blindTimer: 0,
+      stunTimer: 0,
+      freezeTimer: 0,
+      invulnTimer: initial ? 1.5 : 2.4,
+      hitFlash: 0,
+      gunfireTimer: 0,
+      crosshairBloom: 0,
+      bloomDelayTimer: 0,
+      lastAimAngle: 0,
+      attackAnimTimer: 0,
+      attackAnimDuration: 0,
+      attackAnimKind: null,
+      color: fac.accentHex,
+      characterSkin: rt.characterSkin,
+    };
+    this.enemies.push(entity);
+    rt.prevAimX = sp.x + 120;
+    rt.prevAimY = sp.y;
+    if (!initial) {
+      this.spawnBurst(sp.x, sp.y, '#FFFFFF', 14);
+    }
+  }
+
+  public setRemoteInput(peerId: string, input: RemotePlayerInput) {
+    const rt = this.remoteHumans.get(peerId);
+    if (!rt) return;
+    rt.input = input;
+  }
+
+  public removeRemoteHuman(peerId: string) {
+    const rt = this.remoteHumans.get(peerId);
+    if (!rt) return;
+    const idx = this.enemies.findIndex((e) => e.id === rt.entityId);
+    if (idx !== -1) {
+      const removed = this.enemies[idx];
+      this.enemies.splice(idx, 1);
+      this.spawnText(removed.x, removed.y - 36, `${rt.name} 已離線`, '#94A3B8', 1.0);
+    }
+    this.remoteHumans.delete(peerId);
+    this.checkVictoryCondition();
+    this.emitHud();
+  }
+
+  private tickRemoteHumanRespawns(dt: number) {
+    for (const rt of this.remoteHumans.values()) {
+      if (rt.respawnTimer <= 0) continue;
+      rt.respawnTimer = Math.max(0, rt.respawnTimer - dt);
+      if (rt.respawnTimer === 0 && rt.lives > 0) {
+        rt.reserveAmmo = 30;
+        rt.comboEmpowerTimer = 0;
+        rt.delayCancelReady = false;
+        rt.rifleRecoilAngle = 0;
+        rt.chargeSessionAllowed = false;
+        rt.meleeHeldSeconds = 0;
+        this.spawnRemoteHumanEntity(rt, false);
+      }
+    }
+  }
+
+  private applyRemoteHumanMeleeHitbox(
+    e: EnemyEntity,
+    ox: number,
+    oy: number,
+    attackerElev: number,
+    aimAngle: number,
+    arc: number,
+    reach: number,
+    damage: number,
+    isShieldPush = false
+  ) {
+    const knockPower = isShieldPush ? SHIELD_BASH_DISTANCE / 0.05 : 200;
+    const p = this.player;
+    if (p.hp > 0 && Math.abs(attackerElev - p.elevation) <= 1.0 && dist(ox, oy, p.x, p.y) <= reach + p.radius) {
+      const ang = Math.atan2(p.y - oy, p.x - ox);
+      if (Math.abs(angleDiff(aimAngle, ang)) <= arc * 0.62) {
+        if (isShieldPush && areHostile(e.faction, e.id, p.faction, 'player')) {
+          const pushed = this.moveCharacterWithElevation(
+            p.x,
+            p.y,
+            p.elevation,
+            Math.cos(ang) * SHIELD_BASH_DISTANCE,
+            Math.sin(ang) * SHIELD_BASH_DISTANCE,
+            p.radius
+          );
+          p.x = pushed.x;
+          p.y = pushed.y;
+          p.elevation = pushed.elevation;
+        }
+        if (areHostile(e.faction, e.id, p.faction, 'player')) {
+          this.damagePlayer(damage, true, e.id, ox, oy);
+        }
+      }
+    }
+    for (const other of [...this.enemies]) {
+      if (other.id === e.id) continue;
+      if (Math.abs(attackerElev - other.elevation) > 1.0) continue;
+      if (dist(ox, oy, other.x, other.y) <= reach + other.radius) {
+        const ang = Math.atan2(other.y - oy, other.x - ox);
+        if (Math.abs(angleDiff(aimAngle, ang)) <= arc * 0.62) {
+          this.damageEnemy(
+            other,
+            damage,
+            true,
+            Math.cos(ang) * knockPower,
+            Math.sin(ang) * knockPower,
+            false,
+            false,
+            e.id,
+            e.faction,
+            ox,
+            oy
+          );
+          if (isShieldPush && other.hp > 0) {
+            other.stunTimer = Math.max(other.stunTimer, 0.18);
+          }
+        }
+      }
+    }
+  }
+
+  private remoteHumanPickup(e: EnemyEntity, rt: RemoteHumanRuntime) {
+    let bestIdx = -1;
+    let bestD = 70;
+    for (let i = 0; i < this.pickups.length; i++) {
+      const d = dist(e.x, e.y, this.pickups[i].x, this.pickups[i].y);
+      if (d < bestD) {
+        bestD = d;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx === -1) return;
+    const item = this.pickups[bestIdx];
+    if (
+      item.kind === 'ammo' &&
+      rt.reserveAmmo >= rt.maxReserveAmmo &&
+      e.weapons.every((w) => w.type !== 'gun' || w.ammoInMag >= w.def.magSize)
+    ) {
+      return;
+    }
+
+    this.pickups.splice(bestIdx, 1);
+    if (item.kind === 'ammo') {
+      const added = item.amount || 30;
+      rt.reserveAmmo = Math.min(rt.maxReserveAmmo, rt.reserveAmmo + added);
+      if (item.ammoSpawnIndex !== undefined) {
+        const pad = this.map.ammoSpawns[item.ammoSpawnIndex];
+        if (pad) {
+          pad.active = false;
+          pad.respawnTimer = 10.0;
+        }
+      }
+    } else if (item.kind === 'gun' && item.gunDef) {
+      this.dropWeapon(e.weapons[e.activeHand], item.x, item.y);
+      e.weapons[e.activeHand] = equipGun(item.gunDef, item.ammoInMag ?? item.gunDef.magSize);
+      e.crosshairBloom = 0;
+      e.bloomDelayTimer = 0;
+      e.chargingMelee = false;
+      e.chargeReady = false;
+    } else if (item.kind === 'melee' && item.meleeDef) {
+      this.dropWeapon(e.weapons[e.activeHand], item.x, item.y);
+      e.weapons[e.activeHand] = {
+        type: 'melee',
+        def: item.meleeDef,
+        durability: item.meleeDef.kind === 'shield' ? clamp(item.durability ?? 100, 1, 100) : 0,
+      };
+      e.chargingMelee = false;
+      e.chargeReady = false;
+    }
+  }
+
+  private remoteHumanFireGun(e: EnemyEntity, rt: RemoteHumanRuntime, weapon: Extract<EquippedWeapon, { type: 'gun' }>) {
+    if (e.attackCooldown > 0 || e.swapTimer > 0 || weapon.reloadTimer > 0 || weapon.ammoInMag <= 0) return;
+    const gun = weapon.def;
+    const pelletsToFire = gun.kind === 'shotgun' ? Math.max(1, Math.min(gun.pellets, weapon.ammoInMag)) : gun.pellets;
+    const ammoCost = gun.kind === 'shotgun' ? pelletsToFire : 1;
+    e.attackCooldown = 1 / gun.fireRate;
+    rt.lastAttackAt = this.time;
+    rt.delayCancelReady = true;
+    weapon.ammoInMag = Math.max(0, weapon.ammoInMag - ammoCost);
+    if (rt.comboEmpowerTimer > 0) rt.comboEmpowerTimer = 0;
+
+    const aimAngle = e.angle + (gun.kind === 'rifle' ? rt.rifleRecoilAngle * (e.eagleEyeTimer > 0 ? RIFLE_RECOIL.eagleEyeMultiplier : 1) : 0);
+    const targetDist = Math.max(GUN_AIM.nearDistance, dist(e.x, e.y, rt.input.aimX, rt.input.aimY));
+    const origPellets = gun.kind === 'shotgun' && pelletsToFire < gun.pellets ? pelletsToFire : undefined;
+    if (origPellets !== undefined) {
+      const saved = weapon.def;
+      this.fireEnemyGunHitscan(e, aimAngle, { ...weapon, def: { ...saved, pellets: origPellets } }, targetDist);
+    } else {
+      this.fireEnemyGunHitscan(e, aimAngle, weapon, targetDist);
+    }
+
+    if (gun.kind === 'rifle') {
+      rt.rifleRecoilAngle = Math.min(RIFLE_RECOIL.maxAngle, rt.rifleRecoilAngle + RIFLE_RECOIL.kick);
+    }
+  }
+
+  private updateRemoteHuman(e: EnemyEntity, dt: number) {
+    const rt = e.peerId ? this.remoteHumans.get(e.peerId) : undefined;
+    if (!rt) return;
+
+    e.attackCooldown = Math.max(0, e.attackCooldown - dt);
+    e.gunfireTimer = Math.max(0, e.gunfireTimer - dt);
+    e.swapTimer = Math.max(0, e.swapTimer - dt);
+    e.attackAnimTimer = Math.max(0, e.attackAnimTimer - dt);
+    if (e.attackAnimTimer === 0) e.attackAnimKind = null;
+    e.freezeTimer = Math.max(0, e.freezeTimer - dt);
+    e.royalShieldTimer = Math.max(0, e.royalShieldTimer - dt);
+    e.eagleEyeTimer = Math.max(0, e.eagleEyeTimer - dt);
+    e.shadowCloneTimer = Math.max(0, e.shadowCloneTimer - dt);
+    e.vampireTimer = Math.max(0, e.vampireTimer - dt);
+    e.shrinkTimer = Math.max(0, e.shrinkTimer - dt);
+    e.giantTimer = Math.max(0, e.giantTimer - dt);
+    e.blindTimer = Math.max(0, e.blindTimer - dt);
+    e.stunTimer = Math.max(0, e.stunTimer - dt);
+    e.invulnTimer = Math.max(0, (e.invulnTimer ?? 0) - dt);
+    e.hitFlash = Math.max(0, e.hitFlash - dt);
+    rt.comboEmpowerTimer = Math.max(0, rt.comboEmpowerTimer - dt);
+    if (rt.comboTimer > 0) {
+      rt.comboTimer -= dt;
+      if (rt.comboTimer <= 0) rt.comboCount = 0;
+    }
+
+    if (e.freezeTimer > 0) {
+      this.clearTimedSkillsOnFreeze(e);
+      rt.chargeSessionAllowed = false;
+      rt.meleeHeldSeconds = 0;
+    }
+
+    e.sizeScale = e.shrinkTimer > 0 ? 0.62 : e.giantTimer > 0 ? 1.32 : 1.0;
+    e.radius = e.baseRadius * e.sizeScale;
+
+    const heldWeapon = e.weapons[e.activeHand];
+    const isSniper = heldWeapon.type === 'gun' && heldWeapon.def.kind === 'sniper';
+    if (isSniper && e.bloomDelayTimer > 0) {
+      e.bloomDelayTimer = Math.max(0, e.bloomDelayTimer - dt);
+    } else {
+      const recoveryRate = isSniper ? SNIPER_AIM.bloomRecovery : GUN_AIM.bloomRecovery;
+      e.crosshairBloom = Math.max(0, e.crosshairBloom - recoveryRate * dt);
+    }
+    rt.rifleRecoilAngle *= Math.exp(-RIFLE_RECOIL.recovery * dt);
+
+    if (heldWeapon.type === 'gun' && heldWeapon.reloadTimer > 0) {
+      heldWeapon.reloadTimer = Math.max(0, heldWeapon.reloadTimer - dt);
+      if (heldWeapon.reloadTimer === 0) {
+        const needed = Math.min(heldWeapon.def.magSize - heldWeapon.ammoInMag, rt.reserveAmmo);
+        heldWeapon.ammoInMag += needed;
+        rt.reserveAmmo -= needed;
+        this.emitNetSfx('reload', e.x, e.y, heldWeapon.def.kind);
+      }
+    }
+
+    const repMult = getReputationQiMultiplier(AI_FIXED_REPUTATION);
+    if (e.freezeTimer <= 0) {
+      if (!rt.chargeSessionAllowed) {
+        e.qi = Math.min(e.maxQi, e.qi + QI_RATE.recover * repMult * dt);
+      } else if (!e.chargeReady) {
+        let chargeDt = dt;
+        if (!e.chargingMelee) {
+          rt.meleeHeldSeconds += dt;
+          if (rt.meleeHeldSeconds >= MELEE_CHARGE_HOLD_SECONDS && e.swapTimer <= 0) {
+            e.chargingMelee = true;
+            chargeDt = Math.min(dt, rt.meleeHeldSeconds - MELEE_CHARGE_HOLD_SECONDS);
+          } else {
+            chargeDt = 0;
+          }
+        }
+        if (chargeDt > 0) {
+          e.qi = Math.max(0, e.qi - QI_RATE.charge * repMult * chargeDt);
+          if (e.qi === 0) e.chargeReady = true;
+        }
+      }
+    }
+
+    if (e.stunTimer > 0) {
+      this.applyIceVentFreezeCheck(e, false);
+      rt.chargeSessionAllowed = false;
+      e.chargingMelee = false;
+      e.chargeReady = false;
+      return;
+    }
+
+    const inp = rt.input;
+    if (inp.swapSeq > rt.lastSwapSeq) {
+      rt.lastSwapSeq = inp.swapSeq;
+      rt.chargeSessionAllowed = false;
+      rt.meleeHeldSeconds = 0;
+      e.chargingMelee = false;
+      e.chargeReady = false;
+      const prev = e.weapons[e.activeHand];
+      if (prev.type === 'gun') prev.reloadTimer = 0;
+      e.activeHand = e.activeHand === 0 ? 1 : 0;
+      e.crosshairBloom = 0;
+      e.bloomDelayTimer = 0;
+      rt.rifleRecoilAngle = 0;
+      const nextW = e.weapons[e.activeHand];
+      const baseSwapDur = getWeaponSwapDuration(nextW.def.kind);
+      const sinceAttack = this.time - rt.lastAttackAt;
+      if (rt.delayCancelReady && sinceAttack <= 0.34 && sinceAttack >= 0.02) {
+        e.attackCooldown = 0;
+        rt.delayCancelReady = false;
+        rt.comboEmpowerTimer = 1.6;
+        e.swapDuration = baseSwapDur * 0.45;
+        e.swapTimer = e.swapDuration;
+      } else {
+        e.swapDuration = baseSwapDur;
+        e.swapTimer = baseSwapDur;
+        e.attackCooldown = Math.max(e.attackCooldown, baseSwapDur);
+      }
+    }
+
+    if (inp.reloadSeq > rt.lastReloadSeq) {
+      rt.lastReloadSeq = inp.reloadSeq;
+      const w = e.weapons[e.activeHand];
+      if (w.type === 'gun' && w.reloadTimer <= 0 && w.ammoInMag < w.def.magSize && rt.reserveAmmo > 0) {
+        w.reloadTimer = w.def.reloadTime;
+      }
+    }
+
+    if (inp.pickupSeq > rt.lastPickupSeq) {
+      rt.lastPickupSeq = inp.pickupSeq;
+      this.remoteHumanPickup(e, rt);
+    }
+
+    const activeWeapon = e.weapons[e.activeHand];
+    const moveLen = Math.hypot(inp.moveX, inp.moveY);
+    const mvX = moveLen > 0 ? inp.moveX / Math.max(1, moveLen) : 0;
+    const mvY = moveLen > 0 ? inp.moveY / Math.max(1, moveLen) : 0;
+
+    if (Math.abs(mvX) > 0.1 || Math.abs(mvY) > 0.1) {
+      this.framePushInputs.push({
+        id: e.id,
+        isPlayer: false,
+        faction: e.faction,
+        x: e.x,
+        y: e.y,
+        radius: e.radius,
+        elevation: e.elevation,
+        dirX: mvX,
+        dirY: mvY,
+      });
+    }
+
+    const moveSpeed =
+      PLAYER_MOVEMENT.speed * activeWeapon.def.moveSpeedMult * (e.freezeTimer > 0 ? 0.9 : 1.0);
+    const prevX = e.x;
+    const prevY = e.y;
+    const moved = this.moveCharacterWithElevation(e.x, e.y, e.elevation, mvX * moveSpeed * dt, mvY * moveSpeed * dt, e.radius);
+    e.x = moved.x;
+    e.y = moved.y;
+    e.elevation = moved.elevation;
+    this.applyIceVentFreezeCheck(e, false);
+
+    const movedDist = dist(prevX, prevY, e.x, e.y);
+    if (movedDist > 0.12) {
+      if (activeWeapon.type === 'gun' && activeWeapon.def.kind === 'sniper') {
+        const walkCap = Math.min(activeWeapon.def.maxCrosshair - activeWeapon.def.baseCrosshair, SNIPER_AIM.bodyMoveBloomCap);
+        if (e.crosshairBloom <= walkCap) {
+          e.crosshairBloom = Math.min(walkCap, e.crosshairBloom + movedDist * SNIPER_AIM.bodyMoveScale);
+          e.bloomDelayTimer = Math.max(e.bloomDelayTimer, SNIPER_AIM.settleDelaySeconds);
+        }
+      }
+      e.walkPhase += movedDist * 0.085;
+      e.moveIntensity = Math.min(1, e.moveIntensity + dt * 10);
+    } else {
+      e.moveIntensity = Math.max(0, e.moveIntensity - dt * 10);
+    }
+
+    const aimMoveDist = dist(rt.prevAimX, rt.prevAimY, inp.aimX, inp.aimY);
+    rt.prevAimX = inp.aimX;
+    rt.prevAimY = inp.aimY;
+    if (aimMoveDist > 0 && activeWeapon.type === 'gun') {
+      const gun = activeWeapon.def;
+      if (gun.kind === 'sniper') {
+        const delta = Math.max(0, aimMoveDist - SNIPER_AIM.pointerDeadzonePx) * SNIPER_AIM.pointerMoveScale;
+        if (delta > 0) {
+          e.crosshairBloom = Math.min(gun.maxCrosshair - gun.baseCrosshair, e.crosshairBloom + Math.min(SNIPER_AIM.pointerMoveStepCap, delta));
+          e.bloomDelayTimer = SNIPER_AIM.settleDelaySeconds;
+        }
+      } else {
+        e.crosshairBloom = Math.min(gun.maxCrosshair - gun.baseCrosshair, e.crosshairBloom + Math.min(18, Math.max(0, aimMoveDist - 2) * 0.09));
+      }
+    }
+
+    if (e.blindTimer > 0) {
+      e.angle += dt * 7;
+    } else {
+      e.angle = Math.atan2(inp.aimY - e.y, inp.aimX - e.x);
+    }
+
+    const clicked = inp.clickSeq > rt.lastClickSeq;
+    if (clicked) {
+      rt.lastClickSeq = inp.clickSeq;
+    }
+    const released = !inp.mouseDown && rt.wasMouseDown;
+    rt.wasMouseDown = inp.mouseDown;
+
+    if (activeWeapon.type === 'gun') {
+      rt.chargeSessionAllowed = false;
+      e.chargingMelee = false;
+      e.chargeReady = false;
+      if (clicked && e.swapTimer <= 0 && activeWeapon.ammoInMag <= 0 && activeWeapon.reloadTimer === 0 && rt.reserveAmmo > 0) {
+        activeWeapon.reloadTimer = activeWeapon.def.reloadTime;
+      } else if (clicked || (inp.mouseDown && activeWeapon.def.kind === 'rifle')) {
+        this.remoteHumanFireGun(e, rt, activeWeapon);
+      }
+    } else {
+      if (clicked) {
+        if (e.swapTimer <= 0 && e.attackCooldown <= 0) {
+          const melee = activeWeapon.def;
+          const comboMult = rt.comboEmpowerTimer > 0 ? 1 + rt.delayCancelBonus : 1.0;
+          e.attackCooldown = 1 / (melee.swingRate * (e.freezeTimer > 0 ? 0.9 : 1));
+          rt.lastAttackAt = this.time;
+          rt.delayCancelReady = true;
+          e.attackAnimDuration = melee.kind === 'greatsword' ? 0.24 : 0.16;
+          e.attackAnimTimer = e.attackAnimDuration;
+          e.attackAnimKind = melee.kind;
+          if (rt.comboEmpowerTimer > 0) rt.comboEmpowerTimer = 0;
+
+          if (melee.kind !== 'shield') {
+            this.pushSlash({
+              x: e.x,
+              y: e.y,
+              angle: e.angle,
+              arc: melee.arc,
+              reach: melee.reach * e.sizeScale,
+              color: melee.color,
+              life: melee.kind === 'greatsword' ? 0.24 : 0.16,
+              maxLife: melee.kind === 'greatsword' ? 0.24 : 0.16,
+              isUltimate: false,
+              style: melee.kind === 'knife' ? 'thrust' : melee.kind === 'claw' ? 'claw' : 'sweep',
+            });
+          }
+          this.emitNetSfx('melee', e.x, e.y, melee.kind);
+          const dmg = Math.round(melee.damage * comboMult * (e.giantTimer > 0 ? 1.3 : 1.0));
+          this.applyRemoteHumanMeleeHitbox(
+            e,
+            e.x,
+            e.y,
+            e.elevation,
+            e.angle,
+            melee.arc,
+            melee.reach * e.sizeScale,
+            dmg,
+            melee.kind === 'shield'
+          );
+        }
+        if (inp.mouseDown) {
+          rt.chargeSessionAllowed = e.freezeTimer <= 0 && e.qi >= e.maxQi - 0.5;
+        }
+      }
+      if (released) {
+        if (e.chargeReady && e.freezeTimer <= 0) {
+          e.chargeReady = false;
+          e.attackCooldown = 0.25;
+          rt.lastAttackAt = this.time;
+          rt.delayCancelReady = true;
+          e.attackAnimDuration = activeWeapon.def.kind === 'greatsword' ? 0.26 : 0.16;
+          e.attackAnimTimer = e.attackAnimDuration;
+          e.attackAnimKind = activeWeapon.def.kind;
+          this.emitNetSfx('skill', e.x, e.y);
+          this.executeEnemyFactionSkill(e, activeWeapon, e.angle);
+        }
+        rt.chargeSessionAllowed = false;
+        rt.meleeHeldSeconds = 0;
+        e.chargingMelee = false;
+        e.chargeReady = false;
+      }
+    }
+  }
+
+  public getLocalInputSnapshot(seqs: {
+    clickSeq: number;
+    reloadSeq: number;
+    swapSeq: number;
+    pickupSeq: number;
+  }): RemotePlayerInput {
+    const mv = this.getMoveVector();
+    const ptr = this.getWorldPointer();
+    return {
+      moveX: mv.x === 0 ? 0 : Math.sign(mv.x),
+      moveY: mv.y === 0 ? 0 : Math.sign(mv.y),
+      aimX: round1(ptr.x),
+      aimY: round1(ptr.y),
+      mouseDown: this.mouseDown,
+      clickSeq: seqs.clickSeq,
+      reloadSeq: seqs.reloadSeq,
+      swapSeq: seqs.swapSeq,
+      pickupSeq: seqs.pickupSeq,
+    };
+  }
+
+  public exportWorldSnapshot(): NetWorldSnapshot {
+    const p = this.player;
+    const hostPeerId = this.multiplayer?.hostPeerId ?? 'host';
+    const hostDesc = this.multiplayer?.peers.find((pr) => pr.peerId === hostPeerId);
+    const actors: NetActorSnapshot[] = [
+      {
+        id: 'player',
+        peerId: hostPeerId,
+        isHuman: true,
+        name: hostDesc?.name ?? p.characterSkin.name,
+        faction: p.faction,
+        skinId: p.characterSkin.id,
+        x: round1(p.x),
+        y: round1(p.y),
+        vx: round1(p.vx),
+        vy: round1(p.vy),
+        angle: Number(p.angle.toFixed(3)),
+        elev: p.elevation,
+        hp: Math.round(p.hp),
+        qi: Math.round(p.qi),
+        lives: p.lives,
+        respawn: round1(this.respawnTimer),
+        score: Math.floor(p.score),
+        dmg: p.totalDamage,
+        kills: p.kills,
+        combo: p.comboCount,
+        maxCombo: p.maxCombo,
+        reserve: p.reserveAmmo,
+        hand: p.activeHand,
+        slots: [this.serializeWeaponSlot(p.weapons[0]), this.serializeWeaponSlot(p.weapons[1])],
+        swap: round1(p.swapTimer),
+        swapDur: round1(p.swapDuration),
+        gunfire: round1(p.gunfireTimer),
+        atkAnim: round1(p.attackAnimTimer),
+        atkDur: round1(p.attackAnimDuration),
+        atkKind: p.attackAnimKind,
+        charging: p.chargingMelee && this.chargeSessionAllowed,
+        chargeReady: p.chargeReady,
+        comboEmp: p.comboEmpowerTimer > 0,
+        shield: round1(p.royalShieldTimer),
+        ...(p.royalShieldImpact ? { shieldImp: p.royalShieldImpact } : {}),
+        eagle: round1(p.eagleEyeTimer),
+        shadow: round1(p.shadowCloneTimer),
+        vamp: round1(p.vampireTimer),
+        shrink: round1(p.shrinkTimer),
+        giant: round1(p.giantTimer),
+        blind: round1(p.blindTimer),
+        blindDur: round1(p.blindDuration),
+        freeze: round1(p.freezeTimer),
+        invuln: round1(p.invulnTimer),
+        bloom: round1(this.crosshairBloom),
+      },
+    ];
+
+    const liveRemotePeerIds = new Set<string>();
+    for (const e of this.enemies) {
+      const rt = e.isHumanPlayer && e.peerId ? this.remoteHumans.get(e.peerId) : undefined;
+      if (e.isHumanPlayer && e.peerId) liveRemotePeerIds.add(e.peerId);
+      actors.push({
+        id: e.id,
+        ...(e.peerId ? { peerId: e.peerId } : {}),
+        isHuman: Boolean(e.isHumanPlayer),
+        name: e.name,
+        faction: e.faction,
+        skinId: e.characterSkin.id,
+        archetype: e.archetype,
+        x: round1(e.x),
+        y: round1(e.y),
+        vx: round1(e.vx),
+        vy: round1(e.vy),
+        angle: Number(e.angle.toFixed(3)),
+        elev: e.elevation,
+        hp: Math.round(e.hp),
+        qi: Math.round(e.qi),
+        ...(rt
+          ? {
+              lives: rt.lives,
+              respawn: round1(rt.respawnTimer),
+              score: Math.floor(rt.score),
+              dmg: rt.totalDamage,
+              kills: rt.kills,
+              combo: rt.comboCount,
+              maxCombo: rt.maxCombo,
+              reserve: rt.reserveAmmo,
+              comboEmp: rt.comboEmpowerTimer > 0,
+            }
+          : {}),
+        hand: e.activeHand,
+        slots: [this.serializeWeaponSlot(e.weapons[0]), this.serializeWeaponSlot(e.weapons[1])],
+        swap: round1(e.swapTimer),
+        swapDur: round1(e.swapDuration),
+        gunfire: round1(e.gunfireTimer),
+        atkAnim: round1(e.attackAnimTimer),
+        atkDur: round1(e.attackAnimDuration),
+        atkKind: e.attackAnimKind,
+        charging: e.chargingMelee,
+        chargeReady: e.chargeReady,
+        shield: round1(e.royalShieldTimer),
+        ...(e.royalShieldImpact ? { shieldImp: e.royalShieldImpact } : {}),
+        eagle: round1(e.eagleEyeTimer),
+        shadow: round1(e.shadowCloneTimer),
+        vamp: round1(e.vampireTimer),
+        shrink: round1(e.shrinkTimer),
+        giant: round1(e.giantTimer),
+        blind: round1(e.blindTimer),
+        freeze: round1(e.freezeTimer),
+        stun: round1(e.stunTimer),
+        invuln: round1(e.invulnTimer ?? 0),
+        hitFlash: round1(e.hitFlash),
+        bloom: round1(e.crosshairBloom),
+      });
+    }
+
+    for (const rt of this.remoteHumans.values()) {
+      if (liveRemotePeerIds.has(rt.peerId)) continue;
+      actors.push({
+        id: rt.entityId,
+        peerId: rt.peerId,
+        isHuman: true,
+        name: rt.name,
+        faction: rt.faction,
+        skinId: rt.characterSkin.id,
+        x: round1(rt.prevAimX),
+        y: round1(rt.prevAimY),
+        vx: 0,
+        vy: 0,
+        angle: 0,
+        elev: 0,
+        hp: 0,
+        qi: 0,
+        lives: rt.lives,
+        respawn: round1(rt.respawnTimer),
+        score: Math.floor(rt.score),
+        dmg: rt.totalDamage,
+        kills: rt.kills,
+        combo: rt.comboCount,
+        maxCombo: rt.maxCombo,
+        reserve: rt.reserveAmmo,
+        hand: 0,
+        slots: [this.serializeWeaponSlot(defaultWeaponForHand(0)), this.serializeWeaponSlot(defaultWeaponForHand(1))],
+      });
+    }
+
+    const events = this.netEvents;
+    this.netEvents = [];
+
+    return {
+      seq: ++this.snapshotSeq,
+      t: round1(this.time),
+      status: this.status,
+      banner: this.bannerTimer > 0 ? this.bannerText : '',
+      skillBanner: this.activeSkillBannerTimer > 0 ? this.activeSkillBanner : null,
+      factionScores: { ...this.factionScores },
+      deploymentQueue: { ...this.deploymentQueue },
+      actors,
+      pickups: this.pickups.map((pk) => ({
+        id: pk.id,
+        x: round1(pk.x),
+        y: round1(pk.y),
+        kind: pk.kind,
+        ...(pk.gunDef ? { itemId: pk.gunDef.id } : pk.meleeDef ? { itemId: pk.meleeDef.id } : {}),
+        ...(pk.ammoInMag !== undefined ? { ammo: pk.ammoInMag } : {}),
+        ...(pk.durability !== undefined ? { dur: Math.round(pk.durability) } : {}),
+      })),
+      projectiles: this.projectiles.map((pr) => ({
+        id: pr.id,
+        x: round1(pr.x),
+        y: round1(pr.y),
+        vx: round1(pr.vx),
+        vy: round1(pr.vy),
+        r: pr.radius,
+        color: pr.color,
+        ownerId: pr.ownerId,
+        ownerFaction: pr.ownerFaction,
+        ...(pr.isWave ? { isWave: true } : {}),
+        ...(pr.isLightOrb ? { isLightOrb: true } : {}),
+        ...(pr.isBlackDragon ? { isBlackDragon: true } : {}),
+        ...(pr.segments ? { segs: pr.segments.map((s) => ({ x: round1(s.x), y: round1(s.y) })) } : {}),
+      })),
+      iceBlocks: (this.map.pushableIceBlocks || []).map((blk) => ({
+        id: blk.id,
+        x: round1(blk.x),
+        y: round1(blk.y),
+        baseElev: blk.baseElev,
+        elev: blk.elevation,
+        slideTimer: round1(blk.slideTimer),
+        slideDir: blk.slideDir,
+      })),
+      events,
+    };
+  }
+
+  public applyWorldSnapshot(snapshot: NetWorldSnapshot) {
+    const localPeerId = this.multiplayer?.localPeerId;
+    const localActor =
+      (localPeerId ? snapshot.actors.find((a) => a.peerId === localPeerId) : undefined) || snapshot.actors[0];
+    if (!localActor) return;
+
+    const p = this.player;
+    const prevPlayerSnap = this.clientLerpTargets.get('__local__');
+    if (!prevPlayerSnap || dist(p.x, p.y, localActor.x, localActor.y) > 160) {
+      p.x = localActor.x;
+      p.y = localActor.y;
+    }
+    this.clientLerpTargets.set('__local__', {
+      x: localActor.x,
+      y: localActor.y,
+      vx: localActor.vx,
+      vy: localActor.vy,
+      angle: localActor.angle,
+      elev: localActor.elev,
+    });
+    p.vx = localActor.vx;
+    p.vy = localActor.vy;
+    p.elevation = localActor.elev;
+    p.hp = localActor.hp;
+    p.qi = localActor.qi;
+    p.lives = localActor.lives ?? p.lives;
+    p.score = localActor.score ?? p.score;
+    p.totalDamage = localActor.dmg ?? p.totalDamage;
+    p.kills = localActor.kills ?? p.kills;
+    p.comboCount = localActor.combo ?? 0;
+    p.maxCombo = localActor.maxCombo ?? p.maxCombo;
+    p.reserveAmmo = localActor.reserve ?? p.reserveAmmo;
+    p.faction = localActor.faction;
+    p.characterSkin = this.resolveSkinById(localActor.skinId, localActor.faction);
+    p.activeHand = localActor.hand;
+    p.weapons = [
+      this.deserializeWeaponSlot(localActor.slots[0]),
+      this.deserializeWeaponSlot(localActor.slots[1]),
+    ];
+    p.swapTimer = localActor.swap ?? 0;
+    p.swapDuration = localActor.swapDur ?? 0;
+    p.gunfireTimer = localActor.gunfire ?? 0;
+    p.attackAnimTimer = localActor.atkAnim ?? 0;
+    p.attackAnimDuration = localActor.atkDur ?? 0;
+    p.attackAnimKind = localActor.atkKind ?? null;
+    p.chargingMelee = Boolean(localActor.charging);
+    this.chargeSessionAllowed = p.chargingMelee;
+    p.chargeReady = Boolean(localActor.chargeReady);
+    p.comboEmpowerTimer = localActor.comboEmp ? 1.0 : 0;
+    p.royalShieldTimer = localActor.shield ?? 0;
+    p.royalShieldImpact = localActor.shieldImp;
+    p.eagleEyeTimer = localActor.eagle ?? 0;
+    p.shadowCloneTimer = localActor.shadow ?? 0;
+    p.vampireTimer = localActor.vamp ?? 0;
+    p.shrinkTimer = localActor.shrink ?? 0;
+    p.giantTimer = localActor.giant ?? 0;
+    p.blindTimer = localActor.blind ?? 0;
+    p.blindDuration = localActor.blindDur ?? 0;
+    p.freezeTimer = localActor.freeze ?? 0;
+    p.invulnTimer = localActor.invuln ?? 0;
+    p.sizeScale = p.shrinkTimer > 0 ? 0.62 : p.giantTimer > 0 ? 1.32 : 1.0;
+    p.radius = p.baseRadius * p.sizeScale;
+    this.crosshairBloom = localActor.bloom ?? 0;
+    this.respawnTimer = localActor.respawn ?? 0;
+
+    const existingMap = new Map(this.enemies.map((e) => [e.id, e]));
+    const nextEnemies: EnemyEntity[] = [];
+    for (const actor of snapshot.actors) {
+      if (actor === localActor || actor.hp <= 0) continue;
+      const skin = this.resolveSkinById(actor.skinId, actor.faction);
+      let ent = existingMap.get(actor.id);
+      if (!ent) {
+        ent = {
+          id: actor.id,
+          isHumanPlayer: actor.isHuman,
+          peerId: actor.peerId,
+          name: actor.name,
+          archetype: actor.archetype ?? 'trooper',
+          faction: actor.faction,
+          isAlly: !areHostile(p.faction, localActor.id, actor.faction, actor.id),
+          activeHand: actor.hand,
+          weapons: [this.deserializeWeaponSlot(actor.slots[0]), this.deserializeWeaponSlot(actor.slots[1])],
+          swapTimer: actor.swap ?? 0,
+          swapDuration: actor.swapDur ?? 0,
+          x: actor.x,
+          y: actor.y,
+          vx: actor.vx,
+          vy: actor.vy,
+          baseRadius: CHAR_BASE_RADIUS,
+          radius: CHAR_BASE_RADIUS,
+          sizeScale: 1,
+          angle: actor.angle,
+          walkPhase: 0,
+          moveIntensity: 0,
+          elevation: actor.elev,
+          hp: actor.hp,
+          maxHp: 100,
+          qi: actor.qi,
+          maxQi: 100,
+          chargingMelee: Boolean(actor.charging),
+          chargeReady: Boolean(actor.chargeReady),
+          speed: 150,
+          attackCooldown: 0,
+          aiTimer: 0,
+          lastSeenTargetPos: null,
+          alertTimer: 0,
+          hasLosToTarget: false,
+          visibleTargetId: null,
+          reactionTimer: 0,
+          focusedTargetId: null,
+          aggroLockTimer: 0,
+          pathTiles: [],
+          pathTimer: 0,
+          patrolAnchor: { x: actor.x, y: actor.y },
+          patrolTarget: null,
+          patrolTimer: 0,
+          royalShieldTimer: actor.shield ?? 0,
+          royalShieldImpact: actor.shieldImp,
+          eagleEyeTimer: actor.eagle ?? 0,
+          shadowCloneTimer: actor.shadow ?? 0,
+          vampireTimer: actor.vamp ?? 0,
+          shrinkTimer: actor.shrink ?? 0,
+          giantTimer: actor.giant ?? 0,
+          blindTimer: actor.blind ?? 0,
+          stunTimer: actor.stun ?? 0,
+          freezeTimer: actor.freeze ?? 0,
+          invulnTimer: actor.invuln ?? 0,
+          hitFlash: actor.hitFlash ?? 0,
+          gunfireTimer: actor.gunfire ?? 0,
+          crosshairBloom: actor.bloom ?? 0,
+          bloomDelayTimer: 0,
+          lastAimAngle: actor.angle,
+          attackAnimTimer: actor.atkAnim ?? 0,
+          attackAnimDuration: actor.atkDur ?? 0,
+          attackAnimKind: actor.atkKind ?? null,
+          color: FACTIONS[actor.faction].accentHex,
+          characterSkin: skin,
+        };
+      } else {
+        if (dist(ent.x, ent.y, actor.x, actor.y) > 160) {
+          ent.x = actor.x;
+          ent.y = actor.y;
+        }
+        ent.isHumanPlayer = actor.isHuman;
+        ent.peerId = actor.peerId;
+        ent.name = actor.name;
+        ent.faction = actor.faction;
+        ent.characterSkin = skin;
+        ent.color = FACTIONS[actor.faction].accentHex;
+        ent.isAlly = !areHostile(p.faction, localActor.id, actor.faction, actor.id);
+        ent.activeHand = actor.hand;
+        ent.weapons = [this.deserializeWeaponSlot(actor.slots[0]), this.deserializeWeaponSlot(actor.slots[1])];
+        ent.swapTimer = actor.swap ?? 0;
+        ent.swapDuration = actor.swapDur ?? 0;
+        ent.hp = actor.hp;
+        ent.qi = actor.qi;
+        ent.elevation = actor.elev;
+        ent.chargingMelee = Boolean(actor.charging);
+        ent.chargeReady = Boolean(actor.chargeReady);
+        ent.royalShieldTimer = actor.shield ?? 0;
+        ent.royalShieldImpact = actor.shieldImp;
+        ent.eagleEyeTimer = actor.eagle ?? 0;
+        ent.shadowCloneTimer = actor.shadow ?? 0;
+        ent.vampireTimer = actor.vamp ?? 0;
+        ent.shrinkTimer = actor.shrink ?? 0;
+        ent.giantTimer = actor.giant ?? 0;
+        ent.blindTimer = actor.blind ?? 0;
+        ent.stunTimer = actor.stun ?? 0;
+        ent.freezeTimer = actor.freeze ?? 0;
+        ent.invulnTimer = actor.invuln ?? 0;
+        ent.hitFlash = actor.hitFlash ?? 0;
+        ent.gunfireTimer = actor.gunfire ?? 0;
+        ent.attackAnimTimer = actor.atkAnim ?? 0;
+        ent.attackAnimDuration = actor.atkDur ?? 0;
+        ent.attackAnimKind = actor.atkKind ?? null;
+      }
+      ent.sizeScale = ent.shrinkTimer > 0 ? 0.62 : ent.giantTimer > 0 ? 1.32 : 1.0;
+      ent.radius = ent.baseRadius * ent.sizeScale;
+      this.clientLerpTargets.set(ent.id, {
+        x: actor.x,
+        y: actor.y,
+        vx: actor.vx,
+        vy: actor.vy,
+        angle: actor.angle,
+        elev: actor.elev,
+      });
+      nextEnemies.push(ent);
+    }
+    this.enemies = nextEnemies;
+
+    this.pickups = snapshot.pickups.map((pk) => {
+      if (pk.kind === 'gun' && pk.itemId) {
+        const gunDef = ALL_GUNS_BY_ID.get(pk.itemId) || DEFAULT_PISTOL;
+        return {
+          id: pk.id,
+          x: pk.x,
+          y: pk.y,
+          kind: 'gun',
+          label: gunDef.name,
+          color: gunDef.color,
+          gunDef,
+          ammoInMag: pk.ammo ?? gunDef.magSize,
+          bobPhase: this.time * 4,
+        };
+      }
+      if (pk.kind === 'melee' && pk.itemId) {
+        const meleeDef = ALL_MELEES_BY_ID.get(pk.itemId) || DEFAULT_KNIFE;
+        return {
+          id: pk.id,
+          x: pk.x,
+          y: pk.y,
+          kind: 'melee',
+          label: meleeDef.name,
+          color: meleeDef.color,
+          meleeDef,
+          ...(pk.dur !== undefined ? { durability: pk.dur } : {}),
+          bobPhase: this.time * 4,
+        };
+      }
+      return {
+        id: pk.id,
+        x: pk.x,
+        y: pk.y,
+        kind: 'ammo',
+        label: '彈藥箱 (+30發)',
+        color: '#60A5FA',
+        amount: 30,
+        bobPhase: this.time * 4,
+      };
+    });
+
+    this.projectiles = snapshot.projectiles.map((pr) => ({
+      id: pr.id,
+      x: pr.x,
+      y: pr.y,
+      prevX: pr.x,
+      prevY: pr.y,
+      vx: pr.vx,
+      vy: pr.vy,
+      radius: pr.r,
+      damage: 0,
+      startElevation: 0,
+      minTraversedElevation: 0,
+      ownerId: pr.ownerId,
+      ownerFaction: pr.ownerFaction,
+      fromPlayer: pr.ownerId === localActor.id,
+      isAlly: !areHostile(p.faction, localActor.id, pr.ownerFaction, pr.ownerId),
+      color: pr.color,
+      life: 1,
+      maxLife: 1,
+      pierce: 0,
+      isWave: pr.isWave,
+      isLightOrb: pr.isLightOrb,
+      isBlackDragon: pr.isBlackDragon,
+      segments: pr.segs,
+      hitIds: new Set<string>(),
+    }));
+
+    if (this.map.pushableIceBlocks && snapshot.iceBlocks.length > 0) {
+      const byId = new Map(snapshot.iceBlocks.map((b) => [b.id, b]));
+      for (const blk of this.map.pushableIceBlocks) {
+        const snapBlk = byId.get(blk.id);
+        if (!snapBlk) continue;
+        blk.x = snapBlk.x;
+        blk.y = snapBlk.y;
+        blk.baseElev = snapBlk.baseElev;
+        blk.elevation = snapBlk.elev;
+        blk.slideTimer = snapBlk.slideTimer;
+        blk.slideDir = snapBlk.slideDir;
+      }
+    }
+
+    this.factionScores = { ...snapshot.factionScores };
+    this.deploymentQueue = { ...snapshot.deploymentQueue };
+    this.bannerText = snapshot.banner;
+    this.bannerTimer = snapshot.banner ? 0.5 : 0;
+    this.activeSkillBanner = snapshot.skillBanner ?? '';
+    this.activeSkillBannerTimer = snapshot.skillBanner ? 0.5 : 0;
+
+    if (snapshot.status === 'VICTORY' || snapshot.status === 'GAME_OVER') {
+      const clientWon =
+        localActor.hp > 0 ||
+        (localActor.faction !== 'mercenary' &&
+          snapshot.actors.some(
+            (a) => a.faction === localActor.faction && (a.hp > 0 || (a.lives ?? 0) > 0)
+          ));
+      const nextStatus = clientWon ? 'VICTORY' : 'GAME_OVER';
+      if (this.status !== nextStatus && nextStatus === 'VICTORY') {
+        sfx.levelUp();
+      }
+      this.status = nextStatus;
+    } else if (localActor.hp <= 0 && (localActor.lives ?? 0) > 0) {
+      this.status = 'RESPAWNING';
+    } else {
+      this.status = snapshot.status === 'PAUSED' ? 'PAUSED' : 'PLAYING';
+    }
+
+    for (const ev of snapshot.events) {
+      if (ev.k === 'beam') {
+        this.beams.push({ x1: ev.x1, y1: ev.y1, x2: ev.x2, y2: ev.y2, color: ev.color, life: ev.life, maxLife: ev.life, width: ev.w });
+      } else if (ev.k === 'slash') {
+        this.slashes.push({ x: ev.x, y: ev.y, angle: ev.angle, arc: ev.arc, reach: ev.reach, color: ev.color, life: ev.life, maxLife: ev.life, isUltimate: ev.ult, style: ev.style });
+      } else if (ev.k === 'text') {
+        this.floatingTexts.push({ x: ev.x, y: ev.y, vy: -38, text: ev.text, color: ev.color, life: 0.85, maxLife: 0.85, scale: ev.scale, subtle: ev.subtle });
+      } else if (ev.k === 'burst') {
+        for (let i = 0; i < ev.count; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const spd = 60 + Math.random() * 200;
+          this.particles.push({ x: ev.x, y: ev.y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, size: 2 + Math.random() * 3.5, color: ev.color, life: 0.25 + Math.random() * 0.25, maxLife: 0.5 });
+        }
+      } else if (ev.k === 'trace') {
+        this.skillTraces.push({ kind: ev.kind, fromX: ev.fx, fromY: ev.fy, destination: { x: ev.tx, y: ev.ty }, startedAt: this.time, duration: ev.dur });
+      } else if (ev.k === 'sfx') {
+        const vol = this.nearbySoundVolume(ev.x, ev.y);
+        if (ev.kind === 'gun') sfx.gunshot((ev.sub as GunDef['kind']) || 'pistol', Math.max(0.15, vol * 0.6));
+        else if (ev.kind === 'melee') sfx.slash(ev.sub === 'greatsword');
+        else if (ev.kind === 'hit') sfx.hit(Boolean(ev.flag));
+        else if (ev.kind === 'down') sfx.soldierDown(vol * 0.75);
+        else if (ev.kind === 'skill') sfx.ultimate();
+        else if (ev.kind === 'reload') sfx.reload((ev.sub as GunDef['kind']) || 'pistol', 'ready');
+      }
+    }
+
+    this.emitHud();
+  }
+
+  private updateClientView(dt: number, canvasWidth: number, canvasHeight: number) {
+    this.time += dt;
+    if (this.skillTraces.length > 0) {
+      this.skillTraces = this.skillTraces.filter((trace) => this.time - trace.startedAt < trace.duration);
+    }
+    this.beams = this.beams.filter((b) => {
+      b.life -= dt;
+      return b.life > 0;
+    });
+    this.slashes = this.slashes.filter((s) => {
+      s.life -= dt;
+      return s.life > 0;
+    });
+    this.particles = this.particles.filter((pt) => {
+      pt.x += pt.vx * dt;
+      pt.y += pt.vy * dt;
+      pt.vx *= 0.92;
+      pt.vy *= 0.92;
+      pt.life -= dt;
+      return pt.life > 0;
+    });
+    this.floatingTexts = this.floatingTexts.filter((ft) => {
+      ft.y += ft.vy * dt;
+      ft.life -= dt;
+      return ft.life > 0;
+    });
+    for (const pk of this.pickups) pk.bobPhase += dt * 4;
+    if (this.camera.shake > 0) this.camera.shake = Math.max(0, this.camera.shake - dt * 26);
+
+    const p = this.player;
+    const baseZoom = (canvasWidth / (19 * TILE) + canvasHeight / (15 * TILE)) / 2;
+    this.camera.zoom += (baseZoom - this.camera.zoom) * Math.min(1, dt * 6);
+
+    const alpha = Math.min(1, dt * 18);
+    const pTarget = this.clientLerpTargets.get('__local__');
+    if (pTarget && p.hp > 0) {
+      const prevX = p.x;
+      const prevY = p.y;
+      p.x += (pTarget.x - p.x) * alpha;
+      p.y += (pTarget.y - p.y) * alpha;
+      const moved = dist(prevX, prevY, p.x, p.y);
+      if (moved > 0.1) {
+        p.walkPhase += moved * 0.085;
+        p.moveIntensity = Math.min(1, p.moveIntensity + dt * 10);
+      } else {
+        p.moveIntensity = Math.max(0, p.moveIntensity - dt * 10);
+      }
+      const ptr = this.getWorldPointer();
+      p.angle = Math.atan2(ptr.y - p.y, ptr.x - p.x);
+      this.updateActorSkillVisuals(p, dt);
+    }
+
+    for (const e of this.enemies) {
+      const t = this.clientLerpTargets.get(e.id);
+      if (t) {
+        const prevX = e.x;
+        const prevY = e.y;
+        e.x += (t.x - e.x) * alpha;
+        e.y += (t.y - e.y) * alpha;
+        e.angle += angleDiff(e.angle, t.angle) * alpha;
+        const moved = dist(prevX, prevY, e.x, e.y);
+        if (moved > 0.1) {
+          e.walkPhase += moved * 0.085;
+          e.moveIntensity = Math.min(1, e.moveIntensity + dt * 10);
+        } else {
+          e.moveIntensity = Math.max(0, e.moveIntensity - dt * 10);
+        }
+      }
+      this.updateActorSkillVisuals(e, dt);
+    }
+
+    if (this.status === 'PLAYING') {
+      this.updateCamera(dt);
+    }
+    this.hudEmitTimer += dt;
+    if (this.hudEmitTimer >= 0.06) {
+      this.hudEmitTimer = 0;
+      this.emitHud();
     }
   }
 

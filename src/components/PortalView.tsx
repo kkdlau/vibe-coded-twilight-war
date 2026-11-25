@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Grid, HelpCircle, Layers, MapPin, Package, PenTool, Shield, Trophy, X } from 'lucide-react';
+import { Grid, HelpCircle, Layers, MapPin, Package, PenTool, Shield, Trophy, Wifi, X } from 'lucide-react';
 import { FLOOR_TERRAIN_BINDINGS, STANDALONE_TERRAIN_SPECS } from '../game/customMaps';
 import {
   FACTIONS,
@@ -21,6 +21,7 @@ interface PortalViewProps {
   customMapCount: number;
   onSelectFaction: (faction: FactionId, preselectedMapId?: MapId) => void;
   onOpenMapEditor: () => void;
+  onOpenMultiplayer: () => void;
   onClearRecords: () => void;
 }
 
@@ -394,6 +395,7 @@ export const PortalView: React.FC<PortalViewProps> = ({
   customMapCount,
   onSelectFaction,
   onOpenMapEditor,
+  onOpenMultiplayer,
   onClearRecords,
 }) => {
   const [helpOpen, setHelpOpen] = useState(false);
@@ -498,17 +500,26 @@ export const PortalView: React.FC<PortalViewProps> = ({
         </div>
       </button>
 
-      {/* BOTTOM-LEFT: Create Custom Map Button */}
-      <button
-        onClick={onOpenMapEditor}
-        className="absolute bottom-6 left-6 sm:bottom-8 sm:left-8 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700 hover:border-sky-400/80 text-sm font-bold text-slate-100 shadow-xl transition-all cursor-pointer whitespace-nowrap shrink-0"
-      >
-        <PenTool className="w-4 h-4 text-sky-400" />
-        <span>創建地圖</span>
-        {customMapCount > 0 && (
-          <span className="font-mono-num text-xs font-black text-amber-300">({customMapCount})</span>
-        )}
-      </button>
+      {/* BOTTOM-LEFT: Multiplayer & Create Custom Map Buttons */}
+      <div className="absolute bottom-6 left-6 sm:bottom-8 sm:left-8 flex items-center gap-2.5">
+        <button
+          onClick={onOpenMultiplayer}
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 border border-amber-400/80 text-sm font-extrabold text-slate-950 shadow-xl transition-all cursor-pointer whitespace-nowrap shrink-0"
+        >
+          <Wifi className="w-4 h-4" />
+          <span>多人連線對戰</span>
+        </button>
+        <button
+          onClick={onOpenMapEditor}
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700 hover:border-sky-400/80 text-sm font-bold text-slate-100 shadow-xl transition-all cursor-pointer whitespace-nowrap shrink-0"
+        >
+          <PenTool className="w-4 h-4 text-sky-400" />
+          <span>創建地圖</span>
+          {customMapCount > 0 && (
+            <span className="font-mono-num text-xs font-black text-amber-300">({customMapCount})</span>
+          )}
+        </button>
+      </div>
 
       {/* BOTTOM-RIGHT: Help Consultation Button */}
       <button

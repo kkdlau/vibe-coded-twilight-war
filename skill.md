@@ -8,10 +8,10 @@
 
 - **作品名稱**：*光暈戰記 (Twilight Wars)* — 單機 2D 俯視角 2.5D 戰術競技場射擊遊戲，基於 React 19、TypeScript、Tailwind CSS v4、HTML5 Canvas 2D 與 Web Audio API 打造。
 - **開發伺服器與指令**：
-  - 本地開發：`npm run dev`（Port `3000`，依環境設定 `DISABLE_HMR` 停用 HMR）。
-  - 型別檢查：`npm run lint`（執行 `tsc --noEmit`）。
-  - 單元／整合測試：`npm test` / `npm test -- --run`（Vitest 測試套件位於 `src/game/engine.test.ts`）。
-  - 正式建置：`npm run build`（Vite 輸出至 `dist/`）。
+  - 本地開發：`npm run dev`（Port `3000`，由 `@cloudflare/vite-plugin` 同時啟動 Vite HMR 與本地 Durable Objects `workerd`，依環境設定 `DISABLE_HMR` 停用 HMR；Vitest 執行時自動跳過 Cloudflare plugin）。
+  - 型別檢查：`npm run lint`（同時檢查前端 `tsc --noEmit` 與 Worker `tsc -p tsconfig.worker.json --noEmit`）。
+  - 單元／整合測試：`npm test` / `npm test -- --run`（Vitest 測試套件位於 `src/game/engine.test.ts` 與 `src/net/protocol.test.ts`）。
+  - 正式建置與部署：`npm run build`（Vite 輸出靜態資源至 `dist/client/`、Worker 至 `dist/twilight_wars/`）；`npm run deploy` 執行 build 並 `wrangler deploy`。
   - CI 流程：`.github/workflows/ci.yml`（支援 `push`、`pull_request` 與 `workflow_dispatch`）自動執行 `npm install --no-audit --no-fund --legacy-peer-deps`（解決 `vite@8` 與 `esbuild@0.25` 同輩相依衝突）、`npm run lint`、`npm test`、`npm run build`。
 - **本地持久化（LocalStorage）**：
   - `twilight_rpg_records_v2`：戰績與戰場紀錄 (`RunRecord[]`)。
@@ -29,7 +29,10 @@
 | 檔案路徑 | 核心職責 |
 | --- | --- |
 | `src/App.tsx` | 頂層視圖路由（`lobby` → `faction` → `battle` / `editor`），管理 `RunRecord[]`、陣營獨立聲望及 `CustomMapData[]` 狀態。 |
-| `src/components/PortalView.tsx` | 極簡三角大廳（皇家左上、天影右上、第三勢力正下）、左下角「創建地圖」入口按鈕，以及右下角 5 頁籤即時 Canvas 視覺化說明／Debug 手冊（`地板地形物件` 嚴格切分為 `一、地板`、`二、地形（層級 ±1.0 與 攀爬階梯 +0.5）`、`三、物件`／`地圖`／`武器`／`角色`／`玩法`）。 |
+| `src/components/PortalView.tsx` | 極簡三角大廳（皇家左上、天影右上、第三勢力正下）、左下角「多人連線對戰」與「創建地圖」入口按鈕，以及右下角 5 頁籤即時 Canvas 視覺化說明／Debug 手冊（`地板地形物件` 嚴格切分為 `一、地板`、`二、地形（層級 ±1.0 與 攀爬階梯 +0.5）`、`三、物件`／`地圖`／`武器`／`角色`／`玩法`）。 |
+| `src/components/MultiplayerLobbyView.tsx` | Cloudflare Edge 多人連線作戰室：支援建立 6 位房號房間／一鍵複製邀請連結（`?room=XXXXXX`）／選填私人通行密碼／最多 `8` 人自由揀選陣營與造型／房主選定地圖（含 Custom Map 分發）與 AI 補位難度開戰。 |
+| `src/net/protocol.ts` & `src/net/transport.ts` | 前後端共用多人封包型別、`MAX_ROOM_PLAYERS = 8` 與逾時常數、房號正規化與瀏覽器 WebSocket 房間傳輸層（含 RTT 量測與安全斷線關閉）。 |
+| `worker/index.ts` & `wrangler.jsonc` | Cloudflare Workers 入口（`/api/health` 與 `/api/rooms/:code/ws` 驗證，可選設 `ROOM_PASSCODE` 於進入 Durable Object 前先擋掉未授權流量）與 `GameRoom` SQLite-backed Durable Object（WebSocket Hibernation API、大廳同步、Host-Authoritative 狀態轉發；房主離線／空房即時清除儲存，戰局結束後 `60s` 自動清除、大廳閒置 `5` 分鐘、單場最長 `30` 分鐘 Alarm 自動銷毀以節省免費方案額度）。 |
 | `src/components/FactionRoomView.tsx` | 單視窗零捲動出戰整裝室：5 種角色造型、4 種近戰武器技能總覽（`knife`、`claw`、`greatsword`、`shield`）、戰場下拉選單（內建 8 張與「自訂戰場」分類；選「隨機地圖」時隱藏預覽以免劇透）、顯著聲望卡與出戰按鈕。 |
 | `src/components/MiniMapPreview.tsx` | 支援按長寬自動適配、按鈕／滾輪縮放與拖曳捲動之即時戰場 Canvas 預覽，支援內建地圖與 `CustomMapData`，僅顯示地形與與陣營對齊之出生點色標（皇家白藍、天影紫紅 `#9D174D`、第三琥珀 `#F59E0B`），不顯示地上武器／彈藥。 |
 | `src/components/MapEditorView.tsx` | 雙欄戰場編輯器：左側採零 Scrollbar 視窗、支援 **`WASD` 自由平移**（外圍固定保留 **`5 × TILE` 空白邊緣緩衝**防止右下／左下被浮動控件遮擋）與「置中」按鈕；右側 Sidebar 分為 `地板`（7 種可混搭 0.0 地坪＋鋪滿全圖）／`地形`（`層級 ±1.0` 含 7 系對應高地＋神社木台／泥坑 `-1.0` 與 `攀爬階梯 +0.5` 且強制同系貼合）／`物件`（可折疊分類：組合連通含 `浮冰`、`冰氣孔`、`篝火`／過水橋樑／高牆圍欄／掩體石塊含 `可推動寒冰塊`／建築屋舍含 `極地冰屋`／自然植物）／`出生物資`（含盾牌與彈藥箱於「地圖武器點」）；橡皮擦整合於頂部「已選」列。 |
