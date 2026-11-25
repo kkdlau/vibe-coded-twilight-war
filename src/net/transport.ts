@@ -17,6 +17,7 @@ export interface RoomTransport {
   onClose(handler: (info: { code: number; reason: string }) => void): () => void;
   isConnected(): boolean;
   getRttMs(): number | null;
+  getBufferedAmount(): number;
 }
 
 export class WebSocketRoomTransport implements RoomTransport {
@@ -115,6 +116,10 @@ export class WebSocketRoomTransport implements RoomTransport {
 
   public getRttMs(): number | null {
     return this.rttMs;
+  }
+
+  public getBufferedAmount(): number {
+    return this.ws ? this.ws.bufferedAmount : 0;
   }
 
   private startPing(): void {

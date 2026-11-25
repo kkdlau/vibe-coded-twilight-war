@@ -36,7 +36,7 @@
 | `src/components/FactionRoomView.tsx` | 單視窗零捲動出戰整裝室：5 種角色造型、4 種近戰武器技能總覽（`knife`、`claw`、`greatsword`、`shield`）、戰場下拉選單（內建 8 張與「自訂戰場」分類；選「隨機地圖」時隱藏預覽以免劇透）、顯著聲望卡與出戰按鈕。 |
 | `src/components/MiniMapPreview.tsx` | 支援按長寬自動適配、按鈕／滾輪縮放與拖曳捲動之即時戰場 Canvas 預覽，支援內建地圖與 `CustomMapData`，僅顯示地形與與陣營對齊之出生點色標（皇家白藍、天影紫紅 `#9D174D`、第三琥珀 `#F59E0B`），不顯示地上武器／彈藥。 |
 | `src/components/MapEditorView.tsx` | 雙欄戰場編輯器：左側採零 Scrollbar 視窗、支援 **`WASD` 自由平移**（外圍固定保留 **`5 × TILE` 空白邊緣緩衝**防止右下／左下被浮動控件遮擋）與「置中」按鈕；右側 Sidebar 分為 `地板`（7 種可混搭 0.0 地坪＋鋪滿全圖）／`地形`（`層級 ±1.0` 含 7 系對應高地＋神社木台／泥坑 `-1.0` 與 `攀爬階梯 +0.5` 且強制同系貼合）／`物件`（可折疊分類：組合連通含 `浮冰`、`冰氣孔`、`篝火`／過水橋樑／高牆圍欄／掩體石塊含 `可推動寒冰塊`／建築屋舍含 `極地冰屋`／自然植物）／`出生物資`（含盾牌與彈藥箱於「地圖武器點」）；橡皮擦整合於頂部「已選」列。 |
-| `src/components/GameCanvasView.tsx` | `requestAnimationFrame` 主迴圈、鍵鼠輸入標準化、雙環血量／氣條 HUD、限時技能與冰凍狀態冷卻格、右上雙手武器 UI（僅於當前持握主手下方以 `CyrBit` 像素字體顯示彈匣／備彈或盾牌耐久）、左下控制提示（僅 `[Q]` 切換雙手，無 `[1]`/`[2]` 與附近拾取提示條）、`[Tab]` 戰況、`[P]` 暫停與結算畫面。 |
+| `src/components/GameCanvasView.tsx` | `requestAnimationFrame` 主迴圈、固定 `4:3` 矩形競技場視窗、鍵鼠輸入標準化、事件驅動＋近距離自適應多人輸入同步、雙環血量／氣條 HUD、限時技能與冰凍狀態冷卻格、右上雙手武器 UI（僅於當前持握主手下方以 `CyrBit` 像素字體顯示彈匣／備彈或盾牌耐久）、左下控制提示（僅 `[Q]` 切換雙手，無 `[1]`/`[2]` 與附近拾取提示條）、`[Tab]` 戰況、`[P]` 暫停與結算畫面。 |
 | `src/components/WeaponArt.tsx` | 全 8 把武器、12 款角色造型風格、3 大陣營徽章與 6 種限時技能＋冰凍狀態圖示之高精細 SVG 繪製。 |
 | `src/game/types.ts` | 核心型別定義：陣營、共用雙手武器 (`EquippedWeapon`)、玩家、電腦 (`EnemyEntity`，含 `freezeTimer`、`crosshairBloom`、`lastAimAngle`)、正交四層地圖型別（`FloorStyle` 含 `glacier_ice`、`mud_pit`、農田作物、地形／物件／階梯、`IglooProp`、`PushableIceBlock`、`CardinalDir`）、投射物、拾取物（含 `ammoInMag` 與 `durability`）與 `HudSnapshot`。 |
 | `src/game/data.ts` | 陣營設定 (`FACTIONS`)、15 款角色造型 (`FACTION_CHARACTERS`)、8 張內建戰場目錄 (`MAP_CATALOG`)、`GUNS`、`MELEES`、`getWeaponSwapDuration`、`getReputationQiMultiplier` 與 `ORIGIN_RESEARCH`。 |
@@ -118,7 +118,7 @@
     - `claw`：**閃光瞬移**（瞬移至最近敵人附近並致盲周圍 `0.5–1.0s`；**敵對皇家 AI 施放時會致盲玩家**，玩家畫面呈現瞬間全白閃光並平滑褪色回透明顯示原地圖）。
     - `greatsword`：**聖光彈齊射**（扇形 5 顆穿透金光彈，每顆 `30` 傷害；**具友軍誤傷** `noFriendlyFire: false`）。
   - **天影十字軍 (`shadow`)**：
-    - `knife`：**鷹眼術**（`8.0s`，槍械散射縮至 `0.45×`；角色護目位置亮起玫紅微光，步槍準星偏移亦縮至 `0.45×`，玩家視角依游標方向往前景平移，不縮放鏡頭倍率）。
+    - `knife`：**鷹眼術**（`8.0s`，槍械散射縮至 `0.45×`；角色護目位置亮起玫紅微光，步槍準星偏移亦縮至 `0.45×`；平時人物嚴格置中於 `4:3`（`16×12` 格）戰術視窗、僅貼近地圖邊角時靠邊停駐，施放鷹眼術期間視野才會沿游標方向前移多格偵察，不縮放鏡頭倍率）。
     - `claw`：**影分身**（`6.5s`，角色左右繪製殘影，`2/3` 機率迴避遠程攻擊；**遭近戰擊中立即破除**）。
     - `greatsword`：**黑龍波**（嚴格限定**前後左右與四斜角共 8 個方向** `snapToEightDirections`；深紫靛藍分段龍身，龍頭 `20` 傷／龍身 `15` 傷；撞牆、高崖或樹木最多反彈 `5` 次／總程 `1050px`，每次反彈以**均等 `1/3` 機率採 `+45°`、`0°`（原角反射）或 `-45°`** 偏轉，避免陷入同路徑死循環；`noFriendlyFire: true`）。
   - **第三勢力 (`mercenary`)**：

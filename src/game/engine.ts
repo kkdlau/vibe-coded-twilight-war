@@ -87,6 +87,9 @@ import {
 
 export { snapToEightDirections };
 
+export const VIEWPORT_TILES_X = 16;
+export const VIEWPORT_TILES_Y = 12;
+
 const DEFAULT_PISTOL = GUNS.find((gun) => gun.kind === 'pistol') || GUNS[0];
 const DEFAULT_KNIFE = MELEES.find((melee) => melee.kind === 'knife') || MELEES[0];
 const AI_FIXED_REPUTATION = 100;
@@ -128,11 +131,13 @@ interface RemoteHumanRuntime {
   delayCancelBonus: number;
   prevAimX: number;
   prevAimY: number;
+  lastAimBloomAt: number;
   wasMouseDown: boolean;
   lastClickSeq: number;
   lastReloadSeq: number;
   lastSwapSeq: number;
   lastPickupSeq: number;
+  lastDropSeq: number;
   input: RemotePlayerInput;
 }
 
@@ -143,6 +148,7 @@ interface ClientLerpTarget {
   vy: number;
   angle: number;
   elev: number;
+  extrapTime: number;
 }
 
 function equipGun(def: GunDef, ammoInMag = def.magSize): Extract<EquippedWeapon, { type: 'gun' }> {
@@ -248,7 +254,8 @@ export class TwilightEngine {
   private viewport = { width: 1280, height: 720 };
   private respawnTimer = 0;
   private distanceSinceStep = 0;
-  private camera = { x: 0, y: 0, shake: 0, zoom: 1.3 };
+  private camera = { x: 0, y: 0, shake: 0, zoom: 1.5 };
+  private cameraLookOffset = { x: 0, y: 0 };
   private time = 0;
   private hudEmitTimer = 0;
   private navStandable = new Set<number>();
@@ -271,6 +278,9 @@ export class TwilightEngine {
   private remoteHumans = new Map<string, RemoteHumanRuntime>();
   private netEvents: NetTransientEvent[] = [];
   private snapshotSeq = 0;
+  private lastExportedPickupsSig = '';
+  private lastExportedIceSig = '';
+  private hasEmittedClientHud = false;
   private clientLerpTargets = new Map<string, ClientLerpTarget>();
 
   constructor(
@@ -360,6 +370,7 @@ export class TwilightEngine {
     };
     this.player.elevation = this.getWalkableElevation(this.player.x, this.player.y);
 
+    this.camera.zoom = this.getBaseZoom(1280, 720);
     const initCam = this.clampCameraToMap(this.player.x, this.player.y, 1280, 720);
     this.camera.x = initCam.x;
     this.camera.y = initCam.y;
@@ -1500,6 +1511,7 @@ export class TwilightEngine {
 
   public dropActiveWeapon() {
     const p = this.player;
+    if (p.hp <= 0) return;
     const weapon = p.weapons[p.activeHand];
     if (weapon.def.kind === 'pistol' || weapon.def.kind === 'knife') {
       this.spawnText(p.x, p.y - 36, `預設${weapon.def.name}無法放下`, '#94A3B8', 0.9);
@@ -2607,6 +2619,7 @@ export class TwilightEngine {
     p.comboEmpowerTimer = 0;
     p.invulnTimer = 2.4;
 
+    this.cameraLookOffset = { x: 0, y: 0 };
     const respawnCam = this.clampCameraToMap(p.x, p.y, this.viewport.width, this.viewport.height);
     this.camera.x = respawnCam.x;
     this.camera.y = respawnCam.y;
@@ -3073,10 +3086,8 @@ export class TwilightEngine {
     p.sizeScale = p.shrinkTimer > 0 ? 0.62 : p.giantTimer > 0 ? 1.32 : 1.0;
     p.radius = p.baseRadius * p.sizeScale;
 
-    // 視窗縮放：固定維持上下約 15 格、左右約 19 格（鷹眼不縮小視野，改以鏡頭隨游標前移偵察）
-    const baseZoom = (this.viewport.width / (19 * TILE) + this.viewport.height / (15 * TILE)) / 2;
-    const targetZoom = baseZoom;
-    this.camera.zoom += (targetZoom - this.camera.zoom) * Math.min(1, dt * 6);
+    // 經典 4:3 戰術視窗（左右約 16 格、上下約 12 格；鷹眼不縮放視野，改為純前移偵察）
+    this.camera.zoom = this.getBaseZoom(this.viewport.width, this.viewport.height);
 
     // 聲望越高，集氣與回氣速度越快（依當前出戰陣營之獨立聲望計算；冰凍期間無法集氣）
     const activeRep = p.reputations[p.faction];
@@ -3130,6 +3141,8 @@ export class TwilightEngine {
     p.x = moved.x;
     p.y = moved.y;
     p.elevation = moved.elevation;
+    p.vx = dt > 0 ? (p.x - prevPlayerX) / dt : 0;
+    p.vy = dt > 0 ? (p.y - prevPlayerY) / dt : 0;
 
     this.applyIceVentFreezeCheck(p, true);
 
@@ -3296,32 +3309,54 @@ export class TwilightEngine {
     }
 
     this.hudEmitTimer += dt;
-    if (this.hudEmitTimer >= 0.06) {
+    if (this.hudEmitTimer >= 0.09) {
       this.hudEmitTimer = 0;
       this.emitHud();
     }
   }
 
+  private getBaseZoom(canvasWidth = this.viewport.width, canvasHeight = this.viewport.height): number {
+    return Math.max(canvasWidth / (VIEWPORT_TILES_X * TILE), canvasHeight / (VIEWPORT_TILES_Y * TILE));
+  }
+
   private updateCamera(dt: number) {
     const { width: canvasWidth, height: canvasHeight } = this.viewport;
     const p = this.player;
-    let lookDist = 40;
+    let targetLookX = 0;
+    let targetLookY = 0;
+
     if (p.eagleEyeTimer > 0) {
-      const { x: worldMouseX, y: worldMouseY } = this.getWorldPointer();
-      const cursorWorldDist = dist(p.x, p.y, worldMouseX, worldMouseY);
-      lookDist = clamp(cursorWorldDist * 0.48, 40, 260);
+      const zoom = Math.max(0.5, this.camera.zoom);
+      const halfW = canvasWidth / (2 * zoom);
+      const halfH = canvasHeight / (2 * zoom);
+      // Use the unshifted clamped player camera so Eagle Eye pan does not feedback-loop with mouseScreen
+      const baseCam = this.clampCameraToMap(p.x, p.y, canvasWidth, canvasHeight);
+      const baseMouseX = (this.mouseScreen.x - canvasWidth / 2) / zoom + baseCam.x;
+      const baseMouseY = (this.mouseScreen.y - canvasHeight / 2) / zoom + baseCam.y;
+      const rawDx = baseMouseX - p.x;
+      const rawDy = baseMouseY - p.y;
+      if (Math.hypot(rawDx, rawDy) > TILE * 0.4) {
+        const maxLookX = Math.max(0, halfW - 2.75 * TILE);
+        const maxLookY = Math.max(0, halfH - 2.0 * TILE);
+        targetLookX = clamp(rawDx * 0.72, -maxLookX, maxLookX);
+        targetLookY = clamp(rawDy * 0.72, -maxLookY, maxLookY);
+      }
     }
-    const lookX = Math.cos(p.angle) * lookDist;
-    const lookY = Math.sin(p.angle) * lookDist;
-    const targetCam = this.clampCameraToMap(p.x + lookX, p.y + lookY, canvasWidth, canvasHeight);
-    if (this.time <= dt * 1.5) {
-      this.camera.x = targetCam.x;
-      this.camera.y = targetCam.y;
-    } else {
-      this.camera.x += (targetCam.x - this.camera.x) * Math.min(1, dt * 8);
-      this.camera.y += (targetCam.y - this.camera.y) * Math.min(1, dt * 8);
+
+    const offsetBlend = Math.min(1, dt * (p.eagleEyeTimer > 0 ? 8 : 12));
+    this.cameraLookOffset.x += (targetLookX - this.cameraLookOffset.x) * offsetBlend;
+    this.cameraLookOffset.y += (targetLookY - this.cameraLookOffset.y) * offsetBlend;
+    if (p.eagleEyeTimer <= 0 && Math.hypot(this.cameraLookOffset.x, this.cameraLookOffset.y) < 0.5) {
+      this.cameraLookOffset.x = 0;
+      this.cameraLookOffset.y = 0;
     }
-    const clampedCam = this.clampCameraToMap(this.camera.x, this.camera.y, canvasWidth, canvasHeight);
+
+    const clampedCam = this.clampCameraToMap(
+      p.x + this.cameraLookOffset.x,
+      p.y + this.cameraLookOffset.y,
+      canvasWidth,
+      canvasHeight
+    );
     this.camera.x = clampedCam.x;
     this.camera.y = clampedCam.y;
   }
@@ -4615,6 +4650,8 @@ export class TwilightEngine {
       }
 
       const enemyMovedDist = dist(prevEX, prevEY, e.x, e.y);
+      e.vx = dt > 0 ? (e.x - prevEX) / dt : 0;
+      e.vy = dt > 0 ? (e.y - prevEY) / dt : 0;
       if (enemyMovedDist > 0.12) {
         if (activeWeapon.type === 'gun' && activeWeapon.def.kind === 'sniper') {
           const walkCap = Math.min(
@@ -5247,11 +5284,13 @@ export class TwilightEngine {
         delayCancelBonus: 0.25,
         prevAimX: sp.x + 120,
         prevAimY: sp.y,
+        lastAimBloomAt: -10,
         wasMouseDown: false,
         lastClickSeq: 0,
         lastReloadSeq: 0,
         lastSwapSeq: 0,
         lastPickupSeq: 0,
+        lastDropSeq: 0,
         input: {
           moveX: 0,
           moveY: 0,
@@ -5262,6 +5301,7 @@ export class TwilightEngine {
           reloadSeq: 0,
           swapSeq: 0,
           pickupSeq: 0,
+          dropSeq: 0,
         },
       };
       this.remoteHumans.set(peer.peerId, rt);
@@ -5343,6 +5383,7 @@ export class TwilightEngine {
     this.enemies.push(entity);
     rt.prevAimX = sp.x + 120;
     rt.prevAimY = sp.y;
+    rt.lastDropSeq = rt.input.dropSeq ?? 0;
     if (!initial) {
       this.spawnBurst(sp.x, sp.y, '#FFFFFF', 14);
     }
@@ -5493,6 +5534,30 @@ export class TwilightEngine {
       e.chargingMelee = false;
       e.chargeReady = false;
     }
+  }
+
+  private remoteHumanDropActiveWeapon(e: EnemyEntity, rt: RemoteHumanRuntime) {
+    const weapon = e.weapons[e.activeHand];
+    if (weapon.def.kind === 'pistol' || weapon.def.kind === 'knife') {
+      this.spawnText(e.x, e.y - 36, `預設${weapon.def.name}無法放下`, '#94A3B8', 0.9);
+      return;
+    }
+
+    this.dropWeapon(weapon, e.x, e.y);
+    const fallback = defaultWeaponForHand(e.activeHand);
+    e.weapons[e.activeHand] = fallback;
+    rt.chargeSessionAllowed = false;
+    rt.meleeHeldSeconds = 0;
+    e.chargingMelee = false;
+    e.chargeReady = false;
+    e.swapDuration = getWeaponSwapDuration(fallback.def.kind);
+    e.swapTimer = e.swapDuration;
+    e.crosshairBloom = 0;
+    e.bloomDelayTimer = 0;
+    rt.rifleRecoilAngle = 0;
+    e.gunfireTimer = 0;
+    this.emitNetSfx('switch', e.x, e.y, undefined, false);
+    this.spawnText(e.x, e.y - 38, `放下 ${weapon.def.name} · 換回${fallback.def.name}`, '#FBBF24', 1.05);
   }
 
   private remoteHumanFireGun(e: EnemyEntity, rt: RemoteHumanRuntime, weapon: Extract<EquippedWeapon, { type: 'gun' }>) {
@@ -5648,6 +5713,12 @@ export class TwilightEngine {
       this.remoteHumanPickup(e, rt);
     }
 
+    const dropSeq = inp.dropSeq ?? 0;
+    if (dropSeq > rt.lastDropSeq) {
+      rt.lastDropSeq = dropSeq;
+      this.remoteHumanDropActiveWeapon(e, rt);
+    }
+
     const activeWeapon = e.weapons[e.activeHand];
     const moveLen = Math.hypot(inp.moveX, inp.moveY);
     const mvX = moveLen > 0 ? inp.moveX / Math.max(1, moveLen) : 0;
@@ -5678,6 +5749,8 @@ export class TwilightEngine {
     this.applyIceVentFreezeCheck(e, false);
 
     const movedDist = dist(prevX, prevY, e.x, e.y);
+    e.vx = dt > 0 ? (e.x - prevX) / dt : 0;
+    e.vy = dt > 0 ? (e.y - prevY) / dt : 0;
     if (movedDist > 0.12) {
       if (activeWeapon.type === 'gun' && activeWeapon.def.kind === 'sniper') {
         const walkCap = Math.min(activeWeapon.def.maxCrosshair - activeWeapon.def.baseCrosshair, SNIPER_AIM.bodyMoveBloomCap);
@@ -5695,16 +5768,21 @@ export class TwilightEngine {
     const aimMoveDist = dist(rt.prevAimX, rt.prevAimY, inp.aimX, inp.aimY);
     rt.prevAimX = inp.aimX;
     rt.prevAimY = inp.aimY;
-    if (aimMoveDist > 0 && activeWeapon.type === 'gun') {
-      const gun = activeWeapon.def;
-      if (gun.kind === 'sniper') {
-        const delta = Math.max(0, aimMoveDist - SNIPER_AIM.pointerDeadzonePx) * SNIPER_AIM.pointerMoveScale;
-        if (delta > 0) {
-          e.crosshairBloom = Math.min(gun.maxCrosshair - gun.baseCrosshair, e.crosshairBloom + Math.min(SNIPER_AIM.pointerMoveStepCap, delta));
-          e.bloomDelayTimer = SNIPER_AIM.settleDelaySeconds;
+    if (aimMoveDist > 0) {
+      const aimGap = this.time - rt.lastAimBloomAt;
+      rt.lastAimBloomAt = this.time;
+      // Only treat pointer movement as a live flick when aim samples arrive smoothly (not throttled 2s idle syncs)
+      if (aimGap > 0 && aimGap <= 0.35 && activeWeapon.type === 'gun') {
+        const gun = activeWeapon.def;
+        if (gun.kind === 'sniper') {
+          const delta = Math.max(0, aimMoveDist - SNIPER_AIM.pointerDeadzonePx) * SNIPER_AIM.pointerMoveScale;
+          if (delta > 0) {
+            e.crosshairBloom = Math.min(gun.maxCrosshair - gun.baseCrosshair, e.crosshairBloom + Math.min(SNIPER_AIM.pointerMoveStepCap, delta));
+            e.bloomDelayTimer = SNIPER_AIM.settleDelaySeconds;
+          }
+        } else {
+          e.crosshairBloom = Math.min(gun.maxCrosshair - gun.baseCrosshair, e.crosshairBloom + Math.min(18, Math.max(0, aimMoveDist - 2) * 0.09));
         }
-      } else {
-        e.crosshairBloom = Math.min(gun.maxCrosshair - gun.baseCrosshair, e.crosshairBloom + Math.min(18, Math.max(0, aimMoveDist - 2) * 0.09));
       }
     }
 
@@ -5800,6 +5878,7 @@ export class TwilightEngine {
     reloadSeq: number;
     swapSeq: number;
     pickupSeq: number;
+    dropSeq: number;
   }): RemotePlayerInput {
     const mv = this.getMoveVector();
     const ptr = this.getWorldPointer();
@@ -5813,7 +5892,68 @@ export class TwilightEngine {
       reloadSeq: seqs.reloadSeq,
       swapSeq: seqs.swapSeq,
       pickupSeq: seqs.pickupSeq,
+      dropSeq: seqs.dropSeq,
     };
+  }
+
+  public getClientSyncHints(): { hasNearbyCombatant: boolean; holdingShield: boolean } {
+    const p = this.player;
+    const nearbyRadiusSq = (6.5 * TILE) ** 2;
+    let hasNearbyCombatant = false;
+    for (const e of this.enemies) {
+      if (e.hp <= 0) continue;
+      const dx = e.x - p.x;
+      const dy = e.y - p.y;
+      if (dx * dx + dy * dy <= nearbyRadiusSq) {
+        hasNearbyCombatant = true;
+        break;
+      }
+    }
+    const active = p.weapons[p.activeHand];
+    const holdingShield = active.type === 'melee' && active.def.kind === 'shield';
+    return { hasNearbyCombatant, holdingShield };
+  }
+
+  public getRecommendedSnapshotIntervalMs(): { intervalMs: number; hasEvents: boolean } {
+    const hasEvents = this.netEvents.length > 0;
+    if (hasEvents) {
+      return { intervalMs: 50, hasEvents: true };
+    }
+    if (this.projectiles.length > 0) {
+      return { intervalMs: 60, hasEvents: false };
+    }
+    const livingHumans: { x: number; y: number }[] = [];
+    if (this.player.hp > 0) {
+      livingHumans.push({ x: this.player.x, y: this.player.y });
+    }
+    for (const e of this.enemies) {
+      if (e.hp > 0 && e.isHumanPlayer) {
+        livingHumans.push({ x: e.x, y: e.y });
+      }
+    }
+    const humanProximitySq = (9 * TILE) ** 2;
+    const combatProximitySq = (7 * TILE) ** 2;
+    for (let i = 0; i < livingHumans.length; i++) {
+      for (let j = i + 1; j < livingHumans.length; j++) {
+        const dx = livingHumans[i].x - livingHumans[j].x;
+        const dy = livingHumans[i].y - livingHumans[j].y;
+        if (dx * dx + dy * dy <= humanProximitySq) {
+          return { intervalMs: 60, hasEvents: false };
+        }
+      }
+    }
+    for (const e of this.enemies) {
+      if (e.hp <= 0 || !e.isHumanPlayer) continue;
+      for (const other of this.enemies) {
+        if (other === e || other.hp <= 0) continue;
+        const dx = e.x - other.x;
+        const dy = e.y - other.y;
+        if (dx * dx + dy * dy <= combatProximitySq) {
+          return { intervalMs: 60, hasEvents: false };
+        }
+      }
+    }
+    return { intervalMs: 100, hasEvents: false };
   }
 
   public exportWorldSnapshot(): NetWorldSnapshot {
@@ -5830,43 +5970,45 @@ export class TwilightEngine {
         skinId: p.characterSkin.id,
         x: round1(p.x),
         y: round1(p.y),
-        vx: round1(p.vx),
-        vy: round1(p.vy),
+        ...(Math.abs(p.vx) > 0.5 ? { vx: round1(p.vx) } : {}),
+        ...(Math.abs(p.vy) > 0.5 ? { vy: round1(p.vy) } : {}),
         angle: Number(p.angle.toFixed(3)),
         elev: p.elevation,
         hp: Math.round(p.hp),
         qi: Math.round(p.qi),
         lives: p.lives,
-        respawn: round1(this.respawnTimer),
+        ...(this.respawnTimer > 0 ? { respawn: round1(this.respawnTimer) } : {}),
         score: Math.floor(p.score),
         dmg: p.totalDamage,
         kills: p.kills,
-        combo: p.comboCount,
+        ...(p.comboCount > 0 ? { combo: p.comboCount } : {}),
         maxCombo: p.maxCombo,
         reserve: p.reserveAmmo,
         hand: p.activeHand,
         slots: [this.serializeWeaponSlot(p.weapons[0]), this.serializeWeaponSlot(p.weapons[1])],
-        swap: round1(p.swapTimer),
-        swapDur: round1(p.swapDuration),
-        gunfire: round1(p.gunfireTimer),
-        atkAnim: round1(p.attackAnimTimer),
-        atkDur: round1(p.attackAnimDuration),
-        atkKind: p.attackAnimKind,
-        charging: p.chargingMelee && this.chargeSessionAllowed,
-        chargeReady: p.chargeReady,
-        comboEmp: p.comboEmpowerTimer > 0,
-        shield: round1(p.royalShieldTimer),
+        ...(p.swapTimer > 0 ? { swap: round1(p.swapTimer), swapDur: round1(p.swapDuration) } : {}),
+        ...(p.gunfireTimer > 0 ? { gunfire: round1(p.gunfireTimer) } : {}),
+        ...(p.attackAnimTimer > 0
+          ? {
+              atkAnim: round1(p.attackAnimTimer),
+              atkDur: round1(p.attackAnimDuration),
+              ...(p.attackAnimKind ? { atkKind: p.attackAnimKind } : {}),
+            }
+          : {}),
+        ...(p.chargingMelee && this.chargeSessionAllowed ? { charging: true } : {}),
+        ...(p.chargeReady ? { chargeReady: true } : {}),
+        ...(p.comboEmpowerTimer > 0 ? { comboEmp: true } : {}),
+        ...(p.royalShieldTimer > 0 ? { shield: round1(p.royalShieldTimer) } : {}),
         ...(p.royalShieldImpact ? { shieldImp: p.royalShieldImpact } : {}),
-        eagle: round1(p.eagleEyeTimer),
-        shadow: round1(p.shadowCloneTimer),
-        vamp: round1(p.vampireTimer),
-        shrink: round1(p.shrinkTimer),
-        giant: round1(p.giantTimer),
-        blind: round1(p.blindTimer),
-        blindDur: round1(p.blindDuration),
-        freeze: round1(p.freezeTimer),
-        invuln: round1(p.invulnTimer),
-        bloom: round1(this.crosshairBloom),
+        ...(p.eagleEyeTimer > 0 ? { eagle: round1(p.eagleEyeTimer) } : {}),
+        ...(p.shadowCloneTimer > 0 ? { shadow: round1(p.shadowCloneTimer) } : {}),
+        ...(p.vampireTimer > 0 ? { vamp: round1(p.vampireTimer) } : {}),
+        ...(p.shrinkTimer > 0 ? { shrink: round1(p.shrinkTimer) } : {}),
+        ...(p.giantTimer > 0 ? { giant: round1(p.giantTimer) } : {}),
+        ...(p.blindTimer > 0 ? { blind: round1(p.blindTimer), blindDur: round1(p.blindDuration) } : {}),
+        ...(p.freezeTimer > 0 ? { freeze: round1(p.freezeTimer) } : {}),
+        ...(p.invulnTimer > 0 ? { invuln: round1(p.invulnTimer) } : {}),
+        ...(this.crosshairBloom > 0.05 ? { bloom: round1(this.crosshairBloom) } : {}),
       },
     ];
 
@@ -5884,8 +6026,8 @@ export class TwilightEngine {
         archetype: e.archetype,
         x: round1(e.x),
         y: round1(e.y),
-        vx: round1(e.vx),
-        vy: round1(e.vy),
+        ...(Math.abs(e.vx) > 0.5 ? { vx: round1(e.vx) } : {}),
+        ...(Math.abs(e.vy) > 0.5 ? { vy: round1(e.vy) } : {}),
         angle: Number(e.angle.toFixed(3)),
         elev: e.elevation,
         hp: Math.round(e.hp),
@@ -5893,39 +6035,42 @@ export class TwilightEngine {
         ...(rt
           ? {
               lives: rt.lives,
-              respawn: round1(rt.respawnTimer),
+              ...(rt.respawnTimer > 0 ? { respawn: round1(rt.respawnTimer) } : {}),
               score: Math.floor(rt.score),
               dmg: rt.totalDamage,
               kills: rt.kills,
-              combo: rt.comboCount,
+              ...(rt.comboCount > 0 ? { combo: rt.comboCount } : {}),
               maxCombo: rt.maxCombo,
               reserve: rt.reserveAmmo,
-              comboEmp: rt.comboEmpowerTimer > 0,
+              ...(rt.comboEmpowerTimer > 0 ? { comboEmp: true } : {}),
             }
           : {}),
         hand: e.activeHand,
         slots: [this.serializeWeaponSlot(e.weapons[0]), this.serializeWeaponSlot(e.weapons[1])],
-        swap: round1(e.swapTimer),
-        swapDur: round1(e.swapDuration),
-        gunfire: round1(e.gunfireTimer),
-        atkAnim: round1(e.attackAnimTimer),
-        atkDur: round1(e.attackAnimDuration),
-        atkKind: e.attackAnimKind,
-        charging: e.chargingMelee,
-        chargeReady: e.chargeReady,
-        shield: round1(e.royalShieldTimer),
+        ...(e.swapTimer > 0 ? { swap: round1(e.swapTimer), swapDur: round1(e.swapDuration) } : {}),
+        ...(e.gunfireTimer > 0 ? { gunfire: round1(e.gunfireTimer) } : {}),
+        ...(e.attackAnimTimer > 0
+          ? {
+              atkAnim: round1(e.attackAnimTimer),
+              atkDur: round1(e.attackAnimDuration),
+              ...(e.attackAnimKind ? { atkKind: e.attackAnimKind } : {}),
+            }
+          : {}),
+        ...(e.chargingMelee ? { charging: true } : {}),
+        ...(e.chargeReady ? { chargeReady: true } : {}),
+        ...(e.royalShieldTimer > 0 ? { shield: round1(e.royalShieldTimer) } : {}),
         ...(e.royalShieldImpact ? { shieldImp: e.royalShieldImpact } : {}),
-        eagle: round1(e.eagleEyeTimer),
-        shadow: round1(e.shadowCloneTimer),
-        vamp: round1(e.vampireTimer),
-        shrink: round1(e.shrinkTimer),
-        giant: round1(e.giantTimer),
-        blind: round1(e.blindTimer),
-        freeze: round1(e.freezeTimer),
-        stun: round1(e.stunTimer),
-        invuln: round1(e.invulnTimer ?? 0),
-        hitFlash: round1(e.hitFlash),
-        bloom: round1(e.crosshairBloom),
+        ...(e.eagleEyeTimer > 0 ? { eagle: round1(e.eagleEyeTimer) } : {}),
+        ...(e.shadowCloneTimer > 0 ? { shadow: round1(e.shadowCloneTimer) } : {}),
+        ...(e.vampireTimer > 0 ? { vamp: round1(e.vampireTimer) } : {}),
+        ...(e.shrinkTimer > 0 ? { shrink: round1(e.shrinkTimer) } : {}),
+        ...(e.giantTimer > 0 ? { giant: round1(e.giantTimer) } : {}),
+        ...(e.blindTimer > 0 ? { blind: round1(e.blindTimer) } : {}),
+        ...(e.freezeTimer > 0 ? { freeze: round1(e.freezeTimer) } : {}),
+        ...(e.stunTimer > 0 ? { stun: round1(e.stunTimer) } : {}),
+        ...((e.invulnTimer ?? 0) > 0 ? { invuln: round1(e.invulnTimer ?? 0) } : {}),
+        ...(e.hitFlash > 0 ? { hitFlash: round1(e.hitFlash) } : {}),
+        ...(e.crosshairBloom > 0.05 ? { bloom: round1(e.crosshairBloom) } : {}),
       });
     }
 
@@ -5940,18 +6085,16 @@ export class TwilightEngine {
         skinId: rt.characterSkin.id,
         x: round1(rt.prevAimX),
         y: round1(rt.prevAimY),
-        vx: 0,
-        vy: 0,
         angle: 0,
         elev: 0,
         hp: 0,
         qi: 0,
         lives: rt.lives,
-        respawn: round1(rt.respawnTimer),
+        ...(rt.respawnTimer > 0 ? { respawn: round1(rt.respawnTimer) } : {}),
         score: Math.floor(rt.score),
         dmg: rt.totalDamage,
         kills: rt.kills,
-        combo: rt.comboCount,
+        ...(rt.comboCount > 0 ? { combo: rt.comboCount } : {}),
         maxCombo: rt.maxCombo,
         reserve: rt.reserveAmmo,
         hand: 0,
@@ -5961,9 +6104,31 @@ export class TwilightEngine {
 
     const events = this.netEvents;
     this.netEvents = [];
+    const nextSeq = ++this.snapshotSeq;
+    const isKeyframe = nextSeq === 1 || nextSeq % 25 === 0;
+
+    const pickupsSig = this.pickups
+      .map((pk) => `${pk.id}:${Math.round(pk.x)},${Math.round(pk.y)},${pk.ammoInMag ?? ''},${pk.durability ?? ''}`)
+      .join('|');
+    const includePickups = isKeyframe || pickupsSig !== this.lastExportedPickupsSig;
+    if (includePickups) {
+      this.lastExportedPickupsSig = pickupsSig;
+    }
+
+    const iceList = this.map.pushableIceBlocks || [];
+    let includeIceBlocks = false;
+    if (iceList.length > 0) {
+      const iceSig = iceList
+        .map((blk) => `${blk.id}:${Math.round(blk.x)},${Math.round(blk.y)},${blk.slideDir ?? ''}`)
+        .join('|');
+      includeIceBlocks = isKeyframe || iceSig !== this.lastExportedIceSig;
+      if (includeIceBlocks) {
+        this.lastExportedIceSig = iceSig;
+      }
+    }
 
     return {
-      seq: ++this.snapshotSeq,
+      seq: nextSeq,
       t: round1(this.time),
       status: this.status,
       banner: this.bannerTimer > 0 ? this.bannerText : '',
@@ -5971,15 +6136,19 @@ export class TwilightEngine {
       factionScores: { ...this.factionScores },
       deploymentQueue: { ...this.deploymentQueue },
       actors,
-      pickups: this.pickups.map((pk) => ({
-        id: pk.id,
-        x: round1(pk.x),
-        y: round1(pk.y),
-        kind: pk.kind,
-        ...(pk.gunDef ? { itemId: pk.gunDef.id } : pk.meleeDef ? { itemId: pk.meleeDef.id } : {}),
-        ...(pk.ammoInMag !== undefined ? { ammo: pk.ammoInMag } : {}),
-        ...(pk.durability !== undefined ? { dur: Math.round(pk.durability) } : {}),
-      })),
+      ...(includePickups
+        ? {
+            pickups: this.pickups.map((pk) => ({
+              id: pk.id,
+              x: round1(pk.x),
+              y: round1(pk.y),
+              kind: pk.kind,
+              ...(pk.gunDef ? { itemId: pk.gunDef.id } : pk.meleeDef ? { itemId: pk.meleeDef.id } : {}),
+              ...(pk.ammoInMag !== undefined ? { ammo: pk.ammoInMag } : {}),
+              ...(pk.durability !== undefined ? { dur: Math.round(pk.durability) } : {}),
+            })),
+          }
+        : {}),
       projectiles: this.projectiles.map((pr) => ({
         id: pr.id,
         x: round1(pr.x),
@@ -5995,15 +6164,19 @@ export class TwilightEngine {
         ...(pr.isBlackDragon ? { isBlackDragon: true } : {}),
         ...(pr.segments ? { segs: pr.segments.map((s) => ({ x: round1(s.x), y: round1(s.y) })) } : {}),
       })),
-      iceBlocks: (this.map.pushableIceBlocks || []).map((blk) => ({
-        id: blk.id,
-        x: round1(blk.x),
-        y: round1(blk.y),
-        baseElev: blk.baseElev,
-        elev: blk.elevation,
-        slideTimer: round1(blk.slideTimer),
-        slideDir: blk.slideDir,
-      })),
+      ...(includeIceBlocks
+        ? {
+            iceBlocks: iceList.map((blk) => ({
+              id: blk.id,
+              x: round1(blk.x),
+              y: round1(blk.y),
+              baseElev: blk.baseElev,
+              elev: blk.elevation,
+              slideTimer: round1(blk.slideTimer),
+              slideDir: blk.slideDir,
+            })),
+          }
+        : {}),
       events,
     };
   }
@@ -6015,6 +6188,7 @@ export class TwilightEngine {
     if (!localActor) return;
 
     const p = this.player;
+    const prevStatus = this.status;
     const prevPlayerSnap = this.clientLerpTargets.get('__local__');
     if (!prevPlayerSnap || dist(p.x, p.y, localActor.x, localActor.y) > 160) {
       p.x = localActor.x;
@@ -6023,13 +6197,14 @@ export class TwilightEngine {
     this.clientLerpTargets.set('__local__', {
       x: localActor.x,
       y: localActor.y,
-      vx: localActor.vx,
-      vy: localActor.vy,
+      vx: localActor.vx ?? 0,
+      vy: localActor.vy ?? 0,
       angle: localActor.angle,
       elev: localActor.elev,
+      extrapTime: 0,
     });
-    p.vx = localActor.vx;
-    p.vy = localActor.vy;
+    p.vx = localActor.vx ?? 0;
+    p.vy = localActor.vy ?? 0;
     p.elevation = localActor.elev;
     p.hp = localActor.hp;
     p.qi = localActor.qi;
@@ -6094,8 +6269,8 @@ export class TwilightEngine {
           swapDuration: actor.swapDur ?? 0,
           x: actor.x,
           y: actor.y,
-          vx: actor.vx,
-          vy: actor.vy,
+          vx: actor.vx ?? 0,
+          vy: actor.vy ?? 0,
           baseRadius: CHAR_BASE_RADIUS,
           radius: CHAR_BASE_RADIUS,
           sizeScale: 1,
@@ -6189,55 +6364,58 @@ export class TwilightEngine {
       this.clientLerpTargets.set(ent.id, {
         x: actor.x,
         y: actor.y,
-        vx: actor.vx,
-        vy: actor.vy,
+        vx: actor.vx ?? 0,
+        vy: actor.vy ?? 0,
         angle: actor.angle,
         elev: actor.elev,
+        extrapTime: 0,
       });
       nextEnemies.push(ent);
     }
     this.enemies = nextEnemies;
 
-    this.pickups = snapshot.pickups.map((pk) => {
-      if (pk.kind === 'gun' && pk.itemId) {
-        const gunDef = ALL_GUNS_BY_ID.get(pk.itemId) || DEFAULT_PISTOL;
+    if (snapshot.pickups !== undefined) {
+      this.pickups = snapshot.pickups.map((pk) => {
+        if (pk.kind === 'gun' && pk.itemId) {
+          const gunDef = ALL_GUNS_BY_ID.get(pk.itemId) || DEFAULT_PISTOL;
+          return {
+            id: pk.id,
+            x: pk.x,
+            y: pk.y,
+            kind: 'gun',
+            label: gunDef.name,
+            color: gunDef.color,
+            gunDef,
+            ammoInMag: pk.ammo ?? gunDef.magSize,
+            bobPhase: this.time * 4,
+          };
+        }
+        if (pk.kind === 'melee' && pk.itemId) {
+          const meleeDef = ALL_MELEES_BY_ID.get(pk.itemId) || DEFAULT_KNIFE;
+          return {
+            id: pk.id,
+            x: pk.x,
+            y: pk.y,
+            kind: 'melee',
+            label: meleeDef.name,
+            color: meleeDef.color,
+            meleeDef,
+            ...(pk.dur !== undefined ? { durability: pk.dur } : {}),
+            bobPhase: this.time * 4,
+          };
+        }
         return {
           id: pk.id,
           x: pk.x,
           y: pk.y,
-          kind: 'gun',
-          label: gunDef.name,
-          color: gunDef.color,
-          gunDef,
-          ammoInMag: pk.ammo ?? gunDef.magSize,
+          kind: 'ammo',
+          label: '彈藥箱 (+30發)',
+          color: '#60A5FA',
+          amount: 30,
           bobPhase: this.time * 4,
         };
-      }
-      if (pk.kind === 'melee' && pk.itemId) {
-        const meleeDef = ALL_MELEES_BY_ID.get(pk.itemId) || DEFAULT_KNIFE;
-        return {
-          id: pk.id,
-          x: pk.x,
-          y: pk.y,
-          kind: 'melee',
-          label: meleeDef.name,
-          color: meleeDef.color,
-          meleeDef,
-          ...(pk.dur !== undefined ? { durability: pk.dur } : {}),
-          bobPhase: this.time * 4,
-        };
-      }
-      return {
-        id: pk.id,
-        x: pk.x,
-        y: pk.y,
-        kind: 'ammo',
-        label: '彈藥箱 (+30發)',
-        color: '#60A5FA',
-        amount: 30,
-        bobPhase: this.time * 4,
-      };
-    });
+      });
+    }
 
     this.projectiles = snapshot.projectiles.map((pr) => ({
       id: pr.id,
@@ -6266,7 +6444,7 @@ export class TwilightEngine {
       hitIds: new Set<string>(),
     }));
 
-    if (this.map.pushableIceBlocks && snapshot.iceBlocks.length > 0) {
+    if (this.map.pushableIceBlocks && snapshot.iceBlocks && snapshot.iceBlocks.length > 0) {
       const byId = new Map(snapshot.iceBlocks.map((b) => [b.id, b]));
       for (const blk of this.map.pushableIceBlocks) {
         const snapBlk = byId.get(blk.id);
@@ -6328,10 +6506,14 @@ export class TwilightEngine {
         else if (ev.kind === 'down') sfx.soldierDown(vol * 0.75);
         else if (ev.kind === 'skill') sfx.ultimate();
         else if (ev.kind === 'reload') sfx.reload((ev.sub as GunDef['kind']) || 'pistol', 'ready');
+        else if (ev.kind === 'switch') sfx.switchWeapon(Boolean(ev.flag));
       }
     }
 
-    this.emitHud();
+    if (!this.hasEmittedClientHud || prevStatus !== this.status) {
+      this.hasEmittedClientHud = true;
+      this.emitHud();
+    }
   }
 
   private updateClientView(dt: number, canvasWidth: number, canvasHeight: number) {
@@ -6364,18 +6546,61 @@ export class TwilightEngine {
     if (this.camera.shake > 0) this.camera.shake = Math.max(0, this.camera.shake - dt * 26);
 
     const p = this.player;
-    const baseZoom = (canvasWidth / (19 * TILE) + canvasHeight / (15 * TILE)) / 2;
-    this.camera.zoom += (baseZoom - this.camera.zoom) * Math.min(1, dt * 6);
+    this.camera.zoom = this.getBaseZoom(canvasWidth, canvasHeight);
 
-    const alpha = Math.min(1, dt * 18);
     const pTarget = this.clientLerpTargets.get('__local__');
-    if (pTarget && p.hp > 0) {
+    if (p.hp > 0) {
       const prevX = p.x;
       const prevY = p.y;
-      p.x += (pTarget.x - p.x) * alpha;
-      p.y += (pTarget.y - p.y) * alpha;
+      const mv = this.getMoveVector();
+      const isMoving = Math.hypot(mv.x, mv.y) > 0.05;
+      if (this.status === 'PLAYING' && isMoving) {
+        const weaponSpeedMult = p.weapons[p.activeHand].def.moveSpeedMult;
+        const freezeSpeedMult = p.freezeTimer > 0 ? 0.9 : 1.0;
+        const speed = PLAYER_MOVEMENT.speed * weaponSpeedMult * freezeSpeedMult;
+        const pred = this.moveCharacterWithElevation(p.x, p.y, p.elevation, mv.x * speed * dt, mv.y * speed * dt, p.radius);
+        p.x = pred.x;
+        p.y = pred.y;
+        p.elevation = pred.elevation;
+      }
+
+      if (pTarget) {
+        if (pTarget.extrapTime < 0.06 && (pTarget.vx !== 0 || pTarget.vy !== 0)) {
+          const step = Math.min(dt, 0.06 - pTarget.extrapTime);
+          pTarget.extrapTime += step;
+          const ex = this.moveCharacterWithElevation(
+            pTarget.x,
+            pTarget.y,
+            pTarget.elev,
+            pTarget.vx * step,
+            pTarget.vy * step,
+            p.radius
+          );
+          pTarget.x = ex.x;
+          pTarget.y = ex.y;
+          pTarget.elev = ex.elevation;
+        }
+        const err = dist(p.x, p.y, pTarget.x, pTarget.y);
+        if (err > 72) {
+          p.x = pTarget.x;
+          p.y = pTarget.y;
+          p.elevation = pTarget.elev;
+        } else if (err > 2) {
+          const blend = Math.min(1, dt * (isMoving ? 6 : 16));
+          p.x += (pTarget.x - p.x) * blend;
+          p.y += (pTarget.y - p.y) * blend;
+        }
+      }
+
       const moved = dist(prevX, prevY, p.x, p.y);
       if (moved > 0.1) {
+        if (this.status === 'PLAYING' && isMoving) {
+          this.distanceSinceStep += moved;
+          if (this.distanceSinceStep >= PLAYER_MOVEMENT.stepDistance) {
+            this.distanceSinceStep %= PLAYER_MOVEMENT.stepDistance;
+            sfx.footstep(this.getFootstepSurface(p.x, p.y));
+          }
+        }
         p.walkPhase += moved * 0.085;
         p.moveIntensity = Math.min(1, p.moveIntensity + dt * 10);
       } else {
@@ -6386,14 +6611,21 @@ export class TwilightEngine {
       this.updateActorSkillVisuals(p, dt);
     }
 
+    const remoteAlpha = Math.min(1, dt * 16);
     for (const e of this.enemies) {
       const t = this.clientLerpTargets.get(e.id);
       if (t) {
+        if (t.extrapTime < 0.12 && (t.vx !== 0 || t.vy !== 0)) {
+          const step = Math.min(dt, 0.12 - t.extrapTime);
+          t.extrapTime += step;
+          t.x = clamp(t.x + t.vx * step, e.radius, this.map.width - e.radius);
+          t.y = clamp(t.y + t.vy * step, e.radius, this.map.height - e.radius);
+        }
         const prevX = e.x;
         const prevY = e.y;
-        e.x += (t.x - e.x) * alpha;
-        e.y += (t.y - e.y) * alpha;
-        e.angle += angleDiff(e.angle, t.angle) * alpha;
+        e.x += (t.x - e.x) * remoteAlpha;
+        e.y += (t.y - e.y) * remoteAlpha;
+        e.angle += angleDiff(e.angle, t.angle) * remoteAlpha;
         const moved = dist(prevX, prevY, e.x, e.y);
         if (moved > 0.1) {
           e.walkPhase += moved * 0.085;
@@ -6409,7 +6641,7 @@ export class TwilightEngine {
       this.updateCamera(dt);
     }
     this.hudEmitTimer += dt;
-    if (this.hudEmitTimer >= 0.06) {
+    if (this.hudEmitTimer >= 0.09) {
       this.hudEmitTimer = 0;
       this.emitHud();
     }

@@ -11,7 +11,7 @@ import {
   validateCustomMap,
 } from './customMaps';
 import { FACTION_CHARACTERS, GUNS, MAP_CATALOG, MELEES, getReputationQiMultiplier, getWeaponSwapDuration } from './data';
-import { TwilightEngine, snapToEightDirections } from './engine';
+import { TwilightEngine, VIEWPORT_TILES_X, VIEWPORT_TILES_Y, snapToEightDirections } from './engine';
 import { CHAR_BASE_RADIUS } from './geometry';
 import { TILE, createArenaMap, getIglooCellMask } from './maps';
 import {
@@ -2012,31 +2012,58 @@ describe('Charge movement speed, heavy weapon balance, 1x1 non-adjacent hill sta
     expect(layouts.size).toBe(4);
   });
 
-  it('keeps camera zoom fixed and pans toward cursor during Eagle Eye', () => {
+  it('keeps camera fixed at 16x12 viewport centered on player without Eagle Eye, clamps at corners, and pans toward cursor only during Eagle Eye', () => {
     const { engine } = createTestEngine('shadow', 'european_castle', 10);
     const getCam = () => (engine as unknown as { camera: { x: number; y: number; zoom: number } }).camera;
-    const expectedBaseZoom = (1280 / (19 * TILE) + 720 / (15 * TILE)) / 2;
+    const expectedBaseZoom = Math.max(960 / (VIEWPORT_TILES_X * TILE), 720 / (VIEWPORT_TILES_Y * TILE));
+    expect(expectedBaseZoom).toBeCloseTo(1.25, 5);
 
     engine.enemies = [];
     engine.player.x = 15 * TILE;
     engine.player.y = 10 * TILE;
-    engine.setMousePos(640, 360);
-    for (let i = 0; i < 120; i++) engine.update(1 / 60, 1280, 720);
-    expect(getCam().zoom).toBeCloseTo(expectedBaseZoom, 3);
 
-    // Activate Eagle Eye and move cursor to far right -> zoom stays locked at baseZoom while camera shifts right
+    // Without Eagle Eye, moving mouse far right/left/down MUST NOT shift camera off player center
+    engine.setMousePos(900, 360);
+    for (let i = 0; i < 60; i++) engine.update(1 / 60, 960, 720);
+    expect(getCam().zoom).toBeCloseTo(expectedBaseZoom, 3);
+    expect(getCam().x).toBeCloseTo(engine.player.x, 1);
+    expect(getCam().y).toBeCloseTo(engine.player.y, 1);
+
+    engine.setMousePos(40, 680);
+    for (let i = 0; i < 60; i++) engine.update(1 / 60, 960, 720);
+    expect(getCam().x).toBeCloseTo(engine.player.x, 1);
+    expect(getCam().y).toBeCloseTo(engine.player.y, 1);
+
+    // Near map top-left corner, camera clamps to map boundary instead of keeping player dead-center
+    engine.player.x = 2 * TILE;
+    engine.player.y = 2 * TILE;
+    engine.update(1 / 60, 960, 720);
+    const halfW = 960 / (2 * getCam().zoom);
+    const halfH = 720 / (2 * getCam().zoom);
+    expect(getCam().x).toBeCloseTo(halfW, 1);
+    expect(getCam().y).toBeCloseTo(halfH, 1);
+
+    // Move back to map interior, activate Eagle Eye, and pan toward cursor without zooming out
+    engine.player.x = 15 * TILE;
+    engine.player.y = 10 * TILE;
     engine.player.eagleEyeTimer = 8.0;
-    engine.setMousePos(1200, 360);
-    for (let i = 0; i < 60; i++) engine.update(1 / 60, 1280, 720);
+    engine.setMousePos(920, 360);
+    for (let i = 0; i < 60; i++) engine.update(1 / 60, 960, 720);
 
     expect(getCam().zoom).toBeCloseTo(expectedBaseZoom, 3);
-    expect(getCam().x).toBeGreaterThan(engine.player.x + 80);
+    expect(getCam().x).toBeGreaterThan(engine.player.x + 120);
 
     // Move cursor to far left -> camera shifts forward left ahead of player
-    engine.setMousePos(80, 360);
-    for (let i = 0; i < 60; i++) engine.update(1 / 60, 1280, 720);
+    engine.setMousePos(40, 360);
+    for (let i = 0; i < 60; i++) engine.update(1 / 60, 960, 720);
     expect(getCam().zoom).toBeCloseTo(expectedBaseZoom, 3);
-    expect(getCam().x).toBeLessThan(engine.player.x - 80);
+    expect(getCam().x).toBeLessThan(engine.player.x - 120);
+
+    // Once Eagle Eye ends, camera smoothly returns to player center
+    engine.player.eagleEyeTimer = 0;
+    for (let i = 0; i < 90; i++) engine.update(1 / 60, 960, 720);
+    expect(getCam().x).toBeCloseTo(engine.player.x, 1);
+    expect(getCam().y).toBeCloseTo(engine.player.y, 1);
   });
 
   it('restricts Black Dragon Wave launch velocity strictly to the 8 cardinal/diagonal directions', () => {
@@ -4153,6 +4180,7 @@ describe('Multiplayer Host & Client Snapshot Sync', () => {
       reloadSeq: 0,
       swapSeq: 0,
       pickupSeq: 0,
+      dropSeq: 0,
     });
     const startAllyX = allyHuman.x;
     host.update(0.1, 1280, 720);
@@ -4172,6 +4200,7 @@ describe('Multiplayer Host & Client Snapshot Sync', () => {
       reloadSeq: 1,
       swapSeq: 0,
       pickupSeq: 0,
+      dropSeq: 0,
     });
     host.update(0.05, 1280, 720);
     expect(allyHuman.weapons[0].type === 'gun' && allyHuman.weapons[0].reloadTimer).toBeGreaterThan(0);
@@ -4191,6 +4220,7 @@ describe('Multiplayer Host & Client Snapshot Sync', () => {
       reloadSeq: 1,
       swapSeq: 1,
       pickupSeq: 0,
+      dropSeq: 0,
     });
     host.update(0.05, 1280, 720);
     expect(allyHuman.activeHand).toBe(1);
@@ -4251,6 +4281,197 @@ describe('Multiplayer Host & Client Snapshot Sync', () => {
     client.applyWorldSnapshot(snapshot);
     expect(client.status).toBe('VICTORY');
     expect(hostHud).not.toBeNull();
+  });
+
+  it('drops non-default weapon for remote human when dropSeq increments and syncs pickup & fallback to client', () => {
+    const hostSkin = FACTION_CHARACTERS.royal[0];
+    const allySkin = FACTION_CHARACTERS.royal[1];
+    const shadowSkin = FACTION_CHARACTERS.shadow[0];
+    const mpConfig: NonNullable<ConstructorParameters<typeof TwilightEngine>[8]> = {
+      role: 'host',
+      localPeerId: 'host01',
+      hostPeerId: 'host01',
+      peers: [
+        { peerId: 'host01', name: '房主', faction: 'royal', characterSkin: hostSkin, isHost: true },
+        { peerId: 'ally02', name: '隊友', faction: 'royal', characterSkin: allySkin, isHost: false },
+        { peerId: 'shad03', name: '影敵', faction: 'shadow', characterSkin: shadowSkin, isHost: false },
+      ],
+    };
+
+    const host = new TwilightEngine(
+      'royal',
+      hostSkin,
+      'tokyo_shrine',
+      { royal: 10, shadow: 10, mercenary: 10 },
+      () => {},
+      undefined,
+      undefined,
+      'standard',
+      mpConfig
+    );
+
+    const allyHuman = host.enemies.find((e) => e.isHumanPlayer && e.peerId === 'ally02')!;
+    const shadowHuman = host.enemies.find((e) => e.isHumanPlayer && e.peerId === 'shad03')!;
+    expect(allyHuman).toBeDefined();
+    expect(shadowHuman).toBeDefined();
+    host.enemies = [allyHuman, shadowHuman];
+    (host as unknown as { deploymentQueue: Record<FactionId, number> }).deploymentQueue = {
+      royal: 0,
+      shadow: 0,
+      mercenary: 0,
+    };
+
+    const sniper = GUNS.find((g) => g.kind === 'sniper')!;
+    const greatsword = MELEES.find((m) => m.kind === 'greatsword')!;
+    allyHuman.weapons = [
+      { type: 'gun', def: sniper, ammoInMag: sniper.magSize, reloadTimer: 0 },
+      { type: 'melee', def: greatsword, durability: 0 },
+    ];
+    allyHuman.activeHand = 0;
+
+    const client = new TwilightEngine(
+      'royal',
+      allySkin,
+      'tokyo_shrine',
+      { royal: 0, shadow: 0, mercenary: 0 },
+      () => {},
+      undefined,
+      undefined,
+      'standard',
+      { ...mpConfig, role: 'client', localPeerId: 'ally02' }
+    );
+
+    const pickupsBefore = host.pickups.length;
+
+    // 1. Remote human presses Esc on sniper (hand 0) -> drops sniper on map, reverts to pistol
+    host.setRemoteInput('ally02', {
+      moveX: 0,
+      moveY: 0,
+      aimX: allyHuman.x + 100,
+      aimY: allyHuman.y,
+      mouseDown: false,
+      clickSeq: 0,
+      reloadSeq: 0,
+      swapSeq: 0,
+      pickupSeq: 0,
+      dropSeq: 1,
+    });
+    host.update(0.05, 1280, 720);
+
+    expect(allyHuman.weapons[0].def.kind).toBe('pistol');
+    expect(host.pickups.length).toBe(pickupsBefore + 1);
+    const droppedSniper = host.pickups[host.pickups.length - 1];
+    expect(droppedSniper.kind).toBe('gun');
+    expect(droppedSniper.gunDef?.id).toBe(sniper.id);
+
+    // Sync to client and verify local HUD/player weapon & dropped pickup match
+    const snap1 = host.exportWorldSnapshot();
+    client.applyWorldSnapshot(snap1);
+    expect(client.player.weapons[0].def.kind).toBe('pistol');
+    expect(client.pickups.some((pk) => pk.kind === 'gun' && pk.gunDef?.id === sniper.id)).toBe(true);
+
+    // 2. Pressing Esc again while holding default pistol does NOT spawn another pickup
+    host.setRemoteInput('ally02', {
+      moveX: 0,
+      moveY: 0,
+      aimX: allyHuman.x + 100,
+      aimY: allyHuman.y,
+      mouseDown: false,
+      clickSeq: 0,
+      reloadSeq: 0,
+      swapSeq: 0,
+      pickupSeq: 0,
+      dropSeq: 2,
+    });
+    host.update(0.05, 1280, 720);
+    expect(allyHuman.weapons[0].def.kind).toBe('pistol');
+    expect(host.pickups.length).toBe(pickupsBefore + 1);
+
+    // 3. Swap to hand 1 (greatsword) and press Esc -> drops greatsword and reverts to knife
+    host.setRemoteInput('ally02', {
+      moveX: 0,
+      moveY: 0,
+      aimX: allyHuman.x + 100,
+      aimY: allyHuman.y,
+      mouseDown: false,
+      clickSeq: 0,
+      reloadSeq: 0,
+      swapSeq: 1,
+      pickupSeq: 0,
+      dropSeq: 3,
+    });
+    host.update(0.05, 1280, 720);
+    expect(allyHuman.activeHand).toBe(1);
+    expect(allyHuman.weapons[1].def.kind).toBe('knife');
+    expect(host.pickups.length).toBe(pickupsBefore + 2);
+    const droppedSword = host.pickups[host.pickups.length - 1];
+    expect(droppedSword.kind).toBe('melee');
+    expect(droppedSword.meleeDef?.id).toBe(greatsword.id);
+  });
+
+  it('omits unchanged pickups on delta snapshots and predicts local client movement immediately', () => {
+    const hostSkin = FACTION_CHARACTERS.royal[0];
+    const allySkin = FACTION_CHARACTERS.royal[1];
+    const shadowSkin = FACTION_CHARACTERS.shadow[0];
+    const mpConfig: NonNullable<ConstructorParameters<typeof TwilightEngine>[8]> = {
+      role: 'host',
+      localPeerId: 'host01',
+      hostPeerId: 'host01',
+      peers: [
+        { peerId: 'host01', name: '房主', faction: 'royal', characterSkin: hostSkin, isHost: true },
+        { peerId: 'ally02', name: '隊友', faction: 'royal', characterSkin: allySkin, isHost: false },
+        { peerId: 'shad03', name: '影敵', faction: 'shadow', characterSkin: shadowSkin, isHost: false },
+      ],
+    };
+
+    const host = new TwilightEngine(
+      'royal',
+      hostSkin,
+      'tokyo_shrine',
+      { royal: 10, shadow: 10, mercenary: 10 },
+      () => {},
+      undefined,
+      undefined,
+      'standard',
+      mpConfig
+    );
+
+    const client = new TwilightEngine(
+      'royal',
+      allySkin,
+      'tokyo_shrine',
+      { royal: 0, shadow: 0, mercenary: 0 },
+      () => {},
+      undefined,
+      undefined,
+      'standard',
+      { ...mpConfig, role: 'client', localPeerId: 'ally02' }
+    );
+
+    // 1. First snapshot carries full pickups; consecutive unchanged snapshot omits pickups; client preserves them
+    const snap1 = host.exportWorldSnapshot();
+    expect(snap1.pickups).toBeDefined();
+    expect(snap1.pickups!.length).toBeGreaterThan(0);
+    client.applyWorldSnapshot(snap1);
+    const clientPickupCount = client.pickups.length;
+    expect(clientPickupCount).toBe(snap1.pickups!.length);
+
+    const snap2 = host.exportWorldSnapshot();
+    expect(snap2.pickups).toBeUndefined();
+    client.applyWorldSnapshot(snap2);
+    expect(client.pickups.length).toBe(clientPickupCount);
+
+    // 2. Client local movement prediction moves immediately on KeyD without waiting for another host snapshot
+    client.player.x = 12 * TILE;
+    client.player.y = 18.5 * TILE;
+    client.player.elevation = 0;
+    const targets = (client as unknown as { clientLerpTargets: Map<string, { x: number; y: number }> }).clientLerpTargets;
+    targets.set('__local__', { x: client.player.x, y: client.player.y });
+    const xBeforeMove = client.player.x;
+    client.setKey('KeyD', true);
+    client.update(0.05, 960, 720);
+    client.setKey('KeyD', false);
+    expect(client.player.x).toBeGreaterThan(xBeforeMove + 4);
   });
 });
 

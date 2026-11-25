@@ -70,6 +70,64 @@ export interface RemotePlayerInput {
   reloadSeq: number;
   swapSeq: number;
   pickupSeq: number;
+  dropSeq: number;
+}
+
+export const CLIENT_INPUT_TIMING = {
+  firingAimMs: 90,
+  closeCombatAimMs: 120,
+  shieldAimMs: 140,
+  idleAimMs: 2000,
+  heartbeatMs: 3000,
+  minAimDeltaPx: 14,
+  minFiringAimDeltaPx: 4,
+} as const;
+
+export interface ClientInputSyncState {
+  lastSent: RemotePlayerInput | null;
+  lastSentAt: number;
+  lastAimSentAt: number;
+}
+
+export interface ClientInputSyncContext {
+  now: number;
+  hasNearbyCombatant: boolean;
+  holdingShield: boolean;
+}
+
+export function shouldSendClientInput(
+  next: RemotePlayerInput,
+  state: ClientInputSyncState,
+  ctx: ClientInputSyncContext
+): boolean {
+  if (!state.lastSent) return true;
+  const prev = state.lastSent;
+  if (
+    next.moveX !== prev.moveX ||
+    next.moveY !== prev.moveY ||
+    next.mouseDown !== prev.mouseDown ||
+    next.clickSeq !== prev.clickSeq ||
+    next.reloadSeq !== prev.reloadSeq ||
+    next.swapSeq !== prev.swapSeq ||
+    next.pickupSeq !== prev.pickupSeq ||
+    next.dropSeq !== prev.dropSeq
+  ) {
+    return true;
+  }
+  if (ctx.now - state.lastSentAt >= CLIENT_INPUT_TIMING.heartbeatMs) {
+    return true;
+  }
+  const aimDelta = Math.hypot(next.aimX - prev.aimX, next.aimY - prev.aimY);
+  if (next.mouseDown) {
+    return aimDelta >= CLIENT_INPUT_TIMING.minFiringAimDeltaPx && ctx.now - state.lastAimSentAt >= CLIENT_INPUT_TIMING.firingAimMs;
+  }
+  if (ctx.hasNearbyCombatant) {
+    return aimDelta >= CLIENT_INPUT_TIMING.minAimDeltaPx && ctx.now - state.lastAimSentAt >= CLIENT_INPUT_TIMING.closeCombatAimMs;
+  }
+  if (ctx.holdingShield) {
+    return aimDelta >= CLIENT_INPUT_TIMING.minAimDeltaPx && ctx.now - state.lastAimSentAt >= CLIENT_INPUT_TIMING.shieldAimMs;
+  }
+  return aimDelta >= CLIENT_INPUT_TIMING.minAimDeltaPx && ctx.now - state.lastAimSentAt >= CLIENT_INPUT_TIMING.idleAimMs;
 }
 
 export interface NetEquippedSlot {
@@ -90,8 +148,8 @@ export interface NetActorSnapshot {
   archetype?: EnemyArchetype;
   x: number;
   y: number;
-  vx: number;
-  vy: number;
+  vx?: number;
+  vy?: number;
   angle: number;
   elev: number;
   hp: number;
@@ -184,7 +242,7 @@ export type NetTransientEvent =
   | { k: 'text'; x: number; y: number; text: string; color: string; scale: number; subtle?: boolean }
   | { k: 'burst'; x: number; y: number; color: string; count: number }
   | { k: 'trace'; kind: 'blink' | 'siphon'; fx: number; fy: number; tx: number; ty: number; dur: number }
-  | { k: 'sfx'; kind: 'gun' | 'melee' | 'hit' | 'down' | 'skill' | 'reload'; x: number; y: number; sub?: string; flag?: boolean };
+  | { k: 'sfx'; kind: 'gun' | 'melee' | 'hit' | 'down' | 'skill' | 'reload' | 'switch'; x: number; y: number; sub?: string; flag?: boolean };
 
 export interface NetWorldSnapshot {
   seq: number;
@@ -195,9 +253,9 @@ export interface NetWorldSnapshot {
   factionScores: Record<FactionId, number>;
   deploymentQueue: Record<FactionId, number>;
   actors: NetActorSnapshot[];
-  pickups: NetPickupSnapshot[];
+  pickups?: NetPickupSnapshot[];
   projectiles: NetProjectileSnapshot[];
-  iceBlocks: NetIceBlockSnapshot[];
+  iceBlocks?: NetIceBlockSnapshot[];
   events: NetTransientEvent[];
 }
 

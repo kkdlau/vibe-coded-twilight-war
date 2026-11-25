@@ -11,7 +11,7 @@ import { CustomMapData } from '../game/customMaps';
 import { TwilightEngine } from '../game/engine';
 import type { AiDifficulty } from '../game/tuning';
 import { CharacterSkin, FactionId, HudSnapshot, MultiplayerEngineConfig, RunRecord } from '../game/types';
-import type { RoomLobbyState } from '../net/protocol';
+import { ClientInputSyncState, RoomLobbyState, shouldSendClientInput } from '../net/protocol';
 import type { ActiveMultiplayerSession } from './MultiplayerLobbyView';
 import { CharacterAvatarSvg, SkillIconSvg, WeaponIconSvg } from './WeaponArt';
 
@@ -67,7 +67,10 @@ function normalizeControlCode(e: KeyboardEvent): string {
   if (k === 'r') return 'KeyR';
   if (k === 'p') return 'KeyP';
   if (k === ' ') return 'Space';
-  if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Escape') {
+  if (e.key === 'Escape' || e.key === 'Esc') {
+    return 'Escape';
+  }
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
     return e.key;
   }
   return e.code;
@@ -94,11 +97,13 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
   const [mpRttMs, setMpRttMs] = useState<number | null>(null);
   const outcome = hud?.status === 'VICTORY' || hud?.status === 'GAME_OVER' ? hud.status : null;
 
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<TwilightEngine | null>(null);
   const recordSavedRef = useRef(false);
   const matchEndedSentRef = useRef(false);
-  const seqsRef = useRef({ clickSeq: 0, reloadSeq: 0, swapSeq: 0, pickupSeq: 0 });
+  const seqsRef = useRef({ clickSeq: 0, reloadSeq: 0, swapSeq: 0, pickupSeq: 0, dropSeq: 0 });
+  const clientSyncStateRef = useRef<ClientInputSyncState>({ lastSent: null, lastSentAt: 0, lastAimSentAt: 0 });
   const initRepsRef = useRef(initialReputations);
   initRepsRef.current = initialReputations;
   const repCallbackRef = useRef(onReputationsChange);
@@ -112,13 +117,43 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
     ? `${multiplayer.session.lobby.roomCode}:${multiplayer.session.localPeerId}:${multiplayer.session.isHost ? 'h' : 'c'}`
     : 'solo';
 
-  const sendClientInputNow = () => {
+  const syncMouseFromClient = (clientX: number, clientY: number) => {
+    const canvas = canvasRef.current;
+    const eng = engineRef.current;
+    if (!canvas || !eng) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const x = Math.max(0, Math.min(canvas.width, ((clientX - rect.left) / rect.width) * canvas.width));
+    const y = Math.max(0, Math.min(canvas.height, ((clientY - rect.top) / rect.height) * canvas.height));
+    eng.setMousePos(x, y);
+  };
+
+  const sendClientInputIfNeeded = (force = false) => {
     const mp = multiplayerRef.current;
     const eng = engineRef.current;
     if (!mp || mp.session.isHost || !eng) return;
+    const inp = eng.getLocalInputSnapshot(seqsRef.current);
+    const now = performance.now();
+    const syncState = clientSyncStateRef.current;
+    if (!force) {
+      const hints = eng.getClientSyncHints();
+      if (!shouldSendClientInput(inp, syncState, { now, ...hints })) {
+        return;
+      }
+      if (mp.session.transport.getBufferedAmount() > 16_384) {
+        return;
+      }
+    }
+    const prev = syncState.lastSent;
+    const aimMoved = !prev || Math.hypot(inp.aimX - prev.aimX, inp.aimY - prev.aimY) >= 1;
+    syncState.lastSent = inp;
+    syncState.lastSentAt = now;
+    if (force || aimMoved) {
+      syncState.lastAimSentAt = now;
+    }
     mp.session.transport.send({
       type: 'player_input',
-      input: eng.getLocalInputSnapshot(seqsRef.current),
+      input: inp,
     });
   };
 
@@ -132,7 +167,8 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
     sfx.prepareGunshot();
     recordSavedRef.current = false;
     matchEndedSentRef.current = false;
-    seqsRef.current = { clickSeq: 0, reloadSeq: 0, swapSeq: 0, pickupSeq: 0 };
+    seqsRef.current = { clickSeq: 0, reloadSeq: 0, swapSeq: 0, pickupSeq: 0, dropSeq: 0 };
+    clientSyncStateRef.current = { lastSent: null, lastSentAt: 0, lastAimSentAt: 0 };
 
     const mp = multiplayerRef.current;
     const mpConfig: MultiplayerEngineConfig | undefined = mp
@@ -166,11 +202,22 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
     engineRef.current = engine;
 
     const resize = () => {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
+      const stage = stageRef.current;
+      const rect = stage?.getBoundingClientRect();
+      const w = rect && rect.width > 0 ? Math.round(rect.width) : Math.round(Math.min(window.innerWidth, (window.innerHeight * 4) / 3));
+      const h = rect && rect.height > 0 ? Math.round(rect.height) : Math.round(Math.min(window.innerHeight, (window.innerWidth * 3) / 4));
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
     };
     resize();
+    engine.setMousePos(canvas.width / 2, canvas.height / 2);
     window.addEventListener('resize', resize);
+    const resizeObserver = stageRef.current ? new ResizeObserver(resize) : null;
+    if (resizeObserver && stageRef.current) {
+      resizeObserver.observe(stageRef.current);
+    }
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (engine.status === 'VICTORY' || engine.status === 'GAME_OVER') return;
@@ -186,10 +233,21 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       }
       engineRef.current?.setKey(norm, true);
       if (mp && !mp.session.isHost && !e.repeat) {
-        if (norm === 'KeyR') seqsRef.current.reloadSeq += 1;
-        else if (norm === 'KeyQ') seqsRef.current.swapSeq += 1;
-        else if (norm === 'Space') seqsRef.current.pickupSeq += 1;
-        sendClientInputNow();
+        let isAction = false;
+        if (norm === 'KeyR') {
+          seqsRef.current.reloadSeq += 1;
+          isAction = true;
+        } else if (norm === 'KeyQ') {
+          seqsRef.current.swapSeq += 1;
+          isAction = true;
+        } else if (norm === 'Space') {
+          seqsRef.current.pickupSeq += 1;
+          isAction = true;
+        } else if (norm === 'Escape') {
+          seqsRef.current.dropSeq += 1;
+          isAction = true;
+        }
+        sendClientInputIfNeeded(isAction);
       }
     };
 
@@ -202,15 +260,36 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       }
       const norm = normalizeControlCode(e);
       engineRef.current?.setKey(norm, false);
+      if (mp && !mp.session.isHost) {
+        sendClientInputIfNeeded(false);
+      }
+    };
+
+    const onWindowMouseMove = (e: MouseEvent) => {
+      syncMouseFromClient(e.clientX, e.clientY);
+    };
+
+    const onWindowMouseUp = (e: MouseEvent) => {
+      if (e.button === 0) {
+        engineRef.current?.setMouseDown(false);
+        if (mp && !mp.session.isHost) {
+          sendClientInputIfNeeded(true);
+        }
+      }
     };
 
     const onBlur = () => {
       setTabHeld(false);
       engineRef.current?.clearInputs();
+      if (mp && !mp.session.isHost) {
+        sendClientInputIfNeeded(true);
+      }
     };
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('mousemove', onWindowMouseMove);
+    window.addEventListener('mouseup', onWindowMouseUp);
     window.addEventListener('blur', onBlur);
 
     let offMpMsg: (() => void) | null = null;
@@ -239,25 +318,23 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       });
 
       if (isHost) {
+        let lastHostSnapAt = performance.now();
         transport.send({ type: 'world_snapshot', snapshot: engine.exportWorldSnapshot() });
         mpTickTimer = window.setInterval(() => {
           if (engine.status === 'PLAYING' || engine.status === 'RESPAWNING' || engine.status === 'PAUSED') {
-            transport.send({ type: 'world_snapshot', snapshot: engine.exportWorldSnapshot() });
+            const now = performance.now();
+            const { intervalMs, hasEvents } = engine.getRecommendedSnapshotIntervalMs();
+            if (now - lastHostSnapAt >= intervalMs && (hasEvents || transport.getBufferedAmount() <= 16_384)) {
+              lastHostSnapAt = now;
+              transport.send({ type: 'world_snapshot', snapshot: engine.exportWorldSnapshot() });
+            }
           }
-        }, 50);
+        }, 25);
       } else {
-        let lastSentJson = '';
-        let lastSentAt = 0;
+        sendClientInputIfNeeded(true);
         mpTickTimer = window.setInterval(() => {
-          const inp = engine.getLocalInputSnapshot(seqsRef.current);
-          const json = JSON.stringify(inp);
-          const now = performance.now();
-          if (json !== lastSentJson || now - lastSentAt >= 400) {
-            lastSentJson = json;
-            lastSentAt = now;
-            transport.send({ type: 'player_input', input: inp });
-          }
-        }, 40);
+          sendClientInputIfNeeded(false);
+        }, 50);
       }
 
       mpRttTimer = window.setInterval(() => {
@@ -289,9 +366,12 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       offMpMsg?.();
       offMpClose?.();
       engine.clearInputs();
+      resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('mousemove', onWindowMouseMove);
+      window.removeEventListener('mouseup', onWindowMouseUp);
       window.removeEventListener('blur', onBlur);
     };
   }, [faction, characterSkin, mapId, aiDifficulty, runSeed, mpRoomKey]);
@@ -358,37 +438,37 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
   const innerDash = innerCirc * (qiPct / 100);
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-[#0B0F17] select-none">
-      <canvas
-        ref={canvasRef}
-        tabIndex={0}
-        className="block w-full h-full cursor-none outline-none"
-        onMouseMove={(e) => engineRef.current?.setMousePos(e.clientX, e.clientY)}
-        onMouseDown={(e) => {
-          canvasRef.current?.focus();
-          if (e.button === 0) {
-            sfx.unlock();
-            engineRef.current?.setMouseDown(true);
-            if (multiplayer && !multiplayer.session.isHost) {
-              seqsRef.current.clickSeq += 1;
-              sendClientInputNow();
-            }
-          }
+    <div className="relative w-screen h-screen overflow-hidden bg-[#05080F] select-none flex items-center justify-center">
+      <div
+        ref={stageRef}
+        className="relative overflow-hidden bg-[#0B0F17] border border-slate-800/90 shadow-[0_0_60px_rgba(0,0,0,0.85)]"
+        style={{
+          width: 'min(100vw, calc(100vh * 4 / 3))',
+          height: 'min(100vh, calc(100vw * 3 / 4))',
         }}
-        onMouseUp={(e) => {
-          if (e.button === 0) {
-            engineRef.current?.setMouseDown(false);
-            if (multiplayer && !multiplayer.session.isHost) {
-              sendClientInputNow();
+      >
+        <canvas
+          ref={canvasRef}
+          tabIndex={0}
+          className="block w-full h-full cursor-none outline-none"
+          onMouseDown={(e) => {
+            canvasRef.current?.focus();
+            syncMouseFromClient(e.clientX, e.clientY);
+            if (e.button === 0) {
+              sfx.unlock();
+              engineRef.current?.setMouseDown(true);
+              if (multiplayer && !multiplayer.session.isHost) {
+                seqsRef.current.clickSeq += 1;
+                sendClientInputIfNeeded(true);
+              }
             }
-          }
-        }}
-        onContextMenu={(e) => e.preventDefault()}
-      />
+          }}
+          onContextMenu={(e) => e.preventDefault()}
+        />
 
       {/* TOP-LEFT HUD: Dual-Ring (HP & Qi) + Right-Side Timed Skill Matrix + Shield Bar */}
       {hud && p && (
-        <div className="pointer-events-none fixed top-3 left-3 flex flex-col items-start gap-2">
+        <div className="pointer-events-none absolute top-3 left-3 flex flex-col items-start gap-2">
           <div className="flex items-start gap-2.5">
             <div className="relative w-[112px] h-[112px] flex items-center justify-center shrink-0">
               <svg viewBox="0 0 112 112" className="w-full h-full -rotate-90 drop-shadow-[0_2px_8px_rgba(0,0,0,0.85)]">
@@ -486,7 +566,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
 
       {/* TOP-CENTER: Transient Combat Banners Only (Keeps Top-Right 100% Clear for Aiming) */}
       {hud && (hud.activeSkillBanner || hud.bannerText) && (
-        <div className="pointer-events-none fixed top-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 w-full max-w-xl px-4">
+        <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 w-full max-w-xl px-4">
           {hud.activeSkillBanner && (
             <div className="bg-slate-950/90 border border-sky-400/70 text-white px-4 py-1.5 rounded-lg text-xs font-bold shadow-lg">
               技能發動：{hud.activeSkillBanner}
@@ -502,7 +582,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
 
       {/* BOTTOM-LEFT: Controls */}
       {hud && p && (
-        <div className="pointer-events-none fixed bottom-3 left-3 flex flex-col items-start gap-2">
+        <div className="pointer-events-none absolute bottom-3 left-3 flex flex-col items-start gap-2">
           <div className="text-[11px] text-slate-200 bg-slate-950/78 px-3 py-1.5 rounded-lg border border-slate-800/90">
             [Q] 切換 · [Esc] 放下武器 · [R] 裝彈 · [Space] 拾取 · [Tab] 遊戲進展
             {(!multiplayer || multiplayer.session.isHost) && ' · [P] 暫停'}
@@ -512,7 +592,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
 
       {/* BOTTOM-RIGHT: Multiplayer Room & Latency Indicator */}
       {multiplayer && (
-        <div className="pointer-events-none fixed bottom-3 right-3 bg-slate-950/80 border border-slate-700/80 rounded-lg px-3 py-1.5 text-[11px] font-mono-num text-sky-300 shadow-lg">
+        <div className="pointer-events-none absolute bottom-3 right-3 bg-slate-950/80 border border-slate-700/80 rounded-lg px-3 py-1.5 text-[11px] font-mono-num text-sky-300 shadow-lg">
           房號 {multiplayer.session.lobby.roomCode} · {multiplayer.session.lobby.players.length} 人 ·{' '}
           {multiplayer.session.isHost ? '房主' : '連線玩家'}
           {mpRttMs !== null ? ` · ${mpRttMs}ms` : ''}
@@ -521,7 +601,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
 
       {/* TOP-RIGHT: Active Weapon (Lower-Left, Larger, Higher Z) + Off-Hand (Upper-Right, Smaller, Lower Z) + Gun Ammo Directly Below */}
       {hud && p && (
-        <div className="pointer-events-none fixed top-3 right-3 flex flex-col items-center">
+        <div className="pointer-events-none absolute top-3 right-3 flex flex-col items-center">
           <div className="relative w-24 h-20">
             {/* Off-hand weapon: upper-right, lower z-index, smaller/thinner */}
             <div className="absolute top-0 right-0 z-0 opacity-65 scale-90">
@@ -622,13 +702,14 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       )}
 
       {hud?.status === 'RESPAWNING' && (
-        <div className="pointer-events-none fixed inset-x-0 top-20 z-20 flex justify-center" role="status">
+        <div className="pointer-events-none absolute inset-x-0 top-20 z-20 flex justify-center" role="status">
           <div className="rounded-xl border border-rose-400/50 bg-slate-950/90 px-6 py-4 text-center shadow-xl">
             <div className="text-lg font-bold text-rose-200">你已倒下</div>
             <div className="mt-1 text-sm tabular-nums text-slate-200">{hud.respawnSeconds} 秒後重返戰場</div>
           </div>
         </div>
       )}
+      </div>
 
       {/* PAUSE MODAL (Triggered via [P]) */}
       {hud?.status === 'PAUSED' && (
