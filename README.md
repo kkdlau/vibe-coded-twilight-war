@@ -29,7 +29,7 @@ npm run build      # 建置靜態網頁 (dist/client/) 與 Worker (dist/twilight
 3. 確認 **Settings > Builds** 建置指令：
    - **Build command**：`npm run build`
    - **Deploy command**：`npx wrangler deploy`（會自動讀取根目錄的 [wrangler.jsonc](wrangler.jsonc)）
-4. 按 **Save and Deploy** 即可完成部署並取得專屬線上網址（例如 `https://twilight-wars.<subdomain>.workers.dev`）。
+4. 按 **Save and Deploy** 即可完成部署並取得專屬線上網址（例如 `https://vibe-coded-twilight-war.<subdomain>.workers.dev`）。
 
 ### 2. 協作者安全權限（無需 Cloudflare 帳號即可開發與 Push）
 
@@ -47,7 +47,7 @@ npm run build      # 建置靜態網頁 (dist/client/) 與 Worker (dist/twilight
 
 ### 設定步驟（在 Cloudflare Dashboard 設定，不經過 Git）
 
-1. 進入 Cloudflare Dashboard → **Workers & Pages** → 點進你的 Worker（`twilight-wars`）。
+1. 進入 Cloudflare Dashboard → **Workers & Pages** → 點進你的 Worker（`vibe-coded-twilight-war`）。
 2. 前往 **Settings** → **Variables and Secrets** → 點 **Add**。
 3. **Type** 選擇 **Secret**（加密變數）。
 4. **Variable name** 填入 `ROOM_PASSCODE`，**Value** 填入只有你與朋友知道的自訂密碼。
