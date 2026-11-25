@@ -36,6 +36,12 @@ npm run build      # 建置靜態網頁 (dist/client/) 與 Worker (dist/twilight
 - 本 Repository **不包含任何 Cloudflare `account_id`、API Token、帳號信箱或硬編碼密碼**（[wrangler.jsonc](wrangler.jsonc) 與 `.github/workflows/ci.yml` 皆為無帳號依賴配置）。
 - 任何擁有 GitHub Repository 寫入權限的朋友／協作者都可以正常開發、commit 並 push 程式碼；Cloudflare Workers Builds 會由帳戶擁有者已連接的 GitHub 整合自動觸發部署，協作者完全不需要擁有或登入你的 Cloudflare 帳號。
 
+### 3. 上游單一來源與自動 Git Mirror 同步（`sync-upstream.yml`）
+
+- 開發請一律推往主倉庫 **`lwclwclwc60/vibe-coded-twilight-war`（`upstream/main`）**；切勿直接對個人 Mirror（`kkdlau/vibe-coded-twilight-war`）額外提交未合併的改動。
+- 個人 Mirror 倉庫透過 [.github/workflows/sync-upstream.yml](.github/workflows/sync-upstream.yml) 每 15 分鐘（或於 GitHub Actions 手動點擊 **Run workflow**）自動向 `upstream/main` 執行 Fast-forward 同步並觸發 Cloudflare Workers Builds 自動部署。
+- *注意*：若上游有直接修改 `.github/workflows/` 目錄下的檔案，受限於 GitHub Actions 內建 `GITHUB_TOKEN` 預設不具備 `workflow` 寫入權限，該次變更需於本機補跑一次 `git push origin main`。
+
 ---
 
 ## 設定私人房間通行密碼（`ROOM_PASSCODE`）

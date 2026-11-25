@@ -1,0 +1,31 @@
+name: Sync Upstream Mirror
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.repository == 'kkdlau/vibe-coded-twilight-war'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout mirror repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync fast-forward from upstream main
+        run: |
+          git remote add upstream https://github.com/lwclwclwc60/vibe-coded-twilight-war.git
+          git fetch upstream main
+          LOCAL_SHA=$(git rev-parse HEAD)
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          if [ "$LOCAL_SHA" = "$UPSTREAM_SHA" ]; then
+            echo "Mirror is already up to date with upstream ($UPSTREAM_SHA)."
+            exit 0
+          fi
+          git push origin upstream/main:refs/heads/main
