@@ -286,6 +286,8 @@ export class TwilightEngine {
   private snapshotSeq = 0;
   private lastReputationSnapshotSeq = 0;
   private appliedReputationChanges: Record<FactionId, number> = { royal: 0, shadow: 0, mercenary: 0 };
+  private spectatorMode: 'follow' | 'free' = 'follow';
+  private spectatorTargetId: string | null = null;
   private lastExportedPickupsSig = '';
   private lastExportedIceSig = '';
   private hasEmittedClientHud = false;
@@ -695,7 +697,8 @@ export class TwilightEngine {
         (p.faction !== 'mercenary' &&
           units.some((u) => u.faction === p.faction));
       this.status = hostSideSurvived ? 'VICTORY' : 'GAME_OVER';
-      if (this.status === 'VICTORY') sfx.levelUp();
+      if (this.status === 'VICTORY') sfx.victory();
+      else sfx.defeat();
       this.clearInputs();
       this.emitHud();
       return;
@@ -706,7 +709,7 @@ export class TwilightEngine {
         this.deploymentQueue.royal + this.deploymentQueue.shadow + this.deploymentQueue.mercenary;
       if (this.enemies.length === 0 && queuedLeft === 0) {
         this.status = 'VICTORY';
-        sfx.levelUp();
+        sfx.victory();
         this.clearInputs();
         this.emitHud();
       }
@@ -716,7 +719,7 @@ export class TwilightEngine {
       const queuedHostiles = this.deploymentQueue[others[0]] + this.deploymentQueue[others[1]];
       if (activeHostiles === 0 && queuedHostiles === 0) {
         this.status = 'VICTORY';
-        sfx.levelUp();
+        sfx.victory();
         this.clearInputs();
         this.emitHud();
       }
@@ -1370,9 +1373,17 @@ export class TwilightEngine {
   }
 
   public setKey(code: string, pressed: boolean) {
+    if (this.status === 'VICTORY' || this.status === 'GAME_OVER') {
+      if (!pressed) this.keys.delete(code);
+      return;
+    }
     if (pressed) {
       if (!this.keys.has(code)) {
         this.keys.add(code);
+        if (this.isSpectating() && code === 'Space') {
+          this.cycleSpectatorTarget();
+          return;
+        }
         this.handleKeyDownOnce(code);
       }
     } else {
@@ -1433,6 +1444,17 @@ export class TwilightEngine {
   }
 
   public setMouseDown(down: boolean) {
+    if (this.status === 'VICTORY' || this.status === 'GAME_OVER') {
+      this.mouseDown = false;
+      return;
+    }
+    if (this.isSpectating()) {
+      if (down && !this.mouseDown) {
+        this.cycleSpectatorTarget();
+      }
+      this.mouseDown = down;
+      return;
+    }
     if (this.multiplayer?.role === 'client') {
       this.mouseDown = this.status === 'PLAYING' ? down : false;
       return;
@@ -2613,9 +2635,11 @@ export class TwilightEngine {
         this.checkVictoryCondition();
       } else {
         this.status = 'GAME_OVER';
+        sfx.defeat();
       }
     } else {
       this.status = 'GAME_OVER';
+      sfx.defeat();
     }
     this.emitHud();
   }
@@ -3250,6 +3274,10 @@ export class TwilightEngine {
       this.updateClientView(dt, canvasWidth, canvasHeight);
       return;
     }
+    if (this.status === 'VICTORY' || this.status === 'GAME_OVER') {
+      this.updatePostMatchVisuals(dt);
+      return;
+    }
     if (!this.isBattleActive()) return;
 
     const respawningAtFrameStart = this.status === 'RESPAWNING';
@@ -3379,8 +3407,11 @@ export class TwilightEngine {
 
     if (respawningAtFrameStart) {
       this.respawnTimer = Math.max(0, this.respawnTimer - dt);
-      if (this.respawnTimer === 0) this.respawnPlayer();
-    } else if (this.status === 'PLAYING') {
+      if (this.respawnTimer === 0) {
+        this.respawnPlayer();
+      }
+    }
+    if (this.status === 'PLAYING' || this.status === 'RESPAWNING') {
       this.updateCamera(dt);
     }
 
@@ -3391,6 +3422,153 @@ export class TwilightEngine {
     }
   }
 
+  private updatePostMatchVisuals(dt: number) {
+    this.time += dt;
+    if (this.skillTraces.length > 0) {
+      this.skillTraces = this.skillTraces.filter((trace) => this.time - trace.startedAt < trace.duration);
+    }
+    if (this.bannerTimer > 0) this.bannerTimer = Math.max(0, this.bannerTimer - dt);
+    if (this.activeSkillBannerTimer > 0) this.activeSkillBannerTimer = Math.max(0, this.activeSkillBannerTimer - dt);
+    if (this.camera.shake > 0) this.camera.shake = Math.max(0, this.camera.shake - dt * 26);
+
+    // Let in-progress reloads and weapon animations finish cleanly without accepting new player or AI actions.
+    const p = this.player;
+    if (p.hp > 0) {
+      this.updateReloads(dt);
+      p.gunfireTimer = Math.max(0, p.gunfireTimer - dt);
+      p.swapTimer = Math.max(0, p.swapTimer - dt);
+      p.attackAnimTimer = Math.max(0, p.attackAnimTimer - dt);
+      if (p.attackAnimTimer === 0) p.attackAnimKind = null;
+      this.updateActorSkillVisuals(p, dt);
+      if (p.chargeReady) this.emitChargeReadyParticles(p, dt);
+    }
+    for (const enemy of this.enemies) {
+      enemy.gunfireTimer = Math.max(0, enemy.gunfireTimer - dt);
+      enemy.swapTimer = Math.max(0, enemy.swapTimer - dt);
+      enemy.attackAnimTimer = Math.max(0, enemy.attackAnimTimer - dt);
+      if (enemy.attackAnimTimer === 0) enemy.attackAnimKind = null;
+      enemy.hitFlash = Math.max(0, enemy.hitFlash - dt);
+      const w = enemy.weapons[enemy.activeHand];
+      if (w.type === 'gun' && w.reloadTimer > 0) {
+        w.reloadTimer = Math.max(0, w.reloadTimer - dt);
+        if (w.reloadTimer === 0) {
+          w.ammoInMag = w.def.magSize;
+        }
+      }
+      this.updateActorSkillVisuals(enemy, dt);
+      if (enemy.hp > 0 && enemy.chargeReady) this.emitChargeReadyParticles(enemy, dt);
+    }
+
+    // Keep projectiles (Black Dragon Wave, Light Orbs) moving and bouncing visually, with ZERO damage.
+    this.updateProjectiles(dt, false);
+
+    this.beams = this.beams.filter((b) => {
+      b.life -= dt;
+      return b.life > 0;
+    });
+    const iceVents = this.map.iceVents;
+    if (iceVents && iceVents.length > 0) {
+      for (const iv of iceVents) {
+        if (Math.random() < dt * 7.5 && this.particles.length < 220) {
+          const vx = (iv.gx + 0.5) * TILE + (Math.random() - 0.5) * 14;
+          const vy = (iv.gy + 0.5) * TILE + (Math.random() - 0.5) * 10;
+          const ang = -Math.PI / 2 + (Math.random() - 0.5) * 1.6;
+          const spd = 22 + Math.random() * 34;
+          this.particles.push({
+            x: vx,
+            y: vy,
+            vx: Math.cos(ang) * spd,
+            vy: Math.sin(ang) * spd,
+            size: 2.2 + Math.random() * 2.8,
+            color: Math.random() < 0.5 ? '#E0F2FE' : '#7DD3FC',
+            life: 0.45 + Math.random() * 0.35,
+            maxLife: 0.8,
+          });
+        }
+      }
+    }
+    const campfires = this.map.campfires;
+    if (campfires && campfires.length > 0) {
+      for (const cf of campfires) {
+        if (Math.random() < dt * 6.5 && this.particles.length < 220) {
+          const fx = (cf.gx + 0.5) * TILE + (Math.random() - 0.5) * 10;
+          const fy = (cf.gy + 0.5) * TILE + (Math.random() - 0.5) * 8;
+          this.particles.push({
+            x: fx,
+            y: fy,
+            vx: (Math.random() - 0.5) * 16,
+            vy: -(24 + Math.random() * 28),
+            size: 1.8 + Math.random() * 2.2,
+            color: Math.random() < 0.5 ? '#FBBF24' : '#F97316',
+            life: 0.4 + Math.random() * 0.3,
+            maxLife: 0.7,
+          });
+        }
+      }
+    }
+    this.slashes = this.slashes.filter((s) => {
+      s.life -= dt;
+      return s.life > 0;
+    });
+    this.particles = this.particles.filter((pt) => {
+      pt.x += pt.vx * dt;
+      pt.y += pt.vy * dt;
+      pt.vx *= 0.92;
+      pt.vy *= 0.92;
+      pt.life -= dt;
+      return pt.life > 0;
+    });
+    this.floatingTexts = this.floatingTexts.filter((ft) => {
+      ft.y += ft.vy * dt;
+      ft.life -= dt;
+      return ft.life > 0;
+    });
+    for (const pk of this.pickups) {
+      pk.bobPhase += dt * 4;
+    }
+
+    this.hudEmitTimer += dt;
+    if (this.hudEmitTimer >= 0.12) {
+      this.hudEmitTimer = 0;
+      this.emitHud();
+    }
+  }
+
+  private isSpectating(): boolean {
+    return this.status === 'RESPAWNING' || (this.status === 'PLAYING' && this.player.hp <= 0);
+  }
+
+  private getSpectatorCandidates(): EnemyEntity[] {
+    const alive = this.enemies.filter((e) => e.hp > 0);
+    const myFaction = this.player.faction;
+    return alive.sort((a, b) => {
+      const rank = (e: EnemyEntity) => {
+        const sameFac = myFaction !== 'mercenary' && e.faction === myFaction;
+        if (e.isHumanPlayer && sameFac) return 0;
+        if (e.isHumanPlayer) return 1;
+        if (sameFac) return 2;
+        return 3;
+      };
+      const diff = rank(a) - rank(b);
+      return diff !== 0 ? diff : a.id.localeCompare(b.id);
+    });
+  }
+
+  public cycleSpectatorTarget() {
+    const candidates = this.getSpectatorCandidates();
+    this.spectatorMode = 'follow';
+    if (candidates.length === 0) {
+      this.spectatorTargetId = null;
+      return;
+    }
+    const idx = this.spectatorTargetId
+      ? candidates.findIndex((c) => c.id === this.spectatorTargetId)
+      : -1;
+    const next = candidates[(idx + 1) % candidates.length];
+    this.spectatorTargetId = next.id;
+    this.emitHud();
+  }
+
   private getBaseZoom(canvasWidth = this.viewport.width, canvasHeight = this.viewport.height): number {
     return Math.max(canvasWidth / (VIEWPORT_TILES_X * TILE), canvasHeight / (VIEWPORT_TILES_Y * TILE));
   }
@@ -3398,6 +3576,50 @@ export class TwilightEngine {
   private updateCamera(dt: number) {
     const { width: canvasWidth, height: canvasHeight } = this.viewport;
     const p = this.player;
+
+    if (this.isSpectating()) {
+      const mv = this.getMoveVector();
+      const moveLen = Math.hypot(mv.x, mv.y);
+      if (moveLen > 0.05) {
+        if (this.spectatorMode !== 'free') {
+          this.spectatorMode = 'free';
+          this.emitHud();
+        }
+        const panSpeed = 420;
+        const nextCam = this.clampCameraToMap(
+          this.camera.x + (mv.x / Math.max(1, moveLen)) * panSpeed * dt,
+          this.camera.y + (mv.y / Math.max(1, moveLen)) * panSpeed * dt,
+          canvasWidth,
+          canvasHeight
+        );
+        this.camera.x = nextCam.x;
+        this.camera.y = nextCam.y;
+        return;
+      }
+
+      if (this.spectatorMode === 'follow') {
+        const candidates = this.getSpectatorCandidates();
+        let target = this.spectatorTargetId
+          ? candidates.find((c) => c.id === this.spectatorTargetId) ?? null
+          : null;
+        if (!target && candidates.length > 0) {
+          target = candidates[0];
+          this.spectatorTargetId = target.id;
+        }
+        if (target) {
+          const desired = this.clampCameraToMap(target.x, target.y, canvasWidth, canvasHeight);
+          const blend = Math.min(1, dt * 8);
+          this.camera.x += (desired.x - this.camera.x) * blend;
+          this.camera.y += (desired.y - this.camera.y) * blend;
+          return;
+        }
+      }
+      return;
+    }
+
+    // Player is alive: reset spectator state and strictly center on player (with Eagle Eye lookahead if active)
+    this.spectatorMode = 'follow';
+    this.spectatorTargetId = null;
     let targetLookX = 0;
     let targetLookY = 0;
 
@@ -4852,7 +5074,7 @@ export class TwilightEngine {
     return false;
   }
 
-  private updateProjectiles(dt: number) {
+  private updateProjectiles(dt: number, dealDamage = true) {
     const p = this.player;
     const nextProjectiles: Projectile[] = [];
 
@@ -4927,8 +5149,8 @@ export class TwilightEngine {
             if (segs.length > 18) segs.pop();
           }
 
-          // 龍頭傷 20、龍身傷 15（絕不傷隊友）
-          if (p.hp > 0 && proj.ownerId !== 'player' && areHostile(proj.ownerFaction, proj.ownerId, p.faction, 'player')) {
+          // 龍頭傷 20、龍身傷 15（絕不傷隊友；結算後只保留動畫與反彈，不造成傷害）
+          if (dealDamage && p.hp > 0 && proj.ownerId !== 'player' && areHostile(proj.ownerFaction, proj.ownerId, p.faction, 'player')) {
             if (!cooldowns['player']) {
               const hitInfo = evaluateBlackDragonHit(proj, segs, prevX, prevY, p.x, p.y, p.radius);
               if (hitInfo) {
@@ -4938,25 +5160,27 @@ export class TwilightEngine {
             }
           }
 
-          for (const e of [...this.enemies]) {
-            if (e.id === proj.ownerId || cooldowns[e.id]) continue;
-            if (!areHostile(proj.ownerFaction, proj.ownerId, e.faction, e.id)) continue;
-            const hitInfo = evaluateBlackDragonHit(proj, segs, prevX, prevY, e.x, e.y, e.radius);
-            if (hitInfo) {
-              cooldowns[e.id] = 0.25;
-              this.damageEnemy(
-                e,
-                hitInfo.hitDmg,
-                true,
-                proj.vx * 0.05,
-                proj.vy * 0.05,
-                false,
-                true,
-                proj.ownerId,
-                proj.ownerFaction,
-                hitInfo.hitOriginX,
-                hitInfo.hitOriginY
-              );
+          if (dealDamage) {
+            for (const e of [...this.enemies]) {
+              if (e.id === proj.ownerId || cooldowns[e.id]) continue;
+              if (!areHostile(proj.ownerFaction, proj.ownerId, e.faction, e.id)) continue;
+              const hitInfo = evaluateBlackDragonHit(proj, segs, prevX, prevY, e.x, e.y, e.radius);
+              if (hitInfo) {
+                cooldowns[e.id] = 0.25;
+                this.damageEnemy(
+                  e,
+                  hitInfo.hitDmg,
+                  true,
+                  proj.vx * 0.05,
+                  proj.vy * 0.05,
+                  false,
+                  true,
+                  proj.ownerId,
+                  proj.ownerFaction,
+                  hitInfo.hitOriginX,
+                  hitInfo.hitOriginY
+                );
+              }
             }
           }
         }
@@ -5004,6 +5228,7 @@ export class TwilightEngine {
         }
 
         const canHitPlayer =
+          dealDamage &&
           p.hp > 0 && proj.ownerId !== 'player' &&
           !proj.hitIds.has('player') &&
           (!proj.noFriendlyFire || areHostile(proj.ownerFaction, proj.ownerId, p.faction, 'player'));
@@ -5022,40 +5247,42 @@ export class TwilightEngine {
           }
         }
 
-        for (const e of [...this.enemies]) {
-          if (e.id === proj.ownerId || proj.hitIds.has(e.id)) continue;
-          if (e.elevation - proj.minTraversedElevation >= 2.0) continue;
+        if (dealDamage) {
+          for (const e of [...this.enemies]) {
+            if (e.id === proj.ownerId || proj.hitIds.has(e.id)) continue;
+            if (e.elevation - proj.minTraversedElevation >= 2.0) continue;
 
-          const hit = segmentCircleHit(
-            proj.prevX,
-            proj.prevY,
-            proj.x,
-            proj.y,
-            e.x,
-            e.y,
-            e.radius + proj.radius * 0.6
-          );
-          if (hit.hit) {
-            proj.hitIds.add(e.id);
-            this.damageEnemy(
-              e,
-              proj.damage,
-              false,
-              proj.vx * 0.04,
-              proj.vy * 0.04,
-              false,
-              Boolean(proj.noFriendlyFire),
-              proj.ownerId,
-              proj.ownerFaction,
+            const hit = segmentCircleHit(
               proj.prevX,
-              proj.prevY
+              proj.prevY,
+              proj.x,
+              proj.y,
+              e.x,
+              e.y,
+              e.radius + proj.radius * 0.6
             );
+            if (hit.hit) {
+              proj.hitIds.add(e.id);
+              this.damageEnemy(
+                e,
+                proj.damage,
+                false,
+                proj.vx * 0.04,
+                proj.vy * 0.04,
+                false,
+                Boolean(proj.noFriendlyFire),
+                proj.ownerId,
+                proj.ownerFaction,
+                proj.prevX,
+                proj.prevY
+              );
 
-            if (proj.pierce > 0) {
-              proj.pierce -= 1;
-            } else {
-              destroyed = true;
-              break;
+              if (proj.pierce > 0) {
+                proj.pierce -= 1;
+              } else {
+                destroyed = true;
+                break;
+              }
             }
           }
         }
@@ -6624,8 +6851,10 @@ export class TwilightEngine {
             (a) => a.faction === localActor.faction && (a.hp > 0 || (a.lives ?? 0) > 0)
           ));
       const nextStatus = clientWon ? 'VICTORY' : 'GAME_OVER';
-      if (this.status !== nextStatus && nextStatus === 'VICTORY') {
-        sfx.levelUp();
+      if (this.status !== nextStatus) {
+        if (nextStatus === 'VICTORY') sfx.victory();
+        else sfx.defeat();
+        this.clearInputs();
       }
       this.status = nextStatus;
     } else if (localActor.hp <= 0 && (localActor.lives ?? 0) > 0) {
@@ -6794,7 +7023,7 @@ export class TwilightEngine {
       if (e.hp > 0 && e.chargeReady) this.emitChargeReadyParticles(e, dt);
     }
 
-    if (this.status === 'PLAYING') {
+    if (this.status === 'PLAYING' || this.status === 'RESPAWNING') {
       this.updateCamera(dt);
     }
     this.hudEmitTimer += dt;
@@ -6861,6 +7090,15 @@ export class TwilightEngine {
       mapName: this.map.name,
       status: this.status,
       respawnSeconds: Math.ceil(this.respawnTimer),
+      spectating: this.isSpectating()
+        ? {
+            mode: this.spectatorMode,
+            targetName:
+              this.spectatorMode === 'follow' && this.spectatorTargetId
+                ? this.enemies.find((e) => e.id === this.spectatorTargetId && e.hp > 0)?.name ?? null
+                : null,
+          }
+        : null,
       enemiesRemaining: hostiles.length + (p.faction === 'mercenary'
         ? this.deploymentQueue.royal + this.deploymentQueue.shadow + this.deploymentQueue.mercenary
         : (['royal', 'shadow', 'mercenary'] as FactionId[])

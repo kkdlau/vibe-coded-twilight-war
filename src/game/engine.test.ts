@@ -4760,5 +4760,159 @@ describe('Multiplayer same-faction friendly-fire symmetry (Host <-> Client <-> C
   });
 });
 
+describe('Dead-player spectator camera and non-freezing post-match epilogue', () => {
+  it('tracks living combatants when dead, cycles targets on Space/Click, and allows WASD free-cam panning', () => {
+    const { engine } = createTestEngine('shadow', 'industrial_warehouse', 100);
+    const aliveA = engine.enemies[0];
+    const aliveB = engine.enemies[1];
+    expect(aliveA).toBeDefined();
+    expect(aliveB).toBeDefined();
+
+    engine.enemies = [aliveA, aliveB];
+    aliveA.hp = 100;
+    aliveA.x = 12 * TILE;
+    aliveA.y = 10 * TILE;
+    aliveB.hp = 100;
+    aliveB.x = 20 * TILE;
+    aliveB.y = 10 * TILE;
+
+    // Kill player into RESPAWNING at far left
+    const priv = engine as unknown as {
+      respawnTimer: number;
+      camera: { x: number; y: number; zoom: number; shake: number };
+    };
+    engine.player.x = 4 * TILE;
+    engine.player.y = 10 * TILE;
+    engine.player.hp = 0;
+    engine.player.lives = 2;
+    engine.status = 'RESPAWNING';
+    priv.respawnTimer = 2.5;
+    priv.camera.x = 8 * TILE;
+    priv.camera.y = 10 * TILE;
+
+    // Camera smoothly follows living target instead of staying frozen at corpse
+    for (let i = 0; i < 20; i++) {
+      engine.update(0.05, 960, 720);
+    }
+    expect(priv.camera.x).toBeGreaterThan(10 * TILE);
+
+    // Pressing WASD switches to free-cam and pans camera smoothly
+    const camXBeforeFree = priv.camera.x;
+    engine.setKey('KeyD', true);
+    for (let i = 0; i < 6; i++) {
+      engine.update(0.05, 960, 720);
+    }
+    engine.setKey('KeyD', false);
+    expect(priv.camera.x).toBeGreaterThan(camXBeforeFree + 40);
+
+    // Pressing Space snaps back to follow mode and cycles target
+    engine.setKey('Space', true);
+    engine.setKey('Space', false);
+    const camAfterSpace = priv.camera.x;
+    for (let i = 0; i < 15; i++) {
+      engine.update(0.05, 960, 720);
+    }
+    expect(priv.camera.x).not.toBe(camAfterSpace);
+  });
+
+  it('plays victory/defeat SFX and keeps animations, reloads, and Black Dragon Wave moving with zero damage on GAME_OVER/VICTORY', () => {
+    const victorySpy = vi.spyOn(sfx, 'victory');
+    const defeatSpy = vi.spyOn(sfx, 'defeat');
+
+    const { engine } = createTestEngine('shadow', 'industrial_warehouse', 100);
+    const target = engine.enemies[0];
+    engine.enemies = [target];
+    target.hp = 100;
+    target.x = 22 * TILE;
+    target.y = 16.5 * TILE;
+
+    // Start an in-progress gun reload on player and spawn a Black Dragon Wave flying straight toward target on open row 16
+    const gun = engine.player.weapons[0];
+    if (gun.type === 'gun') {
+      gun.ammoInMag = 0;
+      gun.reloadTimer = 0.2;
+    }
+    engine.projectiles.push({
+      id: 'epilogue_dragon',
+      x: 20.5 * TILE,
+      y: 16.5 * TILE,
+      prevX: 20.5 * TILE,
+      prevY: 16.5 * TILE,
+      vx: 320,
+      vy: 0,
+      radius: 14,
+      damage: 20,
+      pierce: 99,
+      life: 3.0,
+      maxLife: 3.0,
+      color: '#9333EA',
+      fromPlayer: true,
+      isAlly: true,
+      ownerId: 'player',
+      ownerFaction: 'shadow',
+      isBlackDragon: true,
+      noFriendlyFire: true,
+      startElevation: 0,
+      minTraversedElevation: 0,
+      bouncesLeft: 3,
+      distanceTraveled: 0,
+      maxDistance: 1200,
+      segments: [{ x: 20.5 * TILE, y: 16.5 * TILE }],
+      hitIds: new Set<string>(),
+    });
+
+    // Trigger GAME_OVER via lethal damage on last life -> defeat SFX fires
+    engine.player.lives = 1;
+    engine.player.hp = 10;
+    engine.player.invulnTimer = 0;
+    (engine as unknown as { damagePlayer: (d: number, m: boolean) => void }).damagePlayer(50, false);
+    expect(engine.status).toBe('GAME_OVER');
+    expect(defeatSpy).toHaveBeenCalledTimes(1);
+
+    // Advance post-match frames: time & Black Dragon Wave keep moving, AI stays frozen, and target takes ZERO damage!
+    const dragonBeforeX = engine.projectiles[0].x;
+    const enemyBeforeX = target.x;
+    const enemyBeforeY = target.y;
+    engine.setKey('KeyD', true);
+    for (let i = 0; i < 10; i++) {
+      engine.update(0.05, 960, 720);
+    }
+    engine.setKey('KeyD', false);
+    expect(engine.projectiles[0].distanceTraveled).toBeGreaterThan(100);
+    expect(target.x).toBe(enemyBeforeX);
+    expect(target.y).toBe(enemyBeforeY);
+    expect(target.hp).toBe(100);
+
+    // Also verify VICTORY triggers sfx.victory() and keeps reload/animations running
+    const { engine: winEng } = createTestEngine('shadow', 'industrial_warehouse', 100);
+    winEng.enemies = [];
+    (winEng as unknown as { deploymentQueue: Record<FactionId, number> }).deploymentQueue = {
+      royal: 0,
+      shadow: 0,
+      mercenary: 0,
+    };
+    const winGun = winEng.player.weapons[0];
+    if (winGun.type === 'gun') {
+      winGun.ammoInMag = 0;
+      winGun.reloadTimer = 0.15;
+    }
+    winEng.update(0.05, 960, 720);
+    expect(winEng.status).toBe('VICTORY');
+    expect(victorySpy).toHaveBeenCalledTimes(1);
+
+    // In-progress reload completes during post-match VICTORY epilogue
+    for (let i = 0; i < 5; i++) {
+      winEng.update(0.05, 960, 720);
+    }
+    if (winGun.type === 'gun') {
+      expect(winGun.reloadTimer).toBe(0);
+      expect(winGun.ammoInMag).toBeGreaterThan(0);
+    }
+
+    victorySpy.mockRestore();
+    defeatSpy.mockRestore();
+  });
+});
+
 
 

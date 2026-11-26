@@ -309,6 +309,26 @@ class SoundEngine {
     this.playTone(554, 554, 0.1, 'triangle', 0.12, 0.09);
     this.playTone(659, 880, 0.22, 'triangle', 0.14, 0.18);
   }
+
+  victory() {
+    // Triumphant brass/chime fanfare: C5 -> E5 -> G5 -> C6 + warm major chord swell
+    this.playTone(523.25, 523.25, 0.14, 'triangle', 0.16, 0);
+    this.playTone(659.25, 659.25, 0.14, 'triangle', 0.16, 0.11);
+    this.playTone(783.99, 783.99, 0.16, 'triangle', 0.17, 0.22);
+    this.playTone(1046.5, 1046.5, 0.55, 'triangle', 0.20, 0.34);
+    this.playTone(523.25, 523.25, 0.55, 'sine', 0.12, 0.34);
+    this.playTone(659.25, 659.25, 0.55, 'sine', 0.11, 0.34);
+    this.playTone(783.99, 783.99, 0.55, 'sine', 0.11, 0.34);
+  }
+
+  defeat() {
+    // Dramatic descending minor stinger: G4 -> F4 -> Eb4 -> C4 + low resonant bass drop
+    this.playTone(392.0, 385.0, 0.20, 'triangle', 0.15, 0);
+    this.playTone(349.23, 342.0, 0.20, 'triangle', 0.15, 0.18);
+    this.playTone(311.13, 304.0, 0.24, 'triangle', 0.16, 0.36);
+    this.playTone(261.63, 246.94, 0.65, 'sawtooth', 0.09, 0.56);
+    this.playTone(130.81, 98.0, 0.72, 'sine', 0.18, 0.56);
+  }
 }
 
 export const sfx = new SoundEngine();

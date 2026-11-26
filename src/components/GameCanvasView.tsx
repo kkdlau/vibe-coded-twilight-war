@@ -321,7 +321,13 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
         let lastHostSnapAt = performance.now();
         transport.send({ type: 'world_snapshot', snapshot: engine.exportWorldSnapshot() });
         mpTickTimer = window.setInterval(() => {
-          if (engine.status === 'PLAYING' || engine.status === 'RESPAWNING' || engine.status === 'PAUSED') {
+          if (
+            engine.status === 'PLAYING' ||
+            engine.status === 'RESPAWNING' ||
+            engine.status === 'PAUSED' ||
+            engine.status === 'VICTORY' ||
+            engine.status === 'GAME_OVER'
+          ) {
             const now = performance.now();
             const { intervalMs, hasEvents } = engine.getRecommendedSnapshotIntervalMs();
             if (now - lastHostSnapAt >= intervalMs && (hasEvents || transport.getBufferedAmount() <= 16_384)) {
@@ -701,11 +707,25 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
         </div>
       )}
 
-      {hud?.status === 'RESPAWNING' && (
-        <div className="pointer-events-none absolute inset-x-0 top-20 z-20 flex justify-center" role="status">
-          <div className="rounded-xl border border-rose-400/50 bg-slate-950/90 px-6 py-4 text-center shadow-xl">
-            <div className="text-lg font-bold text-rose-200">你已倒下</div>
-            <div className="mt-1 text-sm tabular-nums text-slate-200">{hud.respawnSeconds} 秒後重返戰場</div>
+      {(hud?.status === 'RESPAWNING' || hud?.spectating) && hud && hud.status !== 'VICTORY' && hud.status !== 'GAME_OVER' && (
+        <div className="pointer-events-none absolute inset-x-0 top-16 z-20 flex justify-center" role="status">
+          <div className="rounded-xl border border-rose-400/50 bg-slate-950/88 px-5 py-3 text-center shadow-xl backdrop-blur-xs">
+            <div className="text-base font-bold text-rose-200">
+              {hud.status === 'RESPAWNING' ? '你已倒下' : '已陣亡淘汰 · 觀戰中'}
+            </div>
+            {hud.status === 'RESPAWNING' && (
+              <div className="mt-0.5 text-sm tabular-nums text-slate-200">{hud.respawnSeconds} 秒後重返戰場</div>
+            )}
+            {hud.spectating && (
+              <div className="mt-1 text-xs text-sky-300">
+                {hud.spectating.mode === 'free'
+                  ? '自由視角（WASD 移動）'
+                  : hud.spectating.targetName
+                    ? `正在追蹤：${hud.spectating.targetName}`
+                    : '觀戰中'}
+                <span className="text-slate-400"> · [WASD] 自由視角 · [左鍵 / Space] 切換追蹤</span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -785,7 +805,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       )}
 
       {outcome && outcomePhase && hud && p && (
-        <div className="match-outcome fixed inset-0 z-40 flex flex-col items-center overflow-y-auto bg-[#080d18]/75 px-4 pb-4 pt-[min(18vh,8rem)]">
+        <div className="match-outcome fixed inset-0 z-40 flex flex-col items-center overflow-y-auto bg-[#080d18]/55 px-4 pb-4 pt-[min(18vh,8rem)]">
           <h2
             role="status"
             className={`match-outcome-title mb-4 text-center text-4xl font-bold tracking-wider sm:text-5xl ${

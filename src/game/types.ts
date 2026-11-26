@@ -515,6 +515,10 @@ export interface HudSnapshot {
   mapName: string;
   status: 'PLAYING' | 'PAUSED' | 'RESPAWNING' | 'GAME_OVER' | 'VICTORY';
   respawnSeconds: number;
+  spectating?: {
+    mode: 'follow' | 'free';
+    targetName: string | null;
+  } | null;
   enemiesRemaining: number;
   totalSoldiersRemaining: number;
   factionRemaining: Record<FactionId, number>;
