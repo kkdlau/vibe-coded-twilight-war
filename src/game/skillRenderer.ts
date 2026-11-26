@@ -104,6 +104,11 @@ function getBlackDragonSprites(): BlackDragonSprites {
   };
 }
 
+// Preload dragon PNG sprites eagerly in browser environments so the very first cast renders immediately.
+if (typeof Image !== 'undefined') {
+  getBlackDragonSprites();
+}
+
 function drawDragonHeadFallback(ctx: CanvasRenderingContext2D, time: number) {
   const sway = Math.sin(time * 10) * 1.8;
   const armor = ctx.createLinearGradient(-22, -16, 22, 16);
