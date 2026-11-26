@@ -61,25 +61,47 @@ function drawSwordLight(ctx: CanvasRenderingContext2D, projectile: Projectile) {
   }
 }
 
-let blackDragonHeadSprite: HTMLImageElement | null = null;
-let blackDragonHeadRequested = false;
+interface BlackDragonSprites {
+  head: HTMLImageElement | null;
+  body: HTMLImageElement | null;
+  tail: HTMLImageElement | null;
+}
 
-function getBlackDragonHeadSprite(): HTMLImageElement | null {
-  if (typeof Image === 'undefined') return null;
-  if (!blackDragonHeadRequested) {
-    blackDragonHeadRequested = true;
+const blackDragonSpriteCache: BlackDragonSprites = {
+  head: null,
+  body: null,
+  tail: null,
+};
+let blackDragonSpritesRequested = false;
+
+function isImageReady(img: HTMLImageElement | null): img is HTMLImageElement {
+  return Boolean(img && img.complete && img.naturalWidth > 0);
+}
+
+function getBlackDragonSprites(): BlackDragonSprites {
+  if (typeof Image === 'undefined') {
+    return { head: null, body: null, tail: null };
+  }
+  if (!blackDragonSpritesRequested) {
+    blackDragonSpritesRequested = true;
     const baseUrl = typeof import.meta !== 'undefined' && import.meta.env?.BASE_URL
       ? import.meta.env.BASE_URL
       : '/';
-    const img = new Image();
-    img.decoding = 'async';
-    img.src = `${baseUrl}assets/vfx/black-dragon-head.png`;
-    blackDragonHeadSprite = img;
+    const load = (file: string) => {
+      const img = new Image();
+      img.decoding = 'async';
+      img.src = `${baseUrl}assets/vfx/${file}`;
+      return img;
+    };
+    blackDragonSpriteCache.head = load('black-dragon-head.png');
+    blackDragonSpriteCache.body = load('black-dragon-body.png');
+    blackDragonSpriteCache.tail = load('black-dragon-tail.png');
   }
-  if (blackDragonHeadSprite && blackDragonHeadSprite.complete && blackDragonHeadSprite.naturalWidth > 0) {
-    return blackDragonHeadSprite;
-  }
-  return null;
+  return {
+    head: isImageReady(blackDragonSpriteCache.head) ? blackDragonSpriteCache.head : null,
+    body: isImageReady(blackDragonSpriteCache.body) ? blackDragonSpriteCache.body : null,
+    tail: isImageReady(blackDragonSpriteCache.tail) ? blackDragonSpriteCache.tail : null,
+  };
 }
 
 function drawDragonHeadFallback(ctx: CanvasRenderingContext2D, time: number) {
@@ -150,204 +172,151 @@ function drawDragonHeadFallback(ctx: CanvasRenderingContext2D, time: number) {
 function drawDragon(ctx: CanvasRenderingContext2D, projectile: Projectile, time: number) {
   const points = [{ x: projectile.x, y: projectile.y }, ...(projectile.segments ?? []).slice(1)];
   const count = points.length;
-  const normals = points.map((point, i) => {
-    const front = points[Math.max(0, i - 1)];
-    const back = points[Math.min(count - 1, i + 1)];
-    const dx = front.x - back.x;
-    const dy = front.y - back.y;
+  const headAngle = Math.atan2(projectile.vy, projectile.vx);
+  const sprites = getBlackDragonSprites();
+
+  // Compute cumulative arc length along the dragon spine (0 = head, totalLen = tail)
+  const arcLens: number[] = [0];
+  for (let i = 1; i < count; i++) {
+    const segLen = Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+    arcLens.push(arcLens[i - 1] + segLen);
+  }
+  const totalLen = arcLens[count - 1] ?? 0;
+
+  const sampleSpine = (dist: number): { x: number; y: number; angle: number; tx: number; ty: number } => {
+    if (count < 2 || totalLen < 0.5) {
+      return {
+        x: projectile.x,
+        y: projectile.y,
+        angle: headAngle,
+        tx: Math.cos(headAngle),
+        ty: Math.sin(headAngle),
+      };
+    }
+    const clamped = clamp(dist, 0, totalLen);
+    let idx = 1;
+    while (idx < count - 1 && arcLens[idx] < clamped) idx++;
+    const pFront = points[idx - 1];
+    const pBack = points[idx];
+    const segStart = arcLens[idx - 1];
+    const segSpan = Math.max(0.001, arcLens[idx] - segStart);
+    const t = clamp((clamped - segStart) / segSpan, 0, 1);
+    const x = pFront.x + (pBack.x - pFront.x) * t;
+    const y = pFront.y + (pBack.y - pFront.y) * t;
+    const dx = pFront.x - pBack.x;
+    const dy = pFront.y - pBack.y;
     const span = Math.hypot(dx, dy);
-    const t = i / Math.max(1, count);
-    const width = 14.5 * (0.14 + 0.86 * (1 - t) ** 0.72);
     if (span < 0.01) {
-      return { x: 0, y: width, tx: 1, ty: 0, width, point };
+      return { x, y, angle: headAngle, tx: Math.cos(headAngle), ty: Math.sin(headAngle) };
     }
-    return {
-      x: (-dy * width) / span,
-      y: (dx * width) / span,
-      tx: dx / span,
-      ty: dy / span,
-      width,
-      point,
-    };
-  });
+    return { x, y, angle: Math.atan2(dy, dx), tx: dx / span, ty: dy / span };
+  };
 
-  if (normals.length >= 2) {
-    // 1. Outer spectral violet-magenta phantom aura ribbon
-    for (const [spread, color] of [
-      [1.48, 'rgba(147, 51, 234, 0.24)'],
-      [1.16, 'rgba(192, 38, 211, 0.32)'],
-    ] as const) {
-      ctx.beginPath();
-      for (let i = 0; i < normals.length; i++) {
-        const edge = normals[i];
-        const wave = 1 + 0.14 * Math.sin(time * 9 - i * 0.9);
-        const x = edge.point.x - edge.x * spread * wave;
-        const y = edge.point.y - edge.y * spread * wave;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      for (let i = normals.length - 1; i >= 0; i--) {
-        const edge = normals[i];
-        const wave = 1 + 0.14 * Math.cos(time * 9 - i * 0.9);
-        ctx.lineTo(edge.point.x + edge.x * spread * wave, edge.point.y + edge.y * spread * wave);
-      }
-      ctx.closePath();
-      ctx.fillStyle = color;
-      ctx.fill();
-    }
-
-    // 2. Sumi-e ink-black calligraphic ribbon with jagged dry-brush flank spikes
+  if (count >= 2 && totalLen > 2) {
+    // 1. Soft spectral violet-magenta phantom aura glow beneath the painted dragon
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     ctx.beginPath();
-    for (let i = 0; i < normals.length; i++) {
-      const edge = normals[i];
-      const jag = i > 0 && i < normals.length - 1
-        ? 0.92 + 0.34 * Math.abs(Math.sin(i * 1.85 - time * 8.5))
-        : 0.95;
-      const x = edge.point.x - edge.x * jag;
-      const y = edge.point.y - edge.y * jag;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < count; i++) {
+      ctx.lineTo(points[i].x, points[i].y);
     }
-    for (let i = normals.length - 1; i >= 0; i--) {
-      const edge = normals[i];
-      const jag = i > 0 && i < normals.length - 1
-        ? 0.92 + 0.34 * Math.abs(Math.cos(i * 1.95 - time * 8.5))
-        : 0.95;
-      ctx.lineTo(edge.point.x + edge.x * jag, edge.point.y + edge.y * jag);
-    }
-    ctx.closePath();
-    ctx.fillStyle = '#09060F';
-    ctx.fill();
+    ctx.strokeStyle = 'rgba(147, 51, 234, 0.22)';
+    ctx.lineWidth = 36;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(192, 38, 211, 0.16)';
+    ctx.lineWidth = 24;
+    ctx.stroke();
+    ctx.restore();
 
-    // Inner obsidian volume + glowing spectral violet energy spine
-    for (const [left, right, color] of [
-      [-0.64, 0.56, '#181026'],
-      [-0.22, 0.22, 'rgba(168, 85, 247, 0.52)'],
-    ] as const) {
-      ctx.beginPath();
-      for (let i = 0; i < normals.length; i++) {
-        const edge = normals[i];
-        const x = edge.point.x + edge.x * left;
-        const y = edge.point.y + edge.y * left;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      for (let i = normals.length - 1; i >= 0; i--) {
-        const edge = normals[i];
-        ctx.lineTo(edge.point.x + edge.x * right, edge.point.y + edge.y * right);
-      }
-      ctx.closePath();
-      ctx.fillStyle = color;
-      ctx.fill();
-    }
-
-    // 3. Swept calligraphic energy chevrons pulsing head-to-tail
-    for (let i = normals.length - 1; i >= 1; i--) {
-      const { x, y, point } = normals[i];
-      const { point: front } = normals[i - 1];
-      const fade = 1 - i / normals.length;
-      const pulse = (0.5 + 0.5 * Math.cos(time * 14 - i * 0.85)) * fade;
-      ctx.fillStyle = `rgba(216, 180, 254, ${0.14 + pulse * 0.48})`;
-      ctx.beginPath();
-      ctx.moveTo(point.x - x * 0.88, point.y - y * 0.88);
-      ctx.lineTo(front.x - x * 0.16, front.y - y * 0.16);
-      ctx.lineTo(point.x + x * 0.88, point.y + y * 0.88);
-      ctx.lineTo(point.x - x * 0.04, point.y - y * 0.04);
-      ctx.closePath();
-      ctx.fill();
-    }
-
-    // 4. Flying dry-brush sumi-e ink splatters flinging off the flanks
-    const splatterCount = Math.min(10, normals.length);
-    for (let s = 1; s < splatterCount; s++) {
-      const idx = Math.min(normals.length - 1, Math.floor((s / splatterCount) * (normals.length - 1)) + 1);
-      const seg = normals[idx];
-      const side = s % 2 === 0 ? 1 : -1;
-      const cycle = (time * 3.4 + s * 0.37) % 1;
-      const offset = 0.95 + cycle * 1.15;
-      const sx = seg.point.x + seg.x * side * offset - seg.tx * cycle * 8;
-      const sy = seg.point.y + seg.y * side * offset - seg.ty * cycle * 8;
-      const r = (1 - cycle) * (2.6 + (s % 3) * 0.9) * (0.45 + 0.55 * (1 - idx / normals.length));
-      if (r < 0.4) continue;
+    if (sprites.body && sprites.tail) {
+      // 2. Painted Dragon Tail Tip (black-dragon-tail.png) at the end of the spine
+      const tailSample = sampleSpine(totalLen);
+      const tailW = 58;
+      const tailH = Math.round(tailW * (sprites.tail.naturalHeight / sprites.tail.naturalWidth));
       ctx.save();
-      ctx.translate(sx, sy);
-      ctx.rotate(Math.atan2(seg.ty, seg.tx));
-      ctx.globalAlpha *= (1 - cycle) * 0.85;
-      ctx.fillStyle = '#09060F';
+      ctx.translate(tailSample.x, tailSample.y);
+      ctx.rotate(tailSample.angle);
+      ctx.drawImage(sprites.tail, -tailW * 0.78, -tailH / 2, tailW, tailH);
+      ctx.restore();
+
+      // 3. Seamless Overlapping Painted Dragon Body Segments (black-dragon-body.png) from tail -> neck
+      const step = 21;
+      const startDist = Math.max(8, totalLen - 12);
+      const bodyAspect = sprites.body.naturalHeight / sprites.body.naturalWidth;
+      for (let dist = startDist; dist >= 6; dist -= step) {
+        const s = sampleSpine(dist);
+        const progressToHead = 1 - clamp(dist / Math.max(1, totalLen), 0, 1);
+        const breathe = 1 + 0.045 * Math.sin(time * 12 - dist * 0.09);
+        const scale = (0.72 + 0.34 * progressToHead) * breathe;
+        const segW = 54 * scale;
+        const segH = segW * bodyAspect;
+        ctx.save();
+        ctx.translate(s.x, s.y);
+        ctx.rotate(s.angle);
+        ctx.drawImage(sprites.body, -segW * 0.5, -segH / 2, segW, segH);
+        ctx.restore();
+      }
+    } else {
+      // Headless / pre-load fallback ribbon
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
       ctx.beginPath();
-      ctx.ellipse(0, 0, r * 1.9, r * 0.72, 0, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < count; i++) {
+        ctx.lineTo(points[i].x, points[i].y);
+      }
+      ctx.strokeStyle = '#09060F';
+      ctx.lineWidth = 22;
+      ctx.stroke();
       ctx.strokeStyle = 'rgba(168, 85, 247, 0.55)';
-      ctx.lineWidth = 0.7;
+      ctx.lineWidth = 6;
       ctx.stroke();
       ctx.restore();
     }
 
-    // 5. Floating crimson will-o'-the-wisp ghost-fire orbs trailing the mid-to-tail body
-    const orbCount = Math.min(5, Math.max(2, Math.floor(normals.length / 2)));
+    // 4. Floating crimson will-o'-the-wisp ghost-fire orbs orbiting the painted body & tail
+    const orbCount = 5;
     for (let k = 0; k < orbCount; k++) {
-      const frac = 0.25 + (k / Math.max(1, orbCount - 1)) * 0.68;
-      const idx = Math.min(normals.length - 1, Math.max(1, Math.floor(frac * (normals.length - 1))));
-      const seg = normals[idx];
+      const dist = totalLen * (0.22 + (k / (orbCount - 1)) * 0.76);
+      const s = sampleSpine(dist);
       const side = k % 2 === 0 ? 1 : -1;
       const bob = Math.sin(time * 7.5 + k * 2.1);
-      const lateral = side * (1.28 + 0.34 * bob);
-      const ox = seg.point.x + seg.x * lateral;
-      const oy = seg.point.y + seg.y * lateral;
-      const orbR = 3.2 + 0.9 * Math.cos(time * 9 + k * 1.7);
+      const lateral = side * (16 + 5 * bob);
+      const ox = s.x - s.ty * lateral;
+      const oy = s.y + s.tx * lateral;
+      const orbR = 3.0 + 0.85 * Math.cos(time * 9 + k * 1.7);
 
-      const halo = ctx.createRadialGradient(ox, oy, 0.5, ox, oy, orbR * 3.1);
+      const halo = ctx.createRadialGradient(ox, oy, 0.5, ox, oy, orbR * 3.0);
       halo.addColorStop(0, 'rgba(254, 240, 138, 0.95)');
-      halo.addColorStop(0.28, 'rgba(244, 63, 94, 0.88)');
-      halo.addColorStop(0.62, 'rgba(192, 38, 211, 0.36)');
+      halo.addColorStop(0.28, 'rgba(244, 63, 94, 0.86)');
+      halo.addColorStop(0.62, 'rgba(192, 38, 211, 0.34)');
       halo.addColorStop(1, 'rgba(147, 51, 234, 0)');
       ctx.fillStyle = halo;
       ctx.beginPath();
-      ctx.arc(ox, oy, orbR * 3.1, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Short teardrop comet wisp trailing backward along the body tangent
-      ctx.fillStyle = 'rgba(244, 63, 94, 0.78)';
-      ctx.beginPath();
-      ctx.moveTo(ox + seg.tx * orbR * 0.9, oy + seg.ty * orbR * 0.9);
-      ctx.lineTo(ox - seg.tx * orbR * 3.2 + seg.ty * orbR * 0.45, oy - seg.ty * orbR * 3.2 - seg.tx * orbR * 0.45);
-      ctx.lineTo(ox - seg.tx * orbR * 3.2 - seg.ty * orbR * 0.45, oy - seg.ty * orbR * 3.2 + seg.tx * orbR * 0.45);
-      ctx.closePath();
+      ctx.arc(ox, oy, orbR * 3.0, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 
-  // 6. Dragon head (Design B Spectral Sumi-e Assassin Dragon)
+  // 5. Painted Dragon Head (black-dragon-head.png)
   ctx.translate(projectile.x, projectile.y);
-  ctx.rotate(Math.atan2(projectile.vy, projectile.vx));
+  ctx.rotate(headAngle);
 
   const pulseGlow = 0.72 + 0.28 * Math.sin(time * 11);
-
-  // Subtle violet-crimson aura behind the skull & horns to fuse with the ink neck
   const neckAura = ctx.createRadialGradient(-4, 0, 2, -4, 0, 32);
-  neckAura.addColorStop(0, `rgba(244, 63, 94, ${0.34 * pulseGlow})`);
-  neckAura.addColorStop(0.5, 'rgba(147, 51, 234, 0.28)');
+  neckAura.addColorStop(0, `rgba(244, 63, 94, ${0.32 * pulseGlow})`);
+  neckAura.addColorStop(0.5, 'rgba(147, 51, 234, 0.26)');
   neckAura.addColorStop(1, 'rgba(147, 51, 234, 0)');
   ctx.fillStyle = neckAura;
   ctx.beginPath();
   ctx.arc(-4, 0, 32, 0, Math.PI * 2);
   ctx.fill();
 
-  // Animated ink-smoke wisps curling off the swept-back horns
-  for (const side of [-1, 1]) {
-    const wispSway = Math.sin(time * 11 + side * 1.4) * 3.2;
-    ctx.fillStyle = 'rgba(15, 10, 24, 0.72)';
-    ctx.beginPath();
-    ctx.moveTo(-10, side * 9);
-    ctx.quadraticCurveTo(-24, side * (16 + wispSway), -39, side * (11 - wispSway * 0.6));
-    ctx.quadraticCurveTo(-25, side * (8 + wispSway * 0.4), -14, side * 4);
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  const headSprite = getBlackDragonHeadSprite();
-  if (headSprite) {
-    ctx.drawImage(headSprite, -36, -19, 62, 38);
+  if (sprites.head) {
+    ctx.drawImage(sprites.head, -36, -19, 62, 38);
 
     // Living crimson pulse over the forehead crescent & eyes
     const runePulse = ctx.createRadialGradient(-3, 0, 0.5, -3, 0, 11);
