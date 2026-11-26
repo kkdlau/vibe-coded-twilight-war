@@ -63,14 +63,18 @@ function drawSwordLight(ctx: CanvasRenderingContext2D, projectile: Projectile) {
 
 interface BlackDragonSprites {
   head: HTMLImageElement | null;
-  body: HTMLImageElement | null;
-  tail: HTMLImageElement | null;
+  bodyFrames: HTMLImageElement[];
+  tailFrames: HTMLImageElement[];
 }
 
-const blackDragonSpriteCache: BlackDragonSprites = {
+const blackDragonSpriteCache: {
+  head: HTMLImageElement | null;
+  body: (HTMLImageElement | null)[];
+  tail: (HTMLImageElement | null)[];
+} = {
   head: null,
-  body: null,
-  tail: null,
+  body: [null, null],
+  tail: [null, null],
 };
 let blackDragonSpritesRequested = false;
 
@@ -80,7 +84,7 @@ function isImageReady(img: HTMLImageElement | null): img is HTMLImageElement {
 
 function getBlackDragonSprites(): BlackDragonSprites {
   if (typeof Image === 'undefined') {
-    return { head: null, body: null, tail: null };
+    return { head: null, bodyFrames: [], tailFrames: [] };
   }
   if (!blackDragonSpritesRequested) {
     blackDragonSpritesRequested = true;
@@ -94,13 +98,13 @@ function getBlackDragonSprites(): BlackDragonSprites {
       return img;
     };
     blackDragonSpriteCache.head = load('black-dragon-head.png');
-    blackDragonSpriteCache.body = load('black-dragon-body.png');
-    blackDragonSpriteCache.tail = load('black-dragon-tail.png');
+    blackDragonSpriteCache.body = [load('black-dragon-body.png'), load('black-dragon-body-2.png')];
+    blackDragonSpriteCache.tail = [load('black-dragon-tail.png'), load('black-dragon-tail-2.png')];
   }
   return {
     head: isImageReady(blackDragonSpriteCache.head) ? blackDragonSpriteCache.head : null,
-    body: isImageReady(blackDragonSpriteCache.body) ? blackDragonSpriteCache.body : null,
-    tail: isImageReady(blackDragonSpriteCache.tail) ? blackDragonSpriteCache.tail : null,
+    bodyFrames: blackDragonSpriteCache.body.filter(isImageReady),
+    tailFrames: blackDragonSpriteCache.tail.filter(isImageReady),
   };
 }
 
@@ -235,32 +239,50 @@ function drawDragon(ctx: CanvasRenderingContext2D, projectile: Projectile, time:
     ctx.stroke();
     ctx.restore();
 
-    if (sprites.body && sprites.tail) {
-      // 2. Painted Dragon Tail Tip (black-dragon-tail.png) at the end of the spine
+    if (sprites.bodyFrames.length > 0 && sprites.tailFrames.length > 0) {
+      // 12fps multi-frame animation cycle (Canvas2D equivalent of animated GIF)
+      const animTick = Math.floor(time * 12);
+
+      // 2. Animated Dragon Tail Tip (4-step whip cycle: straight -> whip down -> straight -> whip up)
       const tailSample = sampleSpine(totalLen);
+      const tailPhase = animTick % 4;
+      const tailImg =
+        sprites.tailFrames.length > 1 && (tailPhase === 1 || tailPhase === 3)
+          ? sprites.tailFrames[1]
+          : sprites.tailFrames[0];
+      const tailFlipY = tailPhase === 3 ? -1 : 1;
       const tailW = 58;
-      const tailH = Math.round(tailW * (sprites.tail.naturalHeight / sprites.tail.naturalWidth));
+      const tailH = Math.round(tailW * (tailImg.naturalHeight / tailImg.naturalWidth));
       ctx.save();
       ctx.translate(tailSample.x, tailSample.y);
       ctx.rotate(tailSample.angle);
-      ctx.drawImage(sprites.tail, -tailW * 0.78, -tailH / 2, tailW, tailH);
+      if (tailFlipY < 0) ctx.scale(1, -1);
+      ctx.drawImage(tailImg, -tailW * 0.78, -tailH / 2, tailW, tailH);
       ctx.restore();
 
-      // 3. Seamless Overlapping Painted Dragon Body Segments (black-dragon-body.png) from tail -> neck
+      // 3. Animated Seamless Overlapping Dragon Body Segments (phase-shifted flame ripple head -> tail)
       const step = 21;
       const startDist = Math.max(8, totalLen - 12);
-      const bodyAspect = sprites.body.naturalHeight / sprites.body.naturalWidth;
-      for (let dist = startDist; dist >= 6; dist -= step) {
+      let segIdx = 0;
+      for (let dist = startDist; dist >= 6; dist -= step, segIdx++) {
         const s = sampleSpine(dist);
         const progressToHead = 1 - clamp(dist / Math.max(1, totalLen), 0, 1);
-        const breathe = 1 + 0.045 * Math.sin(time * 12 - dist * 0.09);
+        const breathe = 1 + 0.05 * Math.sin(time * 13 - dist * 0.1);
         const scale = (0.72 + 0.34 * progressToHead) * breathe;
+        const bodyPhase = (animTick + segIdx) % 4;
+        const bodyImg =
+          sprites.bodyFrames.length > 1 && (bodyPhase === 1 || bodyPhase === 3)
+            ? sprites.bodyFrames[1]
+            : sprites.bodyFrames[0];
+        const bodyFlipY = bodyPhase >= 2 ? -1 : 1;
+        const bodyAspect = bodyImg.naturalHeight / bodyImg.naturalWidth;
         const segW = 54 * scale;
         const segH = segW * bodyAspect;
         ctx.save();
         ctx.translate(s.x, s.y);
         ctx.rotate(s.angle);
-        ctx.drawImage(sprites.body, -segW * 0.5, -segH / 2, segW, segH);
+        if (bodyFlipY < 0) ctx.scale(1, -1);
+        ctx.drawImage(bodyImg, -segW * 0.5, -segH / 2, segW, segH);
         ctx.restore();
       }
     } else {

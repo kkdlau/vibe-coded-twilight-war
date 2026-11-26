@@ -4572,4 +4572,114 @@ describe('Audio balance tuning, knife attack SFX, and full-charge visual particl
   });
 });
 
+describe('Multiplayer same-faction friendly-fire symmetry (Host <-> Client <-> Client)', () => {
+  it('allows remote human clients to hit same-faction Host and same-faction peers with both guns and melee', () => {
+    const engine = new TwilightEngine(
+      'shadow',
+      FACTION_CHARACTERS.shadow[0],
+      'industrial_warehouse',
+      { royal: 0, shadow: 0, mercenary: 0 },
+      () => {},
+      undefined,
+      undefined,
+      'standard',
+      {
+        role: 'host',
+        localPeerId: 'host01',
+        hostPeerId: 'host01',
+        peers: [
+          { peerId: 'host01', name: '房主A', faction: 'shadow', characterSkin: FACTION_CHARACTERS.shadow[0], isHost: true },
+          { peerId: 'peer02', name: '隊友B', faction: 'shadow', characterSkin: FACTION_CHARACTERS.shadow[1], isHost: false },
+          { peerId: 'peer03', name: '隊友C', faction: 'shadow', characterSkin: FACTION_CHARACTERS.shadow[2], isHost: false },
+        ],
+      }
+    );
+
+    const peerB = engine.enemies.find((e) => e.peerId === 'peer02')!;
+    const peerC = engine.enemies.find((e) => e.peerId === 'peer03')!;
+    expect(peerB).toBeDefined();
+    expect(peerC).toBeDefined();
+
+    // Remove AI distractions and place Host A, Client B, Client C on open flat warehouse floor (row 16)
+    engine.enemies = [peerB, peerC];
+    engine.player.x = 20.5 * TILE;
+    engine.player.y = 16.5 * TILE;
+    engine.player.elevation = 0;
+    engine.player.hp = 100;
+    engine.player.invulnTimer = 0;
+
+    peerB.x = 23.5 * TILE;
+    peerB.y = 16.5 * TILE;
+    peerB.elevation = 0;
+    peerB.hp = 100;
+    peerB.invulnTimer = 0;
+    peerB.activeHand = 0;
+    peerB.swapTimer = 0;
+    peerB.attackCooldown = 0;
+
+    peerC.x = 26.0 * TILE;
+    peerC.y = 16.5 * TILE;
+    peerC.elevation = 0;
+    peerC.hp = 100;
+    peerC.invulnTimer = 0;
+
+    // 1. Client B shoots Host A (same faction) with pistol -> bullet MUST hit Host A (50% FF), not pass through!
+    engine.setRemoteInput('peer02', {
+      moveX: 0,
+      moveY: 0,
+      aimX: engine.player.x,
+      aimY: engine.player.y,
+      mouseDown: true,
+      clickSeq: 1,
+      reloadSeq: 0,
+      swapSeq: 0,
+      pickupSeq: 0,
+      dropSeq: 0,
+    });
+    engine.update(0.05, 960, 720);
+    expect(engine.player.hp).toBeLessThan(100);
+
+    // 2. Client B shoots Client C (same faction) with pistol -> bullet MUST hit Client C (50% FF), not pass through!
+    peerB.attackCooldown = 0;
+    engine.setRemoteInput('peer02', {
+      moveX: 0,
+      moveY: 0,
+      aimX: peerC.x,
+      aimY: peerC.y,
+      mouseDown: true,
+      clickSeq: 2,
+      reloadSeq: 0,
+      swapSeq: 0,
+      pickupSeq: 0,
+      dropSeq: 0,
+    });
+    engine.update(0.05, 960, 720);
+    expect(peerC.hp).toBeLessThan(100);
+
+    // 3. Client B swings melee right next to Host A -> MUST hit Host A (50% FF), symmetric with Host hitting Client!
+    engine.player.hp = 100;
+    engine.player.invulnTimer = 0;
+    peerB.x = engine.player.x + 30;
+    peerB.y = engine.player.y;
+    peerB.activeHand = 1;
+    peerB.swapTimer = 0;
+    peerB.attackCooldown = 0;
+    engine.setRemoteInput('peer02', {
+      moveX: 0,
+      moveY: 0,
+      aimX: engine.player.x,
+      aimY: engine.player.y,
+      mouseDown: true,
+      clickSeq: 3,
+      reloadSeq: 0,
+      swapSeq: 0,
+      pickupSeq: 0,
+      dropSeq: 0,
+    });
+    engine.update(0.05, 960, 720);
+    expect(engine.player.hp).toBeLessThan(100);
+  });
+});
+
+
 

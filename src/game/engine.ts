@@ -2466,10 +2466,26 @@ export class TwilightEngine {
     isMeleeAttack: boolean,
     attackerId?: string,
     hitOriginX?: number,
-    hitOriginY?: number
+    hitOriginY?: number,
+    isFriendlyFire = false
   ) {
     const p = this.player;
     if (p.hp <= 0 || p.invulnTimer > 0) return;
+
+    if (isFriendlyFire) {
+      if (rawDmg <= 0) return;
+      const ffDmg = Math.max(1, Math.round(rawDmg));
+      p.hp -= ffDmg;
+      this.spawnText(p.x, p.y - 34, `誤傷友軍 -${ffDmg}`, '#FCA5A5', 0.86, true);
+      p.invulnTimer = 0.2;
+      if (p.hp <= 0) {
+        this.handlePlayerDeath();
+      } else {
+        sfx.playerHurt();
+        this.emitHud();
+      }
+      return;
+    }
 
     if (p.royalShieldTimer > 0 && !isMeleeAttack) {
       this.markShieldImpact(p, hitOriginX, hitOriginY);
@@ -3830,8 +3846,13 @@ export class TwilightEngine {
         | { kind: 'enemy'; enemy: EnemyEntity; t: number; perpDist: number; hitX: number; hitY: number };
 
       const candidates: Candidate[] = [];
+      const allowFriendlyFire = Boolean(e.isHumanPlayer);
 
-      if (p.hp > 0 && areHostile(e.faction, e.id, p.faction, 'player') && p.elevation - e.elevation < 2.0) {
+      if (
+        p.hp > 0 &&
+        (allowFriendlyFire || areHostile(e.faction, e.id, p.faction, 'player')) &&
+        p.elevation - e.elevation < 2.0
+      ) {
         const res = this.getHitscanContact(fullSeg, p);
         if (res.hit && !this.findEarliestWallHit(res.hitX, res.hitY, p.x, p.y)) {
           const hitDist = dist(fullSeg.x1, fullSeg.y1, res.hitX, res.hitY);
@@ -3843,7 +3864,7 @@ export class TwilightEngine {
 
       for (const other of this.enemies) {
         if (other.id === e.id) continue;
-        if (!areHostile(e.faction, e.id, other.faction, other.id)) continue;
+        if (!allowFriendlyFire && !areHostile(e.faction, e.id, other.faction, other.id)) continue;
         if (other.elevation - e.elevation >= 2.0) continue;
         const res = this.getHitscanContact(fullSeg, other);
         if (res.hit && !this.findEarliestWallHit(res.hitX, res.hitY, other.x, other.y)) {
@@ -3868,7 +3889,12 @@ export class TwilightEngine {
         if (target.royalShieldTimer > 0) {
           this.deflectShieldShot(target, firstHit.hitX, firstHit.hitY, a);
         } else if (firstHit.kind === 'player') {
-          this.damagePlayer(scaledDmg, false, e.id, e.x, e.y);
+          const isHostileToPlayer = areHostile(e.faction, e.id, p.faction, 'player');
+          if (isHostileToPlayer) {
+            this.damagePlayer(scaledDmg, false, e.id, e.x, e.y);
+          } else {
+            this.damagePlayer(Math.max(1, Math.round(scaledDmg * 0.5)), false, e.id, e.x, e.y, true);
+          }
         } else {
           this.damageEnemy(
             firstHit.enemy,
@@ -5523,6 +5549,8 @@ export class TwilightEngine {
         }
         if (areHostile(e.faction, e.id, p.faction, 'player')) {
           this.damagePlayer(damage, true, e.id, ox, oy);
+        } else if (!isShieldPush && damage > 0) {
+          this.damagePlayer(Math.max(1, Math.round(damage * 0.5)), true, e.id, ox, oy, true);
         }
       }
     }
