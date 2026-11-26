@@ -4,6 +4,8 @@ import {
   drawCharacter,
   drawCrosshair,
   drawFloatingTexts,
+  drawMeleeChargeAura,
+  drawMeleeChargeSparks,
   drawOutlinedText,
   drawParticles,
   drawPickup,
@@ -1846,7 +1848,7 @@ export class TwilightEngine {
     if (melee.kind === 'shield') {
       sfx.shieldBash();
     } else {
-      sfx.slash(melee.kind === 'greatsword');
+      sfx.slash(melee.kind);
     }
     this.emitNetSfx('melee', p.x, p.y, melee.kind);
     const giantMult = p.giantTimer > 0 ? 1.3 : 1.0;
@@ -2959,6 +2961,27 @@ export class TwilightEngine {
     this.emitHud();
   }
 
+  private emitChargeReadyParticles(
+    actor: { x: number; y: number; radius: number; faction: FactionId },
+    dt: number
+  ) {
+    if (Math.random() >= dt * 15 || this.particles.length >= 240) return;
+    const angle = Math.random() * Math.PI * 2;
+    const spawnDist = actor.radius * (0.75 + Math.random() * 0.45);
+    const factionColor =
+      actor.faction === 'royal' ? '#7DD3FC' : actor.faction === 'shadow' ? '#FB7185' : '#FBBF24';
+    this.particles.push({
+      x: actor.x + Math.cos(angle) * spawnDist,
+      y: actor.y + Math.sin(angle) * spawnDist,
+      vx: Math.cos(angle) * (14 + Math.random() * 24),
+      vy: -22 - Math.random() * 28 + Math.sin(angle) * 10,
+      size: 2 + Math.random() * 2.4,
+      color: Math.random() < 0.6 ? '#FEF08A' : factionColor,
+      life: 0.34 + Math.random() * 0.24,
+      maxLife: 0.58,
+    });
+  }
+
   private updatePlayerQi(dt: number, repSpeedMult: number) {
     const p = this.player;
     if (!this.chargeSessionAllowed) {
@@ -2981,6 +3004,7 @@ export class TwilightEngine {
       p.chargeReady = true;
       sfx.setMeleeCharge(null);
       sfx.meleeReady();
+      this.spawnBurst(p.x, p.y, '#FDE047', 16);
     } else {
       sfx.setMeleeCharge(1 - p.qi / p.maxQi);
     }
@@ -3226,8 +3250,14 @@ export class TwilightEngine {
     }
 
     this.updateEnemies(dt);
-    if (this.player.hp > 0) this.updateActorSkillVisuals(this.player, dt);
-    for (const enemy of this.enemies) this.updateActorSkillVisuals(enemy, dt);
+    if (this.player.hp > 0) {
+      this.updateActorSkillVisuals(this.player, dt);
+      if (this.player.chargeReady) this.emitChargeReadyParticles(this.player, dt);
+    }
+    for (const enemy of this.enemies) {
+      this.updateActorSkillVisuals(enemy, dt);
+      if (enemy.hp > 0 && enemy.chargeReady) this.emitChargeReadyParticles(enemy, dt);
+    }
     if (!this.isBattleActive()) return;
     this.updatePushableIceBlocks(dt);
     if (!this.isBattleActive()) return;
@@ -4366,6 +4396,7 @@ export class TwilightEngine {
         e.qi = Math.max(0, e.qi - QI_RATE.charge * aiRepMult * dt);
         if (e.qi === 0 && e.swapTimer <= 0) {
           e.chargeReady = true;
+          this.spawnBurst(e.x, e.y, '#FDE047', 14);
           const castAng = losTargetPos
             ? Math.atan2(losTargetPos.y - e.y, losTargetPos.x - e.x)
             : e.angle;
@@ -4667,7 +4698,7 @@ export class TwilightEngine {
         const previousStep = Math.floor(e.walkPhase / stepPhase);
         e.walkPhase += enemyMovedDist * 0.085;
         if (Math.floor(e.walkPhase / stepPhase) > previousStep) {
-          sfx.footstep(this.getFootstepSurface(e.x, e.y), this.nearbySoundVolume(e.x, e.y) * 0.30);
+          sfx.footstep(this.getFootstepSurface(e.x, e.y), this.nearbySoundVolume(e.x, e.y) * 0.42);
         }
         e.moveIntensity = Math.min(1, e.moveIntensity + dt * 10);
       } else {
@@ -4706,6 +4737,12 @@ export class TwilightEngine {
               style: meleeKind === 'greatsword' ? 'sweep' : meleeKind === 'claw' ? 'claw' : 'thrust',
             });
           }
+          const mVol = this.nearbySoundVolume(e.x, e.y);
+          if (mVol > 0.05) {
+            if (meleeKind === 'shield') sfx.shieldBash(mVol * 0.75);
+            else sfx.slash(meleeKind, mVol * 0.75);
+          }
+          this.emitNetSfx('melee', e.x, e.y, meleeKind);
           if (targetIsPlayer) {
             if (meleeKind === 'shield') {
               const pushed = this.moveCharacterWithElevation(
@@ -5017,6 +5054,18 @@ export class TwilightEngine {
 
       const skillVisuals = this.getActorSkillVisuals(e);
       this.drawActorSkillEffects(ctx, e, skillVisuals);
+      if (e.chargeReady || e.chargingMelee) {
+        drawMeleeChargeAura(
+          ctx,
+          e.x,
+          e.y,
+          e.baseRadius * skillVisuals.sizeScale,
+          this.time,
+          e.faction,
+          e.chargeReady,
+          clamp(1 - e.qi / e.maxQi, 0, 1)
+        );
+      }
 
       const eActive = e.weapons[e.activeHand];
       const eGun = this.getEnemyGun(e);
@@ -5067,6 +5116,9 @@ export class TwilightEngine {
       if (e.royalShieldTimer > 0) {
         drawRoyalShield(ctx, e, this.time);
       }
+      if (e.chargeReady) {
+        drawMeleeChargeSparks(ctx, e.x, e.y, e.baseRadius * skillVisuals.sizeScale, this.time, e.faction);
+      }
 
       const bw = 40;
       const bx = e.x - bw / 2;
@@ -5111,6 +5163,18 @@ export class TwilightEngine {
 
       const skillVisuals = this.getActorSkillVisuals(p);
       this.drawActorSkillEffects(ctx, p, skillVisuals);
+      if (p.chargeReady || (p.chargingMelee && this.chargeSessionAllowed)) {
+        drawMeleeChargeAura(
+          ctx,
+          p.x,
+          p.y,
+          p.baseRadius * skillVisuals.sizeScale,
+          this.time,
+          p.faction,
+          p.chargeReady,
+          clamp(1 - p.qi / p.maxQi, 0, 1)
+        );
+      }
 
       const weapon = p.weapons[p.activeHand];
       const isReloading = weapon.type === 'gun' && weapon.reloadTimer > 0;
@@ -5151,6 +5215,9 @@ export class TwilightEngine {
 
       if (p.royalShieldTimer > 0) {
         drawRoyalShield(ctx, p, this.time);
+      }
+      if (p.chargeReady) {
+        drawMeleeChargeSparks(ctx, p.x, p.y, p.baseRadius * skillVisuals.sizeScale, this.time, p.faction);
       }
 
       if (isReloading) {
@@ -5637,7 +5704,7 @@ export class TwilightEngine {
         const needed = Math.min(heldWeapon.def.magSize - heldWeapon.ammoInMag, rt.reserveAmmo);
         heldWeapon.ammoInMag += needed;
         rt.reserveAmmo -= needed;
-        this.emitNetSfx('reload', e.x, e.y, heldWeapon.def.kind);
+        this.emitNetSfx('reload', e.x, e.y, heldWeapon.def.kind, true);
       }
     }
 
@@ -5658,7 +5725,10 @@ export class TwilightEngine {
         }
         if (chargeDt > 0) {
           e.qi = Math.max(0, e.qi - QI_RATE.charge * repMult * chargeDt);
-          if (e.qi === 0) e.chargeReady = true;
+          if (e.qi === 0 && !e.chargeReady) {
+            e.chargeReady = true;
+            this.spawnBurst(e.x, e.y, '#FDE047', 16);
+          }
         }
       }
     }
@@ -5705,6 +5775,7 @@ export class TwilightEngine {
       const w = e.weapons[e.activeHand];
       if (w.type === 'gun' && w.reloadTimer <= 0 && w.ammoInMag < w.def.magSize && rt.reserveAmmo > 0) {
         w.reloadTimer = w.def.reloadTime;
+        this.emitNetSfx('reload', e.x, e.y, w.def.kind, false);
       }
     }
 
@@ -5805,6 +5876,7 @@ export class TwilightEngine {
       e.chargeReady = false;
       if (clicked && e.swapTimer <= 0 && activeWeapon.ammoInMag <= 0 && activeWeapon.reloadTimer === 0 && rt.reserveAmmo > 0) {
         activeWeapon.reloadTimer = activeWeapon.def.reloadTime;
+        this.emitNetSfx('reload', e.x, e.y, activeWeapon.def.kind, false);
       } else if (clicked || (inp.mouseDown && activeWeapon.def.kind === 'rifle')) {
         this.remoteHumanFireGun(e, rt, activeWeapon);
       }
@@ -5834,6 +5906,11 @@ export class TwilightEngine {
               isUltimate: false,
               style: melee.kind === 'knife' ? 'thrust' : melee.kind === 'claw' ? 'claw' : 'sweep',
             });
+          }
+          const mVol = this.nearbySoundVolume(e.x, e.y);
+          if (mVol > 0.05) {
+            if (melee.kind === 'shield') sfx.shieldBash(mVol * 0.85);
+            else sfx.slash(melee.kind, mVol * 0.85);
           }
           this.emitNetSfx('melee', e.x, e.y, melee.kind);
           const dmg = Math.round(melee.damage * comboMult * (e.giantTimer > 0 ? 1.3 : 1.0));
@@ -6228,9 +6305,13 @@ export class TwilightEngine {
     p.attackAnimTimer = localActor.atkAnim ?? 0;
     p.attackAnimDuration = localActor.atkDur ?? 0;
     p.attackAnimKind = localActor.atkKind ?? null;
+    const prevChargeReady = p.chargeReady;
     p.chargingMelee = Boolean(localActor.charging);
     this.chargeSessionAllowed = p.chargingMelee;
     p.chargeReady = Boolean(localActor.chargeReady);
+    if (!prevChargeReady && p.chargeReady) {
+      sfx.meleeReady();
+    }
     p.comboEmpowerTimer = localActor.comboEmp ? 1.0 : 0;
     p.royalShieldTimer = localActor.shield ?? 0;
     p.royalShieldImpact = localActor.shieldImp;
@@ -6501,11 +6582,15 @@ export class TwilightEngine {
       } else if (ev.k === 'sfx') {
         const vol = this.nearbySoundVolume(ev.x, ev.y);
         if (ev.kind === 'gun') sfx.gunshot((ev.sub as GunDef['kind']) || 'pistol', Math.max(0.15, vol * 0.6));
-        else if (ev.kind === 'melee') sfx.slash(ev.sub === 'greatsword');
+        else if (ev.kind === 'melee') {
+          const mVol = Math.max(0.25, vol * 0.85);
+          if (ev.sub === 'shield') sfx.shieldBash(mVol);
+          else sfx.slash((ev.sub as MeleeKind) || 'knife', mVol);
+        }
         else if (ev.kind === 'hit') sfx.hit(Boolean(ev.flag));
         else if (ev.kind === 'down') sfx.soldierDown(vol * 0.75);
         else if (ev.kind === 'skill') sfx.ultimate();
-        else if (ev.kind === 'reload') sfx.reload((ev.sub as GunDef['kind']) || 'pistol', 'ready');
+        else if (ev.kind === 'reload') sfx.reload((ev.sub as GunDef['kind']) || 'pistol', ev.flag === false ? 'start' : 'ready');
         else if (ev.kind === 'switch') sfx.switchWeapon(Boolean(ev.flag));
       }
     }
@@ -6609,6 +6694,7 @@ export class TwilightEngine {
       const ptr = this.getWorldPointer();
       p.angle = Math.atan2(ptr.y - p.y, ptr.x - p.x);
       this.updateActorSkillVisuals(p, dt);
+      if (p.chargeReady) this.emitChargeReadyParticles(p, dt);
     }
 
     const remoteAlpha = Math.min(1, dt * 16);
@@ -6635,6 +6721,7 @@ export class TwilightEngine {
         }
       }
       this.updateActorSkillVisuals(e, dt);
+      if (e.hp > 0 && e.chargeReady) this.emitChargeReadyParticles(e, dt);
     }
 
     if (this.status === 'PLAYING') {

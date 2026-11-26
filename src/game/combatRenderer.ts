@@ -527,6 +527,124 @@ export function drawQiRecovery(ctx: CanvasRenderingContext2D, x: number, y: numb
   ctx.restore();
 }
 
+function getFactionChargeColor(faction: 'royal' | 'shadow' | 'mercenary'): { rgb: string; hex: string } {
+  if (faction === 'royal') return { rgb: '56, 189, 248', hex: '#38BDF8' };
+  if (faction === 'shadow') return { rgb: '251, 113, 133', hex: '#FB7185' };
+  return { rgb: '251, 191, 36', hex: '#FBBF24' };
+}
+
+export function drawMeleeChargeAura(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  time: number,
+  faction: 'royal' | 'shadow' | 'mercenary',
+  chargeReady: boolean,
+  chargeProgress = 1
+) {
+  const accent = getFactionChargeColor(faction);
+  ctx.save();
+  ctx.translate(x, y);
+
+  if (chargeReady) {
+    const pulse = 0.5 + 0.5 * Math.sin(time * 8.5);
+    const outerR = radius * (1.72 + pulse * 0.22);
+    const halo = ctx.createRadialGradient(0, 0, radius * 0.72, 0, 0, outerR);
+    halo.addColorStop(0, 'rgba(254, 249, 195, 0.42)');
+    halo.addColorStop(0.45, `rgba(${accent.rgb}, ${0.32 + pulse * 0.14})`);
+    halo.addColorStop(1, 'rgba(251, 191, 36, 0)');
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(0, 0, outerR, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Two staggered expanding shockwave rings so nearby players spot full charge immediately
+    for (const offset of [0, 0.5]) {
+      const phase = (time * 1.55 + offset) % 1;
+      const ringR = radius * (1.05 + phase * 1.1);
+      ctx.globalAlpha = (1 - phase) * 0.85;
+      ctx.strokeStyle = offset === 0 ? '#FEF08A' : accent.hex;
+      ctx.lineWidth = 2.6 - phase * 1.4;
+      ctx.beginPath();
+      ctx.arc(0, 0, ringR, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.globalAlpha = 0.8 + pulse * 0.2;
+    ctx.strokeStyle = '#FDE047';
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(0, 0, radius * 1.18, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    const p = clamp(chargeProgress, 0, 1);
+    const ringR = radius * (1.42 - p * 0.26);
+    ctx.globalAlpha = 0.24 + p * 0.42;
+    ctx.strokeStyle = accent.hex;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(0, 0, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = '#FEF08A';
+    for (let i = 0; i < 4; i++) {
+      const orbPhase = (time * 1.15 + i * 0.25) % 1;
+      const orbDist = radius * (1.8 - orbPhase * 0.78);
+      const ang = i * (Math.PI / 2) + time * 2.2;
+      ctx.globalAlpha = Math.sin(Math.PI * orbPhase) * (0.35 + p * 0.45);
+      ctx.beginPath();
+      ctx.arc(Math.cos(ang) * orbDist, Math.sin(ang) * orbDist, 2.1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  ctx.restore();
+}
+
+export function drawMeleeChargeSparks(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  time: number,
+  faction: 'royal' | 'shadow' | 'mercenary'
+) {
+  const accent = getFactionChargeColor(faction);
+  ctx.save();
+  ctx.translate(x, y);
+
+  for (let i = 0; i < 8; i++) {
+    const baseAngle = (i / 8) * Math.PI * 2 + time * 3.1;
+    const liftPhase = (time * 1.8 + i * 0.125) % 1;
+    const orbitDist = radius * (1.04 + Math.sin(time * 5 + i) * 0.16);
+    const sx = Math.cos(baseAngle) * orbitDist;
+    const sy = Math.sin(baseAngle) * orbitDist * 0.88 - liftPhase * 8;
+    const sparkAlpha = 0.55 + 0.45 * Math.sin(time * 10 + i * 1.3);
+    const isAlt = i % 2 === 1;
+
+    ctx.globalAlpha = sparkAlpha;
+    ctx.fillStyle = isAlt ? accent.hex : '#FEF9C3';
+    ctx.beginPath();
+    ctx.arc(sx, sy, isAlt ? 2.8 : 2.3, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (i % 2 === 0) {
+      const arm = 5.2 + Math.sin(time * 9 + i) * 1.4;
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 1.15;
+      ctx.beginPath();
+      ctx.moveTo(sx - arm, sy);
+      ctx.lineTo(sx + arm, sy);
+      ctx.moveTo(sx, sy - arm);
+      ctx.lineTo(sx, sy + arm);
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
 function drawEagleEyeVisor(ctx: CanvasRenderingContext2D, radius: number, remaining: number) {
   const activation = clamp((EAGLE_EYE_DURATION - remaining) / 0.48, 0, 1);
   const fade = Math.min(1, remaining / 0.45);

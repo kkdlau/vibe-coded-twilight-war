@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { sfx } from '../audio/sfx';
+import { SHOT_MIX, sfx } from '../audio/sfx';
 import {
   FLOOR_TERRAIN_BINDINGS,
   TREE_FOLIAGE_PRESETS,
@@ -4472,6 +4472,103 @@ describe('Multiplayer Host & Client Snapshot Sync', () => {
     client.update(0.05, 960, 720);
     client.setKey('KeyD', false);
     expect(client.player.x).toBeGreaterThan(xBeforeMove + 4);
+  });
+});
+
+describe('Audio balance tuning, knife attack SFX, and full-charge visual particles', () => {
+  it('lowers gunshot mix gains by ~30% and dispatches distinct SFX for knife, greatsword, and shield attacks', () => {
+    for (const kind of ['pistol', 'rifle', 'shotgun', 'sniper'] as const) {
+      expect(SHOT_MIX[kind].gain).toBeGreaterThanOrEqual(0.33);
+      expect(SHOT_MIX[kind].gain).toBeLessThanOrEqual(0.39);
+    }
+
+    const { engine } = createTestEngine('shadow', 'tokyo_shrine', 100);
+    engine.enemies = [];
+    const slashSpy = vi.spyOn(sfx, 'slash');
+    const bashSpy = vi.spyOn(sfx, 'shieldBash');
+
+    engine.player.activeHand = 1;
+    engine.player.swapTimer = 0;
+
+    // 1. Tactical knife attack invokes sfx.slash('knife')
+    engine.player.weapons[1] = { type: 'melee', def: MELEES.find((m) => m.kind === 'knife')!, durability: 0 };
+    engine.player.attackCooldown = 0;
+    engine.setMouseDown(true);
+    engine.setMouseDown(false);
+    expect(slashSpy).toHaveBeenCalledWith('knife');
+
+    // 2. Greatsword attack invokes sfx.slash('greatsword')
+    engine.player.weapons[1] = { type: 'melee', def: MELEES.find((m) => m.kind === 'greatsword')!, durability: 0 };
+    engine.player.attackCooldown = 0;
+    engine.setMouseDown(true);
+    engine.setMouseDown(false);
+    expect(slashSpy).toHaveBeenCalledWith('greatsword');
+
+    // 3. Tactical shield bash invokes sfx.shieldBash()
+    engine.player.weapons[1] = { type: 'melee', def: MELEES.find((m) => m.kind === 'shield')!, durability: 100 };
+    engine.player.attackCooldown = 0;
+    engine.setMouseDown(true);
+    engine.setMouseDown(false);
+    expect(bashSpy).toHaveBeenCalled();
+
+    slashSpy.mockRestore();
+    bashSpy.mockRestore();
+  });
+
+  it('spawns burst and ongoing spark particles when chargeReady is reached on solo/host and multiplayer client', () => {
+    const { engine } = createTestEngine('shadow', 'tokyo_shrine', 100);
+    engine.enemies = [];
+    (engine as unknown as { particles: unknown[] }).particles = [];
+
+    // Charge tactical knife until chargeReady becomes true
+    engine.player.activeHand = 1;
+    engine.player.swapTimer = 0;
+    engine.player.qi = 100;
+    engine.setMouseDown(true);
+    for (let i = 0; i < 60 && !engine.player.chargeReady; i++) {
+      engine.update(0.05, 960, 720);
+    }
+    expect(engine.player.chargeReady).toBe(true);
+    expect((engine as unknown as { particles: unknown[] }).particles.length).toBeGreaterThanOrEqual(16);
+
+    // Clear particles and tick with chargeReady === true -> ongoing spark particles spawn
+    (engine as unknown as { particles: unknown[] }).particles = [];
+    const randSpy = vi.spyOn(Math, 'random').mockReturnValue(0.01);
+    engine.update(0.05, 960, 720);
+    expect((engine as unknown as { particles: unknown[] }).particles.length).toBeGreaterThan(0);
+
+    // Synced multiplayer client with chargeReady=true also emits spark particles and plays meleeReady chime
+    const readySpy = vi.spyOn(sfx, 'meleeReady');
+    const mpClient = new TwilightEngine(
+      'shadow',
+      FACTION_CHARACTERS.shadow[0],
+      'tokyo_shrine',
+      { royal: 0, shadow: 0, mercenary: 0 },
+      () => {},
+      undefined,
+      undefined,
+      'standard',
+      {
+        role: 'client',
+        localPeerId: 'ally02',
+        hostPeerId: 'host01',
+        peers: [
+          { peerId: 'host01', name: '房主', faction: 'royal', characterSkin: FACTION_CHARACTERS.royal[0], isHost: true },
+          { peerId: 'ally02', name: '影客', faction: 'shadow', characterSkin: FACTION_CHARACTERS.shadow[0], isHost: false },
+        ],
+      }
+    );
+    const snap = engine.exportWorldSnapshot();
+    snap.actors[0].peerId = 'ally02';
+    snap.actors[0].chargeReady = true;
+    (mpClient as unknown as { particles: unknown[] }).particles = [];
+    mpClient.applyWorldSnapshot(snap);
+    expect(readySpy).toHaveBeenCalled();
+    mpClient.update(0.05, 960, 720);
+    expect((mpClient as unknown as { particles: unknown[] }).particles.length).toBeGreaterThan(0);
+
+    randSpy.mockRestore();
+    readySpy.mockRestore();
   });
 });
 

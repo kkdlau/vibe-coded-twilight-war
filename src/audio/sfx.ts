@@ -1,4 +1,4 @@
-import type { GunKind } from '../game/types';
+import type { GunKind, MeleeKind } from '../game/types';
 import type { ReloadCue } from '../game/tuning';
 
 export type FootstepSurface = 'hard' | 'soft' | 'wood';
@@ -9,11 +9,11 @@ const FOOTSTEP_MIX: Record<FootstepSurface, { filter: number; duration: number; 
   wood: { filter: 1950, duration: 0.095, thump: 155 },
 };
 
-const SHOT_MIX: Record<GunKind, { rate: number; lowpass: number; gain: number }> = {
-  pistol: { rate: 0.97, lowpass: 7600, gain: 0.48 },
-  rifle: { rate: 0.83, lowpass: 5200, gain: 0.50 },
-  shotgun: { rate: 0.66, lowpass: 4500, gain: 0.55 },
-  sniper: { rate: 0.75, lowpass: 13500, gain: 0.52 },
+export const SHOT_MIX: Record<GunKind, { rate: number; lowpass: number; gain: number }> = {
+  pistol: { rate: 0.97, lowpass: 7600, gain: 0.34 },
+  rifle: { rate: 0.83, lowpass: 5200, gain: 0.35 },
+  shotgun: { rate: 0.66, lowpass: 4500, gain: 0.38 },
+  sniper: { rate: 0.75, lowpass: 13500, gain: 0.36 },
 };
 
 class SoundEngine {
@@ -137,7 +137,7 @@ class SoundEngine {
     void this.gunshotBuffer?.then((buffer) => {
       if (this.muted) return;
       if (!buffer) {
-        this.playNoise(0.15, 0.24 * volume, 3800);
+        this.playNoise(0.15, 0.17 * volume, 3800);
         return;
       }
 
@@ -158,9 +158,9 @@ class SoundEngine {
   footstep(surface: FootstepSurface, volume = 1) {
     if (volume <= 0) return;
     const mix = FOOTSTEP_MIX[surface];
-    this.playNoise(mix.duration, 0.24 * volume, mix.filter);
-    this.playNoise(0.055, 0.10 * volume, mix.filter * 0.76, 0.025);
-    this.playTone(mix.thump, mix.thump * 0.54, 0.085, 'sine', 0.118 * volume);
+    this.playNoise(mix.duration, 0.36 * volume, mix.filter);
+    this.playNoise(0.06, 0.16 * volume, mix.filter * 0.82, 0.024);
+    this.playTone(mix.thump, mix.thump * 0.54, 0.095, 'sine', 0.185 * volume);
   }
 
   setMeleeCharge(progress: number | null) {
@@ -199,13 +199,34 @@ class SoundEngine {
     this.playTone(106, 53, 0.22, 'sine', 0.12, 0.08);
   }
 
-  shieldBash() {
-    this.playNoise(0.11, 0.15, 980);
-    this.playTone(98, 42, 0.1, 'sine', 0.08);
+  shieldBash(volume = 1) {
+    if (volume <= 0) return;
+    this.playNoise(0.11, 0.22 * volume, 980);
+    this.playTone(98, 42, 0.11, 'sine', 0.12 * volume);
   }
 
-  slash(heavy = false) {
-    this.playNoise(heavy ? 0.19 : 0.09, heavy ? 0.21 : 0.12, heavy ? 1150 : 2150);
+  slash(kindOrHeavy: MeleeKind | boolean = false, volume = 1) {
+    if (volume <= 0) return;
+    if (kindOrHeavy === 'shield') {
+      this.shieldBash(volume);
+      return;
+    }
+    if (kindOrHeavy === 'greatsword' || kindOrHeavy === true) {
+      this.playNoise(0.22, 0.30 * volume, 1350);
+      this.playTone(240, 85, 0.18, 'triangle', 0.14 * volume);
+      return;
+    }
+    if (kindOrHeavy === 'claw') {
+      this.playNoise(0.095, 0.27 * volume, 3600);
+      this.playTone(1150, 380, 0.075, 'triangle', 0.13 * volume);
+      this.playNoise(0.085, 0.24 * volume, 4100, 0.045);
+      this.playTone(1350, 440, 0.07, 'triangle', 0.11 * volume, 0.045);
+      return;
+    }
+    // Tactical knife thrust / metallic slice
+    this.playNoise(0.11, 0.28 * volume, 4200);
+    this.playTone(1450, 420, 0.085, 'triangle', 0.14 * volume);
+    this.playTone(2300, 920, 0.055, 'sine', 0.08 * volume, 0.015);
   }
 
   ultimate() {
@@ -229,24 +250,26 @@ class SoundEngine {
 
     switch (cue) {
       case 'start':
-        clack(0.12, 0.22, 2400);
-        clack(0.12, 0.15, 1300, 0.055);
+        clack(0.12, 0.32, 2400);
+        clack(0.12, 0.22, 1300, 0.055);
         break;
       case 'remove':
-        clack(0.17, 0.23, 3700);
-        clack(0.12, 0.16, 2300, 0.06);
+        clack(0.17, 0.34, 3700);
+        clack(0.12, 0.23, 2300, 0.06);
         break;
       case 'insert':
-        clack(0.17, 0.24, 2000);
-        clack(0.09, 0.24, 4100, 0.075);
-        if (kind === 'shotgun') clack(0.11, 0.18, 2800, 0.16);
+        clack(0.17, 0.35, 2000);
+        clack(0.09, 0.35, 4100, 0.075);
+        this.playTone(520 * weight, 290 * weight, 0.055, 'triangle', 0.09, 0.075);
+        if (kind === 'shotgun') clack(0.11, 0.26, 2800, 0.16);
         break;
       case 'close':
-        clack(0.09, 0.19, 3000);
+        clack(0.09, 0.28, 3000);
+        this.playTone(680 * weight, 360 * weight, 0.05, 'triangle', 0.08, 0.015);
         break;
       case 'ready':
-        clack(0.105, 0.30, 4200);
-        this.playTone(184 * weight, 75, 0.105, 'sine', 0.11);
+        clack(0.105, 0.42, 4200);
+        this.playTone(184 * weight, 75, 0.11, 'sine', 0.17);
         break;
     }
   }
