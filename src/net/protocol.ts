@@ -61,6 +61,7 @@ export interface RoomLobbyState {
 }
 
 export interface RemotePlayerInput {
+  startingReputation?: number;
   moveX: number;
   moveY: number;
   aimX: number;
@@ -141,6 +142,7 @@ export interface NetEquippedSlot {
 export interface NetActorSnapshot {
   id: string;
   peerId?: string;
+  reputationChanges?: Record<FactionId, number>;
   isHuman: boolean;
   name: string;
   faction: FactionId;

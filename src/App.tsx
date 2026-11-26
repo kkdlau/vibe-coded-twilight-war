@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { FactionRoomView } from './components/FactionRoomView';
 import { GameCanvasView } from './components/GameCanvasView';
 import { MapEditorView } from './components/MapEditorView';
@@ -16,7 +16,6 @@ import type { AiDifficulty } from './game/tuning';
 import { normalizeRoomCode } from './net/protocol';
 
 const STORAGE_KEY = 'twilight_rpg_records_v2';
-const OLD_REP_STORAGE_KEY = 'twilight_rpg_reputation_v1';
 const REP_STORAGE_KEY = 'twilight_rpg_reputations_v2';
 
 const DEFAULT_REPUTATIONS: Record<FactionId, number> = {
@@ -36,20 +35,19 @@ function loadRecords(): RunRecord[] {
   }
 }
 
-function loadReputations(): Record<FactionId, number> {
+function loadReputations(): Record<FactionId, number> | null {
   try {
-    localStorage.removeItem(OLD_REP_STORAGE_KEY);
     const raw = localStorage.getItem(REP_STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_REPUTATIONS };
+    if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_REPUTATIONS };
+    if (!parsed || typeof parsed !== 'object') return null;
     return {
       royal: Number.isFinite(Number(parsed.royal)) ? Math.floor(Number(parsed.royal)) : 0,
       shadow: Number.isFinite(Number(parsed.shadow)) ? Math.floor(Number(parsed.shadow)) : 0,
       mercenary: Number.isFinite(Number(parsed.mercenary)) ? Math.floor(Number(parsed.mercenary)) : 0,
     };
   } catch {
-    return { ...DEFAULT_REPUTATIONS };
+    return null;
   }
 }
 
@@ -68,7 +66,7 @@ export default function App() {
   const [factionMapChoice, setFactionMapChoice] = useState<string>('random');
   const [mpSession, setMpSession] = useState<ActiveMultiplayerSession | null>(null);
   const [records, setRecords] = useState<RunRecord[]>(() => loadRecords());
-  const [reputations, setReputations] = useState<Record<FactionId, number>>(() => loadReputations());
+  const [reputations, setReputations] = useState(() => loadReputations() ?? DEFAULT_REPUTATIONS);
   const [customMaps, setCustomMaps] = useState<CustomMapData[]>(() => loadCustomMaps());
 
   const activeCustomMap = useMemo(
@@ -76,15 +74,26 @@ export default function App() {
     [customMaps, mpSession, selectedMapId]
   );
 
-  const handleReputationsChange = useCallback((nextReps: Record<FactionId, number>) => {
-    const safeReps: Record<FactionId, number> = {
-      royal: Math.floor(Number.isFinite(nextReps.royal) ? nextReps.royal : 0),
-      shadow: Math.floor(Number.isFinite(nextReps.shadow) ? nextReps.shadow : 0),
-      mercenary: Math.floor(Number.isFinite(nextReps.mercenary) ? nextReps.mercenary : 0),
+  useEffect(() => {
+    const syncReputations = (event: StorageEvent) => {
+      if (event.storageArea === window.localStorage && (event.key === REP_STORAGE_KEY || event.key === null)) {
+        setReputations(loadReputations() ?? DEFAULT_REPUTATIONS);
+      }
     };
-    setReputations(safeReps);
+    window.addEventListener('storage', syncReputations);
+    return () => window.removeEventListener('storage', syncReputations);
+  }, []);
+
+  const handleReputationsChange = useCallback((matchReps: Record<FactionId, number>, change: Record<FactionId, number>) => {
+    const saved = loadReputations();
+    const nextReps = saved ? {
+      royal: saved.royal + change.royal,
+      shadow: saved.shadow + change.shadow,
+      mercenary: saved.mercenary + change.mercenary,
+    } : matchReps;
+    setReputations(nextReps);
     try {
-      localStorage.setItem(REP_STORAGE_KEY, JSON.stringify(safeReps));
+      localStorage.setItem(REP_STORAGE_KEY, JSON.stringify(nextReps));
     } catch {
       // ignore
     }

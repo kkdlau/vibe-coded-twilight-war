@@ -4114,6 +4114,85 @@ describe('3D elevation LoS/bullet occlusion and AI mouse-turn & gunfire cadence 
 });
 
 describe('Multiplayer Host & Client Snapshot Sync', () => {
+  it('applies guest reputation changes once on top of the guest’s saved faction values', () => {
+    const hostSkin = FACTION_CHARACTERS.royal[0];
+    const guestSkin = FACTION_CHARACTERS.shadow[0];
+    const hostConfig: NonNullable<ConstructorParameters<typeof TwilightEngine>[8]> = {
+      role: 'host',
+      hostPeerId: 'host',
+      localPeerId: 'host',
+      peers: [
+        { peerId: 'host', faction: 'royal', name: 'Host', characterSkin: hostSkin, isHost: true },
+        { peerId: 'guest', faction: 'shadow', name: 'Guest', characterSkin: guestSkin, isHost: false },
+      ],
+    };
+    const hostReps = { royal: 20, shadow: 40, mercenary: 60 };
+    const guestReps = { royal: 3, shadow: 10, mercenary: 7 };
+    const hostChanged = vi.fn();
+    const guestChanged = vi.fn();
+    const host = new TwilightEngine(
+      'royal', hostSkin, 'european_castle', hostReps, () => {}, hostChanged, undefined, 'standard', hostConfig
+    );
+    const guest = new TwilightEngine(
+      'shadow', guestSkin, 'european_castle', guestReps, () => {}, guestChanged, undefined, 'standard',
+      { ...hostConfig, role: 'client', localPeerId: 'guest' }
+    );
+    const guestEntity = host.enemies.find((enemy) => enemy.peerId === 'guest')!;
+    const initialSnapshot = host.exportWorldSnapshot();
+    guest.applyWorldSnapshot(initialSnapshot);
+    expect(guestChanged).not.toHaveBeenCalled();
+
+    const input = guest.getLocalInputSnapshot({ clickSeq: 0, reloadSeq: 0, swapSeq: 0, pickupSeq: 0, dropSeq: 0 });
+    host.setRemoteInput('guest', { ...input, startingReputation: guestReps.shadow });
+    host.setRemoteInput('guest', { ...input, startingReputation: 100 });
+    guestEntity.qi = 50;
+    host.update(0.05, 960, 720);
+    expect(guestEntity.qi).toBeCloseTo(50 + QI_RATE.recover * 0.05 * getReputationQiMultiplier(10));
+
+    const damage = host as unknown as {
+      damagePlayer: (amount: number, melee: boolean, attackerId: string) => void;
+      damageEnemy: (
+        target: EnemyEntity, amount: number, melee: boolean, kx: number, ky: number,
+        bullseye: boolean, noFriendlyFire: boolean, attackerId: string, faction: FactionId
+      ) => void;
+    };
+    host.player.hp = 1;
+    host.player.invulnTimer = 0;
+    damage.damagePlayer(10, true, guestEntity.id);
+    const firstKill = host.exportWorldSnapshot();
+
+    const mercenary = host.enemies.find((enemy) => enemy.faction === 'mercenary')!;
+    mercenary.hp = 1;
+    mercenary.invulnTimer = 0;
+    damage.damageEnemy(mercenary, 10, true, 0, 0, false, false, guestEntity.id, 'shadow');
+    const secondKill = host.exportWorldSnapshot();
+    guest.applyWorldSnapshot(secondKill);
+    guest.applyWorldSnapshot(secondKill);
+    guest.applyWorldSnapshot(firstKill);
+    expect(guestChanged).toHaveBeenCalledExactlyOnceWith(
+      { royal: 2, shadow: 12, mercenary: 7 },
+      { royal: -1, shadow: 2, mercenary: 0 }
+    );
+
+    const ally = host.enemies.find((enemy) => enemy.faction === 'shadow' && !enemy.isHumanPlayer)!;
+    ally.hp = 1;
+    ally.invulnTimer = 0;
+    damage.damageEnemy(ally, 10, true, 0, 0, false, false, guestEntity.id, 'shadow');
+    guestEntity.hp = 1;
+    guestEntity.invulnTimer = 0;
+    damage.damageEnemy(guestEntity, 10, true, 0, 0, false, false, 'player', 'royal');
+    guest.applyWorldSnapshot(host.exportWorldSnapshot());
+    expect(guest.player.hp).toBe(0);
+    expect(guestChanged).toHaveBeenLastCalledWith(
+      { royal: 2, shadow: 11, mercenary: 7 },
+      { royal: 0, shadow: -1, mercenary: 0 }
+    );
+    expect(hostChanged).toHaveBeenCalledExactlyOnceWith(
+      { royal: 21, shadow: 39, mercenary: 60 },
+      { royal: 1, shadow: -1, mercenary: 0 }
+    );
+  });
+
   it('spawns remote human peers on Host, drives movement/combat/reload/swap, and syncs snapshots cleanly to Clients', () => {
     const hostSkin = FACTION_CHARACTERS.royal[0];
     const allySkin = FACTION_CHARACTERS.royal[1];

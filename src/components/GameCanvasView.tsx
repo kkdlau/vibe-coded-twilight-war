@@ -22,7 +22,7 @@ interface GameCanvasViewProps {
   customMap?: CustomMapData;
   aiDifficulty: AiDifficulty;
   initialReputations: Record<FactionId, number>;
-  onReputationsChange: (reps: Record<FactionId, number>) => void;
+  onReputationsChange: (reps: Record<FactionId, number>, change: Record<FactionId, number>) => void;
   onBackToFaction: () => void;
   onExitLobby: () => void;
   onSaveRecord: (record: RunRecord) => void;
@@ -153,7 +153,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
     }
     mp.session.transport.send({
       type: 'player_input',
-      input: inp,
+      input: prev ? inp : { ...inp, startingReputation: eng.player.reputations[eng.player.faction] },
     });
   };
 
@@ -194,7 +194,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       mapId,
       initRepsRef.current,
       (snap) => setHud(snap),
-      (reps) => repCallbackRef.current(reps),
+      (reps, change) => repCallbackRef.current(reps, change),
       customMapRef.current,
       aiDifficulty,
       mpConfig

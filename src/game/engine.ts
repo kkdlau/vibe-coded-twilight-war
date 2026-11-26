@@ -112,6 +112,8 @@ interface RemoteHumanRuntime {
   entityId: string;
   name: string;
   faction: FactionId;
+  startingReputation?: number;
+  reputationChanges: Record<FactionId, number>;
   characterSkin: CharacterSkin;
   lives: number;
   maxLives: number;
@@ -152,6 +154,8 @@ interface ClientLerpTarget {
   elev: number;
   extrapTime: number;
 }
+
+type ReputationChangeHandler = (reps: Record<FactionId, number>, change: Record<FactionId, number>) => void;
 
 function equipGun(def: GunDef, ammoInMag = def.magSize): Extract<EquippedWeapon, { type: 'gun' }> {
   return {
@@ -275,11 +279,13 @@ export class TwilightEngine {
     dirY: number;
   }[] = [];
   private onHudUpdate: (snap: HudSnapshot) => void;
-  private onReputationChange?: (reps: Record<FactionId, number>) => void;
+  private onReputationChange?: ReputationChangeHandler;
   private readonly multiplayer?: MultiplayerEngineConfig;
   private remoteHumans = new Map<string, RemoteHumanRuntime>();
   private netEvents: NetTransientEvent[] = [];
   private snapshotSeq = 0;
+  private lastReputationSnapshotSeq = 0;
+  private appliedReputationChanges: Record<FactionId, number> = { royal: 0, shadow: 0, mercenary: 0 };
   private lastExportedPickupsSig = '';
   private lastExportedIceSig = '';
   private hasEmittedClientHud = false;
@@ -291,7 +297,7 @@ export class TwilightEngine {
     mapId: string,
     initialReputations: Record<FactionId, number>,
     onHudUpdate: (snap: HudSnapshot) => void,
-    onReputationChange?: (reps: Record<FactionId, number>) => void,
+    onReputationChange?: ReputationChangeHandler,
     customMap?: CustomMapData,
     private readonly difficulty: AiDifficulty = 'standard',
     multiplayer?: MultiplayerEngineConfig
@@ -2204,6 +2210,48 @@ export class TwilightEngine {
     return this.remoteHumans.get(entityId.slice(6));
   }
 
+  private applyLocalReputationChange(change: Record<FactionId, number>) {
+    if (change.royal === 0 && change.shadow === 0 && change.mercenary === 0) return;
+    const p = this.player;
+    p.reputations.royal += change.royal;
+    p.reputations.shadow += change.shadow;
+    p.reputations.mercenary += change.mercenary;
+    p.reputation = p.reputations[p.faction];
+    this.onReputationChange?.({ ...p.reputations }, change);
+  }
+
+  private recordKillReputation(
+    attackerId: string | undefined,
+    victim: { faction: FactionId; x: number; y: number },
+    friendlyFire: boolean
+  ) {
+    const local = attackerId === 'player';
+    const remote = this.getRemoteHumanByEntityId(attackerId);
+    if (!local && !remote) return;
+    const faction = remote?.faction ?? this.player.faction;
+    const change = { royal: 0, shadow: 0, mercenary: 0 };
+    change[faction] = friendlyFire ? -1 : 1;
+    if (!friendlyFire && victim.faction !== 'mercenary') change[victim.faction] -= 1;
+
+    if (remote) {
+      remote.reputationChanges.royal += change.royal;
+      remote.reputationChanges.shadow += change.shadow;
+      remote.reputationChanges.mercenary += change.mercenary;
+      return;
+    }
+
+    this.applyLocalReputationChange(change);
+    if (friendlyFire) {
+      this.spawnText(victim.x, victim.y - 32, '誤傷擊殺友軍! -1 聲望', '#F87171', 1.15);
+    } else {
+      const facShort: Record<FactionId, string> = { royal: '皇家', shadow: '天影', mercenary: '第三' };
+      const toast = victim.faction === 'mercenary'
+        ? `+1 ${facShort[faction]}聲望`
+        : `+1 ${facShort[faction]} · -1 ${facShort[victim.faction]}`;
+      this.spawnText(victim.x, victim.y - 42, toast, '#7DD3FC', 0.85, true);
+    }
+  }
+
   private applyVampireHealing(attacker: PlayerState | EnemyEntity, victim: { x: number; y: number }, damage: number, melee: boolean) {
     const heal = Math.max(1, Math.round(damage * (melee ? 0.5 : 1 / 3)));
     attacker.hp = Math.min(attacker.maxHp, attacker.hp + heal);
@@ -2234,13 +2282,7 @@ export class TwilightEngine {
       enemy.hp -= ffDmg;
       enemy.hitFlash = 0.12;
       if (enemy.hp <= 0) {
-        if (isPlayerAttacker) {
-          p.reputations[p.faction] -= 1;
-          p.reputation = p.reputations[p.faction];
-          this.onReputationChange?.({ ...p.reputations });
-          this.spawnText(enemy.x, enemy.y - 32, '誤傷擊殺友軍! -1 聲望', '#F87171', 1.15);
-        }
-        this.removeEnemy(enemy, false, attackerId);
+        this.removeEnemy(enemy, attackerId, true);
       } else {
         this.spawnText(enemy.x, enemy.y - 24, `誤傷友軍 -${ffDmg}`, '#FCA5A5', 0.86, true);
       }
@@ -2388,11 +2430,11 @@ export class TwilightEngine {
     }
 
     if (enemy.hp <= 0) {
-      this.removeEnemy(enemy, isPlayerAttacker, attackerId);
+      this.removeEnemy(enemy, attackerId);
     }
   }
 
-  private removeEnemy(enemy: EnemyEntity, killedByPlayer: boolean, attackerId?: string) {
+  private removeEnemy(enemy: EnemyEntity, attackerId?: string, friendlyFire = false, cause: 'attack' | 'ice' = 'attack') {
     const idx = this.enemies.indexOf(enemy);
     if (idx === -1) return;
     this.enemies.splice(idx, 1);
@@ -2400,34 +2442,18 @@ export class TwilightEngine {
     sfx.soldierDown(this.nearbySoundVolume(enemy.x, enemy.y) * 0.75);
     this.emitNetSfx('down', enemy.x, enemy.y);
 
-    if (killedByPlayer) {
+    this.recordKillReputation(attackerId, enemy, friendlyFire);
+
+    if (attackerId === 'player' && !friendlyFire) {
       const p = this.player;
       p.kills += 1;
       p.comboCount += 1;
       p.comboTimer = 4.0;
       p.maxCombo = Math.max(p.maxCombo, p.comboCount);
 
-      p.reputations[p.faction] += 1;
-      if (enemy.faction === 'royal' || enemy.faction === 'shadow') {
-        p.reputations[enemy.faction] -= 1;
-      }
-      p.reputation = p.reputations[p.faction];
-      this.onReputationChange?.({ ...p.reputations });
-
-      const facShort: Record<FactionId, string> = {
-        royal: '皇家',
-        shadow: '天影',
-        mercenary: '第三',
-      };
-      const repToast =
-        enemy.faction === 'royal' || enemy.faction === 'shadow'
-          ? `+1 ${facShort[p.faction]} · -1 ${facShort[enemy.faction]}`
-          : `+1 ${facShort[p.faction]}聲望`;
-      this.spawnText(enemy.x, enemy.y - 42, repToast, '#7DD3FC', 0.85, true);
-
       p.score += 120 + p.comboCount * 15;
       this.factionScores[p.faction] += 25;
-    } else {
+    } else if (cause === 'attack') {
       const killerRt = this.getRemoteHumanByEntityId(attackerId);
       if (killerRt) {
         killerRt.kills += 1;
@@ -2479,7 +2505,7 @@ export class TwilightEngine {
       this.spawnText(p.x, p.y - 34, `誤傷友軍 -${ffDmg}`, '#FCA5A5', 0.86, true);
       p.invulnTimer = 0.2;
       if (p.hp <= 0) {
-        this.handlePlayerDeath();
+        this.handlePlayerDeath(attackerId);
       } else {
         sfx.playerHurt();
         this.emitHud();
@@ -2552,15 +2578,19 @@ export class TwilightEngine {
 
     p.invulnTimer = finalDmg > 0 ? 0.2 : rawDmg > 0 ? 0.08 : 0.04;
     if (p.hp <= 0) {
-      this.handlePlayerDeath();
+      this.handlePlayerDeath(attackerId);
     } else {
       if (rawDmg > 0) sfx.playerHurt();
       this.emitHud();
     }
   }
 
-  private handlePlayerDeath() {
+  private handlePlayerDeath(attackerId?: string) {
     const p = this.player;
+    const attacker = this.getRemoteHumanByEntityId(attackerId);
+    if (attacker) {
+      this.recordKillReputation(attacker.entityId, p, !areHostile(attacker.faction, attacker.entityId, p.faction, 'player'));
+    }
     p.hp = 0;
     p.lives -= 1;
     this.clearInputs();
@@ -3505,7 +3535,7 @@ export class TwilightEngine {
       this.spawnText(p.x, p.y - 34, `-${fatalDmg}`, '#EF4444', 1.25);
       p.hp = 0;
       this.camera.shake = Math.min(14, this.camera.shake + 8);
-      this.handlePlayerDeath();
+      this.handlePlayerDeath(pusherId ?? undefined);
       return;
     }
     const enemy = target.enemy;
@@ -3516,22 +3546,14 @@ export class TwilightEngine {
     enemy.hp = 0;
     enemy.hitFlash = 0.16;
 
-    const pushedByPlayer = pusherId === 'player';
-    if (pushedByPlayer && pusherFaction) {
-      if (!areHostile(pusherFaction, 'player', enemy.faction, enemy.id)) {
-        p.reputations[p.faction] -= 1;
-        p.reputation = p.reputations[p.faction];
-        this.onReputationChange?.({ ...p.reputations });
-        this.removeEnemy(enemy, false);
-      } else {
-        p.totalDamage += fatalDmg;
-        p.score += fatalDmg;
-        sfx.hit(true);
-        this.removeEnemy(enemy, true);
-      }
-    } else {
-      this.removeEnemy(enemy, false);
+    const friendlyFire = pusherId !== null && pusherFaction !== null &&
+      !areHostile(pusherFaction, pusherId, enemy.faction, enemy.id);
+    if (pusherId === 'player' && !friendlyFire) {
+      p.totalDamage += fatalDmg;
+      p.score += fatalDmg;
+      sfx.hit(true);
     }
+    this.removeEnemy(enemy, pusherId ?? undefined, friendlyFire, 'ice');
   }
 
   private updatePushableIceBlocks(dt: number) {
@@ -5356,6 +5378,7 @@ export class TwilightEngine {
         entityId: `human_${peer.peerId}`,
         name: peer.name,
         faction: peer.faction,
+        reputationChanges: { royal: 0, shadow: 0, mercenary: 0 },
         characterSkin: peer.characterSkin,
         lives: 3,
         maxLives: 3,
@@ -5485,6 +5508,10 @@ export class TwilightEngine {
   public setRemoteInput(peerId: string, input: RemotePlayerInput) {
     const rt = this.remoteHumans.get(peerId);
     if (!rt) return;
+    if (rt.startingReputation === undefined && input.startingReputation !== undefined &&
+        Number.isSafeInteger(input.startingReputation)) {
+      rt.startingReputation = input.startingReputation;
+    }
     rt.input = input;
   }
 
@@ -5736,7 +5763,7 @@ export class TwilightEngine {
       }
     }
 
-    const repMult = getReputationQiMultiplier(AI_FIXED_REPUTATION);
+    const repMult = getReputationQiMultiplier((rt.startingReputation ?? 0) + rt.reputationChanges[rt.faction]);
     if (e.freezeTimer <= 0) {
       if (!rt.chargeSessionAllowed) {
         e.qi = Math.min(e.maxQi, e.qi + QI_RATE.recover * repMult * dt);
@@ -6144,6 +6171,7 @@ export class TwilightEngine {
               score: Math.floor(rt.score),
               dmg: rt.totalDamage,
               kills: rt.kills,
+              reputationChanges: { ...rt.reputationChanges },
               ...(rt.comboCount > 0 ? { combo: rt.comboCount } : {}),
               maxCombo: rt.maxCombo,
               reserve: rt.reserveAmmo,
@@ -6199,6 +6227,7 @@ export class TwilightEngine {
         score: Math.floor(rt.score),
         dmg: rt.totalDamage,
         kills: rt.kills,
+        reputationChanges: { ...rt.reputationChanges },
         ...(rt.comboCount > 0 ? { combo: rt.comboCount } : {}),
         maxCombo: rt.maxCombo,
         reserve: rt.reserveAmmo,
@@ -6288,8 +6317,7 @@ export class TwilightEngine {
 
   public applyWorldSnapshot(snapshot: NetWorldSnapshot) {
     const localPeerId = this.multiplayer?.localPeerId;
-    const localActor =
-      (localPeerId ? snapshot.actors.find((a) => a.peerId === localPeerId) : undefined) || snapshot.actors[0];
+    const localActor = localPeerId ? snapshot.actors.find((a) => a.peerId === localPeerId) : snapshot.actors[0];
     if (!localActor) return;
 
     const p = this.player;
@@ -6321,6 +6349,20 @@ export class TwilightEngine {
     p.maxCombo = localActor.maxCombo ?? p.maxCombo;
     p.reserveAmmo = localActor.reserve ?? p.reserveAmmo;
     p.faction = localActor.faction;
+    // Snapshots carry match totals so skipping a frame cannot drop a reputation change.
+    const changes = localActor.reputationChanges;
+    if (changes && snapshot.seq > this.lastReputationSnapshotSeq &&
+        Number.isSafeInteger(changes.royal) && Number.isSafeInteger(changes.shadow) &&
+        Number.isSafeInteger(changes.mercenary)) {
+      const previous = this.appliedReputationChanges;
+      this.lastReputationSnapshotSeq = snapshot.seq;
+      this.appliedReputationChanges = { ...changes };
+      this.applyLocalReputationChange({
+        royal: changes.royal - previous.royal,
+        shadow: changes.shadow - previous.shadow,
+        mercenary: changes.mercenary - previous.mercenary,
+      });
+    }
     p.characterSkin = this.resolveSkinById(localActor.skinId, localActor.faction);
     p.activeHand = localActor.hand;
     p.weapons = [
