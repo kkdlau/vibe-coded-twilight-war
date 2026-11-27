@@ -357,7 +357,7 @@ export const SIEGE_UPGRADES: SiegeUpgradeMeta[] = [
     shortName: '重甲',
     maxLevel: 3,
     costs: [100, 200, 320],
-    bonusText: '每級：最大血量 +22 · 移動速度 +4%',
+    bonusText: '每級：最大血量 +30 · 防禦 +3 · 移動速度 +5%',
     color: '#38BDF8',
   },
   {
@@ -380,6 +380,8 @@ export const SIEGE_DURATION_OPTIONS: { sec: SiegeMatchDurationSec; label: string
 
 export const SIEGE_CONFIG = {
   teamSize: 5,
+  tacticalUnlockLevel: 2,
+  ultimateUnlockLevel: 4,
   defaultDurationSec: 1080 as SiegeMatchDurationSec,
   suddenDeathLeadSec: 180,
   firstWaveDelaySec: 8,

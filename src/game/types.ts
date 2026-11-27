@@ -123,6 +123,9 @@ export interface SiegeHudState {
   baronSeconds: number;
   playerGold: number;
   playerLevel: number;
+  playerDefense: number;
+  tacticalUnlocked: boolean;
+  ultimateUnlocked: boolean;
   playerXp: number;
   playerXpToNext: number;
   upgrades: Record<SiegeUpgradeTrack, number>;
@@ -533,6 +536,7 @@ export interface EnemyEntity {
   siegeMarkedTimer?: number;
   siegeAegisReflectTimer?: number;
   siegeDeaths?: number;
+  siegeLevel?: number;
   siegeGold?: number;
   siegeUpgrades?: Record<SiegeUpgradeTrack, number>;
 }

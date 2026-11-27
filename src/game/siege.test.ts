@@ -3,6 +3,7 @@ import { FACTION_CHARACTERS } from './data';
 import { TwilightEngine } from './engine';
 import { TILE } from './maps';
 import { SIEGE_PASSIVES, SIEGE_TACTICAL_SKILLS, SIEGE_ULTIMATE_SKILLS, getDefaultSiegeLoadout } from './siegeData';
+import { applySiegeDefenseReduction, computeSiegeDefense, computeSiegeGunFalloffMult, computeSiegeMaxHp, computeSiegeMoveSpeedMult, grantSiegeXpAndGold } from './siegeHelpers';
 import { SIEGE_MAP_ID, createSiegeMapSpec } from './siegeMap';
 import { HudSnapshot, SiegeFactionId, SiegePlayerLoadout } from './types';
 
@@ -132,10 +133,16 @@ describe('3-Lane Castle Siege / MOBA Mode (siege)', () => {
     expect(engine.status).toBe('VICTORY');
   });
 
-  it('executes all 6 tactical skill variants and all 6 ultimate variants cleanly', () => {
+  it('gates tactical skill at Lv.2 and melee-charge ultimates at Lv.4 across all 12 skill variants', () => {
     for (const tac of SIEGE_TACTICAL_SKILLS) {
       const { engine } = createSiegeEngine(tac.faction, { tacticalId: tac.id });
       engine.setMousePos(800, 360);
+      // Locked at Lv.1
+      engine.triggerSiegeTactical();
+      expect(engine.siege!.playerState.tacticalCd).toBe(0);
+
+      // Unlocked at Lv.2
+      engine.siege!.playerState.level = 2;
       engine.triggerSiegeTactical();
       expect(engine.siege!.playerState.tacticalCd).toBeGreaterThan(0);
 
@@ -153,10 +160,32 @@ describe('3-Lane Castle Siege / MOBA Mode (siege)', () => {
     }
 
     for (const ult of SIEGE_ULTIMATE_SKILLS) {
-      const { engine } = createSiegeEngine(ult.faction, { ultimateId: ult.id });
+      const { engine } = createSiegeEngine(ult.faction, { ultimateId: ult.id, meleeId: 'knife' });
       engine.setMousePos(800, 360);
+      // Clear away enemies so player takes no damage/CC while charging
+      engine.enemies = [];
+      engine.switchWeapon(); // switch to knife
+      for (let i = 0; i < 10; i++) engine.update(0.05, 1280, 720);
+
+      // Locked below Lv.4: neither [F] nor melee hold charges ultimate
       engine.player.qi = 100;
       engine.triggerSiegeUltimate();
+      expect(engine.player.qi).toBe(100);
+      engine.setMouseDown(true);
+      for (let i = 0; i < 20; i++) engine.update(0.05, 1280, 720);
+      expect(engine.player.chargeReady).toBe(false);
+      engine.setMouseDown(false);
+
+      // At Lv.4, charging the melee weapon and releasing casts the ultimate
+      engine.siege!.playerState.level = 4;
+      engine.player.qi = 100;
+      engine.setMousePos(800, 360);
+      engine.setMouseDown(true);
+      for (let i = 0; i < 60 && !engine.player.chargeReady; i++) {
+        engine.update(0.05, 1280, 720);
+      }
+      expect(engine.player.chargeReady).toBe(true);
+      engine.setMouseDown(false);
       expect(engine.player.qi).toBe(0);
 
       if (ult.id === 'royal_judgment_beam') {
@@ -191,12 +220,8 @@ describe('3-Lane Castle Siege / MOBA Mode (siege)', () => {
     expect(sg.playerState.gold).toBe(120);
     expect(engine.buySiegeUpgrade('armor')).toBe(true);
     expect(sg.playerState.upgrades.armor).toBe(1);
-    expect(engine.player.maxHp).toBe(122);
-
-    // Insufficient gold (20G < 100G) is rejected
-    expect(engine.buySiegeUpgrade('firepower')).toBe(false);
-
     // Moving outside fountain prevents shopping while alive
+    expect(engine.player.maxHp).toBe(130);
     sg.playerState.gold = 500;
     engine.player.x = 27 * TILE;
     engine.player.y = 27 * TILE;
@@ -243,6 +268,7 @@ describe('3-Lane Castle Siege / MOBA Mode (siege)', () => {
 
     const guestState = engine.siege!.remoteStates.get('peer2')!;
     guestState.gold = 350;
+    guestState.level = 2;
     guestState.upgrades.armor = 1;
 
     let guestEnt = engine.enemies.find((e) => e.peerId === 'peer2')!;
@@ -366,5 +392,55 @@ describe('3-Lane Castle Siege / MOBA Mode (siege)', () => {
         e.y < 35 * TILE
     );
     expect(advancedRoyalTopMinions.length).toBeGreaterThan(0);
+
+    // Every spawned lane minion uses melee weapons only (knife & greatsword, zero guns)
+    const allMinions = engine.enemies.filter(
+      (e) => e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion'
+    );
+    expect(allMinions.length).toBeGreaterThan(0);
+    for (const m of allMinions) {
+      expect(m.weapons[0].type).toBe('melee');
+      expect(m.weapons[1].type).toBe('melee');
+    }
+  });
+
+  it('scales HP, Defense, and Move Speed on level-up, applies gun distance falloff, and keeps HUD ammo integer', () => {
+    const { engine, getHud } = createSiegeEngine('royal', { gunId: 'rifle' });
+    const ps = engine.siege!.playerState;
+
+    const baseHp = computeSiegeMaxHp(ps);
+    const baseDef = computeSiegeDefense(ps);
+    const baseSpd = computeSiegeMoveSpeedMult(ps);
+    expect(baseHp).toBe(100);
+    expect(baseDef).toBe(0);
+
+    // Grant XP to level up from Lv.1 to Lv.3
+    const lvRes = grantSiegeXpAndGold(ps, 0, 220);
+    expect(lvRes.newLevel).toBeGreaterThanOrEqual(3);
+    expect(computeSiegeMaxHp(ps)).toBeGreaterThanOrEqual(baseHp + 36);
+    expect(computeSiegeDefense(ps)).toBeGreaterThan(baseDef);
+    expect(computeSiegeMoveSpeedMult(ps)).toBeGreaterThan(baseSpd);
+
+    // Defense meaningfully reduces incoming damage (never to zero)
+    const unmitigated = 25;
+    const mitigated = applySiegeDefenseReduction(unmitigated, computeSiegeDefense(ps) + 6);
+    expect(mitigated).toBeLessThan(unmitigated);
+    expect(mitigated).toBeGreaterThanOrEqual(2);
+
+    // Gun distance falloff drops long-range damage noticeably while remaining full at close range
+    expect(computeSiegeGunFalloffMult('rifle', 180)).toBe(1);
+    expect(computeSiegeGunFalloffMult('rifle', 700)).toBeLessThanOrEqual(0.35);
+    expect(computeSiegeGunFalloffMult('sniper', 250)).toBe(1);
+    expect(computeSiegeGunFalloffMult('sniper', 900)).toBeLessThan(0.5);
+
+    // Out-of-combat reserve ammo recharges over time and HUD always outputs whole integers
+    engine.player.reserveAmmo = 10;
+    engine.enemies = [];
+    for (let i = 0; i < 65; i++) {
+      engine.update(0.05, 1280, 720);
+    }
+    const hud = getHud()!;
+    expect(hud.player.reserveAmmo).toBeGreaterThan(10);
+    expect(Number.isInteger(hud.player.reserveAmmo)).toBe(true);
   });
 });

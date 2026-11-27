@@ -8,6 +8,7 @@ import {
 } from './siegeData';
 import { SiegeMapSpec, createSiegeMapSpec } from './siegeMap';
 import {
+  GunKind,
   SiegeBossKind,
   SiegeFactionId,
   SiegeLane,
@@ -82,7 +83,7 @@ export function createHeroSiegeState(loadout: SiegePlayerLoadout): SiegeHeroStat
     gold: 120,
     xp: 0,
     level: 1,
-    xpToNext: 100,
+    xpToNext: 80,
     upgrades: createEmptyUpgrades(),
     tacticalCd: 0,
     recallTimer: 0,
@@ -165,17 +166,46 @@ export function refreshStructureInvulnerability(structures: SiegeStructure[]) {
 
 export function computeSiegeMaxHp(state: Pick<SiegeHeroState, 'level' | 'upgrades' | 'loadout'>): number {
   const passiveHp = state.loadout.passiveId === 'royal_fortitude' ? 25 : 0;
-  const armorHp = (state.upgrades.armor ?? 0) * 22;
-  const levelHp = Math.max(0, state.level - 1) * 8;
+  const armorHp = (state.upgrades.armor ?? 0) * 30;
+  const levelHp = Math.max(0, state.level - 1) * 18;
   return 100 + passiveHp + armorHp + levelHp;
 }
 
-export function computeSiegeMoveSpeedMult(state: Pick<SiegeHeroState, 'upgrades' | 'loadout' | 'smokeSpeedTimer'>): number {
-  let mult = 1 + (state.upgrades.armor ?? 0) * 0.04;
+export function computeSiegeDefense(state: Pick<SiegeHeroState, 'level' | 'upgrades'>): number {
+  return Math.floor(Math.max(0, state.level - 1) * 1.5) + (state.upgrades.armor ?? 0) * 3;
+}
+
+export function applySiegeDefenseReduction(rawDmg: number, defense: number): number {
+  if (rawDmg <= 0 || defense <= 0) return rawDmg;
+  return Math.max(Math.max(2, Math.round(rawDmg * 0.25)), rawDmg - defense);
+}
+
+export function computeSiegeMoveSpeedMult(
+  state: Pick<SiegeHeroState, 'level' | 'upgrades' | 'loadout' | 'smokeSpeedTimer'>
+): number {
+  let mult = 1 + Math.max(0, state.level - 1) * 0.025 + (state.upgrades.armor ?? 0) * 0.05;
   if (state.loadout.passiveId === 'royal_vanguard_aura') mult += 0.1;
   if (state.loadout.passiveId === 'shadow_swift_foot') mult += 0.12;
   if (state.smokeSpeedTimer > 0) mult += 0.22;
   return mult;
+}
+
+export function computeSiegeLevelAttackMult(level: number): number {
+  return 1 + Math.max(0, level - 1) * 0.04;
+}
+
+export function computeSiegeGunFalloffMult(gunKind: GunKind, distPx: number): number {
+  const bands: Record<GunKind, { full: number; far: number; min: number }> = {
+    shotgun: { full: 170, far: 400, min: 0.22 },
+    pistol: { full: 230, far: 520, min: 0.3 },
+    rifle: { full: 260, far: 580, min: 0.28 },
+    sniper: { full: 420, far: 840, min: 0.42 },
+  };
+  const band = bands[gunKind];
+  if (distPx <= band.full) return 1;
+  if (distPx >= band.far) return band.min;
+  const t = (distPx - band.full) / Math.max(1, band.far - band.full);
+  return 1 - t * (1 - band.min);
 }
 
 export function computeSiegeTacticalCooldown(state: Pick<SiegeHeroState, 'upgrades' | 'loadout'>): number {
@@ -188,19 +218,28 @@ export function grantSiegeXpAndGold(
   state: SiegeHeroState,
   gold: number,
   xp: number
-): { leveledUp: boolean; newLevel: number; hpGain: number } {
+): { leveledUp: boolean; oldLevel: number; newLevel: number; hpGain: number; defenseGain: number } {
   state.gold += Math.max(0, Math.round(gold));
   state.xp += Math.max(0, Math.round(xp));
+  const oldLevel = state.level;
+  const oldDef = computeSiegeDefense(state);
   let leveledUp = false;
   let hpGain = 0;
   while (state.level < 10 && state.xp >= state.xpToNext) {
     state.xp -= state.xpToNext;
     state.level += 1;
-    state.xpToNext = Math.round(100 + (state.level - 1) * 45);
+    state.xpToNext = Math.round(80 + (state.level - 1) * 45);
     leveledUp = true;
-    hpGain += 8;
+    hpGain += 18;
   }
-  return { leveledUp, newLevel: state.level, hpGain };
+  const newDef = computeSiegeDefense(state);
+  return {
+    leveledUp,
+    oldLevel,
+    newLevel: state.level,
+    hpGain,
+    defenseGain: Math.max(0, newDef - oldDef),
+  };
 }
 
 export function tryPurchaseSiegeUpgrade(

@@ -339,7 +339,7 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm font-bold text-sky-300 flex items-center gap-2">
                     <Sparkles className="w-4 h-4" />
-                    <span>戰術技能變種（按 [E] 或滑鼠右鍵施放）</span>
+                    <span>戰術技能變種（Lv.2 解鎖 · 按 [E] 或滑鼠右鍵施放）</span>
                   </span>
                   <span className="text-xs text-slate-400">冷卻制主動技</span>
                 </div>
@@ -386,9 +386,9 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm font-bold text-amber-300 flex items-center gap-2">
                     <Flame className="w-4 h-4" />
-                    <span>終極大招變種（按 [F] 或近戰滿氣釋放）</span>
+                    <span>終極大招變種（Lv.4 解鎖 · 按 [Q] 切近戰滿氣長按左鍵釋放）</span>
                   </span>
-                  <span className="text-xs text-slate-400">需集滿 100% 氣力</span>
+                  <span className="text-xs text-slate-400">經典光暈集氣施放</span>
                 </div>
                 <div className="grid grid-cols-1 gap-2.5">
                   {ultimateList.map((sk) => {
@@ -500,7 +500,7 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
                 onClick={() => setActiveTab('skills')}
                 className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-left cursor-pointer"
               >
-                <span className="text-sky-300 font-semibold">[E/右鍵] 戰術技</span>
+                <span className="text-sky-300 font-semibold">[E/右鍵 · Lv.2] 戰術技</span>
                 <span className="font-bold text-white">
                   {selectedTactical.name} ({selectedTactical.cooldownSec}s)
                 </span>
@@ -510,7 +510,7 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
                 onClick={() => setActiveTab('skills')}
                 className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-left cursor-pointer"
               >
-                <span className="text-amber-300 font-semibold">[F/滿氣] 終極大招</span>
+                <span className="text-amber-300 font-semibold">[近戰集氣 · Lv.4] 大招</span>
                 <span className="font-bold text-white">{selectedUltimate.name}</span>
               </button>
               <button
@@ -579,9 +579,9 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
           {/* Rule Summary */}
           <div className="rounded-xl bg-slate-950/80 border border-slate-800 p-3.5 text-xs text-slate-300 space-y-1.5 leading-relaxed">
             <div className="font-bold text-amber-300">模式規則摘要</div>
-            <p>• 無限生命復活，摧毀敵方「外塔 → 高地塔 → 主城堡」即獲得勝利。</p>
-            <p>• 取消地上執槍；脫戰自動補彈，按 [B] 回泉水或復活時按 [3-6] 用軍功升級屬性。</p>
-            <p>• 第三勢力駐守 4 處野區與河道雙 Boss：3:00「幻沙先鋒」與 8:00「狂戰巨神」。</p>
+            <p>• 無限生命復活，摧毀敵方「外塔 → 高地塔 → 主城堡」即獲勝；地圖多處石牆／木箱可供躲避砲火。</p>
+            <p>• 升級大幅強化血量 (+18)、防禦與跑速；Lv.2 解鎖戰術技 [E]、Lv.4 解鎖近戰集氣大招！</p>
+            <p>• 小兵改為純近戰步兵（小刀兵 + 重甲大刀兵）；遠程槍械過遠會衰減傷害，有利拉扯逃脫。</p>
           </div>
 
           {/* Launch Button */}

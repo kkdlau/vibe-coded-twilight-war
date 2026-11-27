@@ -672,12 +672,23 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
               <div className="text-[11px] text-slate-300 truncate">{p.characterSkin.name}</div>
               <div className="mt-1 flex items-baseline gap-2 font-mono-num bg-slate-900/85 border border-slate-700/80 rounded px-2 py-0.5">
                 {hud.mode === 'siege' && hud.siege ? (
-                  <>
-                    <span className="text-[11px] font-sans text-sky-300 font-bold">Lv.{hud.siege.playerLevel}</span>
-                    <span className="text-slate-600">·</span>
-                    <span className="text-[11px] font-sans text-amber-300">軍功</span>
-                    <strong className="text-sm font-black text-amber-300 leading-none">{hud.siege.playerGold}</strong>
-                  </>
+                  <div className="w-full">
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-[11px] font-sans text-sky-300 font-bold">Lv.{hud.siege.playerLevel}</span>
+                      <span className="text-slate-600">·</span>
+                      <span className="text-[11px] font-sans text-emerald-300 font-bold">防 {hud.siege.playerDefense}</span>
+                      <span className="text-slate-600">·</span>
+                      <strong className="text-sm font-black text-amber-300 leading-none">{hud.siege.playerGold}G</strong>
+                    </div>
+                    <div className="mt-1 h-1 w-full bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-amber-400"
+                        style={{
+                          width: `${Math.min(100, Math.round((hud.siege.playerXp / Math.max(1, hud.siege.playerXpToNext)) * 100))}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
                 ) : (
                   <>
                     <span className="text-[11px] font-sans text-slate-300">聲望</span>
@@ -774,6 +785,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
             {/* Tactical [E / RClick] */}
             <button
               type="button"
+              disabled={!hud.siege.tacticalUnlocked}
               onClick={() => {
                 engineRef.current?.triggerSiegeTactical();
                 if (multiplayer && !multiplayer.session.isHost) {
@@ -781,39 +793,45 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
                   sendClientInputIfNeeded(true);
                 }
               }}
-              className={`px-2.5 py-1 rounded-lg border text-left cursor-pointer ${
-                hud.siege.tacticalCd <= 0 ? 'bg-sky-950/70 border-sky-400/80 text-white' : 'bg-slate-900 border-slate-700 text-slate-400'
+              className={`px-2.5 py-1 rounded-lg border text-left ${
+                !hud.siege.tacticalUnlocked
+                  ? 'bg-slate-950/70 border-slate-800 text-slate-500 cursor-default'
+                  : hud.siege.tacticalCd <= 0
+                    ? 'bg-sky-950/70 border-sky-400/80 text-white cursor-pointer'
+                    : 'bg-slate-900 border-slate-700 text-slate-400 cursor-pointer'
               }`}
             >
               <div className="text-[10px] font-mono-num text-sky-300">
-                [E/右鍵] {hud.siege.tacticalCd > 0 ? `${hud.siege.tacticalCd.toFixed(1)}s` : '就緒'}
+                {!hud.siege.tacticalUnlocked
+                  ? 'Lv.2 解鎖'
+                  : `[E/右鍵] ${hud.siege.tacticalCd > 0 ? `${hud.siege.tacticalCd.toFixed(1)}s` : '就緒'}`}
               </div>
-              <div className="text-[11px] font-bold truncate max-w-[84px]">
+              <div className="text-[11px] font-bold truncate max-w-[90px]">
                 {getTacticalMeta(hud.siege.loadout.tacticalId).name}
               </div>
             </button>
 
-            {/* Ultimate [F / Charge] */}
-            <button
-              type="button"
-              onClick={() => {
-                engineRef.current?.triggerSiegeUltimate();
-                if (multiplayer && !multiplayer.session.isHost) {
-                  seqsRef.current.ultSeq += 1;
-                  sendClientInputIfNeeded(true);
-                }
-              }}
-              className={`px-2.5 py-1 rounded-lg border text-left cursor-pointer ${
-                p.qi >= p.maxQi - 1 ? 'bg-amber-950/70 border-amber-400/90 text-white' : 'bg-slate-900 border-slate-700 text-slate-400'
+            {/* Ultimate (Lv.4 Unlocked · Melee Charge) */}
+            <div
+              className={`px-2.5 py-1 rounded-lg border text-left ${
+                !hud.siege.ultimateUnlocked
+                  ? 'bg-slate-950/70 border-slate-800 text-slate-500'
+                  : p.qi >= p.maxQi - 1
+                    ? 'bg-amber-950/70 border-amber-400/90 text-white'
+                    : 'bg-slate-900 border-slate-700 text-slate-400'
               }`}
             >
               <div className="text-[10px] font-mono-num text-amber-300">
-                [F/滿氣] {Math.round((p.qi / p.maxQi) * 100)}%
+                {!hud.siege.ultimateUnlocked
+                  ? 'Lv.4 解鎖 · 近戰集氣'
+                  : p.qi >= p.maxQi - 1
+                    ? '滿氣! [Q]長按左鍵'
+                    : `近戰集氣 ${Math.round((p.qi / p.maxQi) * 100)}%`}
               </div>
-              <div className="text-[11px] font-bold truncate max-w-[84px]">
+              <div className="text-[11px] font-bold truncate max-w-[104px]">
                 {getUltimateMeta(hud.siege.loadout.ultimateId).name}
               </div>
-            </button>
+            </div>
 
             {/* Recall [B] */}
             <button
@@ -919,7 +937,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
               <span className="text-white">
                 {p.weapon.ammoInMag}/{p.weapon.def.magSize}
               </span>
-              <span className="text-amber-400">{p.reserveAmmo}</span>
+              <span className="text-amber-400">{Math.floor(p.reserveAmmo)}</span>
             </div>
           ) : p.weapon.def.kind === 'shield' ? (
             <div
