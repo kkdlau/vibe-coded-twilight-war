@@ -7375,6 +7375,7 @@ export class TwilightEngine {
         ownerFaction: pr.ownerFaction,
         ...(pr.isWave ? { isWave: true } : {}),
         ...(pr.isLightOrb ? { isLightOrb: true } : {}),
+        ...(pr.healAllies ? { healAllies: true } : {}),
         ...(pr.isBlackDragon ? { isBlackDragon: true } : {}),
         ...(pr.segments ? { segs: pr.segments.map((s) => ({ x: round1(s.x), y: round1(s.y) })) } : {}),
       })),
@@ -7677,6 +7678,7 @@ export class TwilightEngine {
       pierce: 0,
       isWave: pr.isWave,
       isLightOrb: pr.isLightOrb,
+      healAllies: pr.healAllies,
       isBlackDragon: pr.isBlackDragon,
       segments: pr.segs,
       hitIds: new Set<string>(),
@@ -8840,6 +8842,20 @@ export class TwilightEngine {
           ? [-0.55, -0.44, -0.33, -0.22, -0.11, 0, 0.11, 0.22, 0.33, 0.44, 0.55]
           : [-0.48, -0.36, -0.24, -0.12, 0, 0.12, 0.24, 0.36, 0.48];
       const dmg = Math.round((isHeal ? 32 : 28) * ultMult);
+      const orbRadius = Math.round(16 + ultRank * 2.4 + (evolved ? 3 : 0));
+      const slashReach = Math.round(96 + ultRank * 14 + (evolved ? 18 : 0));
+      this.pushSlash({
+        x: caster.x,
+        y: caster.y,
+        angle: aimAngle,
+        arc: isHeal ? Math.PI * 0.95 : Math.PI * 1.15,
+        reach: slashReach,
+        color: isHeal ? '#4ADE80' : '#FACC15',
+        life: 0.26,
+        maxLife: 0.26,
+        isUltimate: true,
+        style: 'sweep',
+      });
       for (const off of spreadAngles) {
         const a = aimAngle + off;
         this.projectiles.push({
@@ -8850,7 +8866,7 @@ export class TwilightEngine {
           prevY: caster.y,
           vx: Math.cos(a) * 580,
           vy: Math.sin(a) * 580,
-          radius: 13,
+          radius: orbRadius,
           damage: dmg,
           startElevation: caster.elevation,
           minTraversedElevation: caster.elevation,
@@ -9164,7 +9180,13 @@ export class TwilightEngine {
         this.player.maxHp = computeSiegeMaxHp(ps);
         this.player.hp = Math.min(this.player.maxHp, this.player.hp + res.hpGain + 20);
         const defPart = res.defenseGain > 0 ? ` 防禦+${res.defenseGain}` : '';
-        this.spawnText(this.player.x, this.player.y - 44, `升級 Lv.${res.newLevel}! HP+${res.hpGain}${defPart}`, '#FACC15', 1.2);
+        this.spawnText(
+          this.player.x,
+          this.player.y - 44,
+          `升級 Lv.${res.newLevel}! 血量上限 ${Math.round(this.player.maxHp)} (+${res.hpGain})${defPart}`,
+          '#FACC15',
+          1.25
+        );
         if (res.oldLevel < SIEGE_CONFIG.tacticalUnlockLevel && res.newLevel >= SIEGE_CONFIG.tacticalUnlockLevel) {
           this.showBanner(
             `【Lv.${SIEGE_CONFIG.tacticalUnlockLevel} 解鎖】戰術技「${getTacticalMeta(ps.loadout.tacticalId).name}」已啟用（按 [E] 或右鍵施放）！`,
@@ -9176,6 +9198,7 @@ export class TwilightEngine {
             4.0
           );
         }
+        this.emitHud();
       }
       return;
     }

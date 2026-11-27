@@ -232,6 +232,7 @@ export interface NetProjectileSnapshot {
   ownerFaction: FactionId;
   isWave?: boolean;
   isLightOrb?: boolean;
+  healAllies?: boolean;
   isBlackDragon?: boolean;
   segs?: { x: number; y: number }[];
 }

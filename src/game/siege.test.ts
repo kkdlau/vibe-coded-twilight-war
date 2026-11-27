@@ -485,12 +485,15 @@ describe('3-Lane Castle Siege / MOBA Mode (siege)', () => {
     expect(engine.buySiegeUpgrade('core')).toBe(true);
     expect(engine.siege!.playerState.upgrades.core).toBe(3);
 
-    // Rank-3 Royal Light Rain evolves from 9 -> 11 orbs
+    // Rank-3 Royal Light Rain evolves from 9 -> 11 orbs, enlarges both orb radius & sweeping sword-wave slash
+    engine.slashes = [];
     engine.player.qi = 100;
     engine.setMouseDown(true);
     for (let i = 0; i < 60 && !engine.player.chargeReady; i++) engine.update(0.05, 1280, 720);
     engine.setMouseDown(false);
     expect(engine.projectiles.length).toBe(11);
+    expect(engine.projectiles.every((pr) => pr.radius >= 24)).toBe(true);
+    expect(engine.slashes.some((s) => s.isUltimate && s.reach >= 140)).toBe(true);
 
     // Rank-3 Shadow Twin Dragons evolves from 2 -> 3 dragons
     const { engine: shadowEng } = createSiegeEngine('shadow', { ultimateId: 'shadow_twin_dragons', meleeId: 'knife' });

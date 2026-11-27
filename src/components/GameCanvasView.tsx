@@ -673,8 +673,12 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
               <div className="mt-1 flex items-baseline gap-2 font-mono-num bg-slate-900/85 border border-slate-700/80 rounded px-2 py-0.5">
                 {hud.mode === 'siege' && hud.siege ? (
                   <div className="w-full">
-                    <div className="flex items-baseline gap-1.5">
+                    <div className="flex flex-wrap items-baseline gap-1.5">
                       <span className="text-[11px] font-sans text-sky-300 font-bold">Lv.{hud.siege.playerLevel}</span>
+                      <span className="text-slate-600">·</span>
+                      <span className="text-[11px] font-mono-num text-emerald-200 font-bold">
+                        HP {Math.round(p.hp)}/{Math.round(p.maxHp)}
+                      </span>
                       <span className="text-slate-600">·</span>
                       <span className="text-[11px] font-sans text-emerald-300 font-bold">防 {hud.siege.playerDefense}</span>
                       <span className="text-slate-600">·</span>

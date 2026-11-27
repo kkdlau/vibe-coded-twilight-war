@@ -1,62 +1,141 @@
 import { clamp } from './geometry';
 import type { ActorSkillVisuals, Projectile, SkillTrace } from './types';
 
+const royalLightSpriteCache: {
+  gold: HTMLImageElement | null;
+  heal: HTMLImageElement | null;
+} = {
+  gold: null,
+  heal: null,
+};
+let royalLightSpritesRequested = false;
+
+function getRoyalLightSprites(): { gold: HTMLImageElement | null; heal: HTMLImageElement | null } {
+  if (typeof Image === 'undefined') {
+    return { gold: null, heal: null };
+  }
+  if (!royalLightSpritesRequested) {
+    royalLightSpritesRequested = true;
+    const baseUrl = typeof import.meta !== 'undefined' && import.meta.env?.BASE_URL
+      ? import.meta.env.BASE_URL
+      : '/';
+    const load = (file: string) => {
+      const img = new Image();
+      img.decoding = 'async';
+      img.src = `${baseUrl}assets/vfx/${file}`;
+      return img;
+    };
+    royalLightSpriteCache.gold = load('royal-sword-light.png');
+    royalLightSpriteCache.heal = load('royal-healing-light.png');
+  }
+  return {
+    gold: isImageReady(royalLightSpriteCache.gold) ? royalLightSpriteCache.gold : null,
+    heal: isImageReady(royalLightSpriteCache.heal) ? royalLightSpriteCache.heal : null,
+  };
+}
+
+if (typeof Image !== 'undefined') {
+  getRoyalLightSprites();
+}
+
 function drawSwordLight(ctx: CanvasRenderingContext2D, projectile: Projectile) {
   const r = projectile.radius;
+  const isHeal = Boolean(projectile.healAllies);
   const phase = (projectile.maxLife - projectile.life) * 23;
   const roll = 0.66 + 0.34 * Math.sin(phase);
+  const sprites = getRoyalLightSprites();
+  const sprite = isHeal ? sprites.heal : sprites.gold;
+
   ctx.translate(projectile.x, projectile.y);
   ctx.rotate(Math.atan2(projectile.vy, projectile.vx));
 
+  // Luminous radial aura scaled dynamically by orb radius
+  const glow = ctx.createRadialGradient(0, 0, r * 0.15, 0, 0, r * 2.1);
+  if (isHeal) {
+    glow.addColorStop(0, 'rgba(187, 247, 208, 0.65)');
+    glow.addColorStop(0.5, 'rgba(74, 222, 128, 0.32)');
+    glow.addColorStop(1, 'rgba(34, 197, 94, 0)');
+  } else {
+    glow.addColorStop(0, 'rgba(255, 250, 214, 0.7)');
+    glow.addColorStop(0.5, 'rgba(250, 204, 21, 0.34)');
+    glow.addColorStop(1, 'rgba(56, 189, 248, 0)');
+  }
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 2.1, 0, Math.PI * 2);
+  ctx.fill();
+
   // Draw the sheared wake behind the cutting edge.
-  const wake = ctx.createLinearGradient(-r * 3.5, 0, r, 0);
-  wake.addColorStop(0, 'rgba(133, 113, 77, 0)');
-  wake.addColorStop(0.57, 'rgba(186, 157, 105, 0.29)');
-  wake.addColorStop(1, 'rgba(255, 237, 193, 0.84)');
+  const wake = ctx.createLinearGradient(-r * 3.8, 0, r, 0);
+  if (isHeal) {
+    wake.addColorStop(0, 'rgba(34, 197, 94, 0)');
+    wake.addColorStop(0.55, 'rgba(74, 222, 128, 0.34)');
+    wake.addColorStop(1, 'rgba(220, 252, 231, 0.85)');
+  } else {
+    wake.addColorStop(0, 'rgba(133, 113, 77, 0)');
+    wake.addColorStop(0.57, 'rgba(217, 179, 95, 0.34)');
+    wake.addColorStop(1, 'rgba(255, 237, 193, 0.86)');
+  }
   ctx.fillStyle = wake;
   for (const side of [-1, 1]) {
     const y = side * r;
     const drift = Math.sin(phase + side * 1.4) * r * 0.24;
     ctx.beginPath();
     ctx.moveTo(r * 0.68, 0);
-    ctx.bezierCurveTo(2, y * roll, -r * 1.1, y * 0.76, -r * 3.5, y * 0.4 + drift);
-    ctx.bezierCurveTo(-r * 1.58, y * 0.33, -r * 0.7, y * 0.52, r * 0.68, 0);
+    ctx.bezierCurveTo(2, y * roll, -r * 1.2, y * 0.8, -r * 3.8, y * 0.42 + drift);
+    ctx.bezierCurveTo(-r * 1.65, y * 0.35, -r * 0.72, y * 0.52, r * 0.68, 0);
     ctx.fill();
   }
 
-  ctx.save();
-  ctx.scale(1, roll);
-  const metal = ctx.createLinearGradient(-r, 0, r, 0);
-  metal.addColorStop(0, 'rgba(142, 107, 67, 0)');
-  metal.addColorStop(0.48, '#927454');
-  metal.addColorStop(0.78, '#DDC8A3');
-  metal.addColorStop(1, '#FFF6DB');
-  ctx.beginPath();
-  ctx.moveTo(-r * 0.9, -r);
-  ctx.bezierCurveTo(r * 0.66, -r * 0.97, r * 1.27, -r * 0.35, r * 1.04, 0);
-  ctx.bezierCurveTo(r * 1.27, r * 0.35, r * 0.66, r * 0.97, -r * 0.9, r);
-  ctx.bezierCurveTo(r * 0.11, r * 0.59, r * 0.28, -r * 0.59, -r * 0.9, -r);
-  ctx.fillStyle = metal;
-  ctx.fill();
+  if (sprite) {
+    const shimmer = 0.94 + 0.06 * Math.sin(phase * 0.7);
+    const drawW = r * 4.4 * shimmer;
+    const drawH = drawW * (sprite.naturalHeight / sprite.naturalWidth);
+    ctx.drawImage(sprite, -drawW * 0.56, -drawH * 0.5, drawW, drawH);
+  } else {
+    ctx.save();
+    ctx.scale(1, roll);
+    const metal = ctx.createLinearGradient(-r, 0, r, 0);
+    if (isHeal) {
+      metal.addColorStop(0, 'rgba(34, 197, 94, 0)');
+      metal.addColorStop(0.48, '#22C55E');
+      metal.addColorStop(0.78, '#BBF7D0');
+      metal.addColorStop(1, '#FFFBEB');
+    } else {
+      metal.addColorStop(0, 'rgba(142, 107, 67, 0)');
+      metal.addColorStop(0.48, '#C89B3C');
+      metal.addColorStop(0.78, '#FDE68A');
+      metal.addColorStop(1, '#FFF6DB');
+    }
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.9, -r);
+    ctx.bezierCurveTo(r * 0.66, -r * 0.97, r * 1.27, -r * 0.35, r * 1.04, 0);
+    ctx.bezierCurveTo(r * 1.27, r * 0.35, r * 0.66, r * 0.97, -r * 0.9, r);
+    ctx.bezierCurveTo(r * 0.11, r * 0.59, r * 0.28, -r * 0.59, -r * 0.9, -r);
+    ctx.fillStyle = metal;
+    ctx.fill();
 
-  ctx.strokeStyle = 'rgba(255, 253, 239, 0.85)';
-  ctx.lineWidth = 1.1;
-  ctx.beginPath();
-  ctx.moveTo(-r * 0.47, -r * 0.89);
-  ctx.quadraticCurveTo(r * 1.15, -r * 0.62, r * 1.07, 0);
-  ctx.quadraticCurveTo(r * 1.09, r * 0.4, r * 0.3, r * 0.67);
-  ctx.stroke();
-  ctx.restore();
+    ctx.strokeStyle = 'rgba(255, 253, 239, 0.88)';
+    ctx.lineWidth = Math.max(1.1, r * 0.09);
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.47, -r * 0.89);
+    ctx.quadraticCurveTo(r * 1.15, -r * 0.62, r * 1.07, 0);
+    ctx.quadraticCurveTo(r * 1.09, r * 0.4, r * 0.3, r * 0.67);
+    ctx.stroke();
+    ctx.restore();
+  }
 
   for (let i = 0; i < 3; i++) {
     const age = ((projectile.maxLife - projectile.life) * 8 + i / 3) % 1;
-    const x = -r * (0.5 + age * 2.6);
-    const y = (i - 1) * r * (0.33 + age * 0.34);
-    ctx.strokeStyle = `rgba(235, 206, 154, ${0.62 * (1 - age)})`;
-    ctx.lineWidth = 1;
+    const x = -r * (0.55 + age * 2.8);
+    const y = (i - 1) * r * (0.35 + age * 0.36);
+    ctx.strokeStyle = isHeal
+      ? `rgba(134, 239, 172, ${0.68 * (1 - age)})`
+      : `rgba(253, 224, 71, ${0.68 * (1 - age)})`;
+    ctx.lineWidth = Math.max(1, r * 0.08);
     ctx.beginPath();
     ctx.moveTo(x, y);
-    ctx.lineTo(x - r * 0.31, y);
+    ctx.lineTo(x - r * 0.35, y);
     ctx.stroke();
   }
 }
