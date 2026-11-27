@@ -16,6 +16,31 @@ import {
 import { drawMorphGround, drawProjectiles, drawSkillTraces, drawVampireMist } from './skillRenderer';
 import { FACTIONS, FACTION_CHARACTERS, GUNS, MELEES, getReputationQiMultiplier, getWeaponSwapDuration } from './data';
 import {
+  SIEGE_CONFIG,
+  SIEGE_UPGRADES,
+  getDefaultSiegeLoadout,
+  getTacticalMeta,
+  getUltimateMeta,
+  sanitizeSiegeLoadout,
+} from './siegeData';
+import { SIEGE_MAP_ID } from './siegeMap';
+import { drawSiegeFountains, drawSiegeStructures, drawSiegeZones } from './siegeRenderer';
+import {
+  SiegeHeroState,
+  SiegeRuntime,
+  computeSiegeMaxHp,
+  computeSiegeMoveSpeedMult,
+  computeSiegeRespawnSeconds,
+  computeSiegeTacticalCooldown,
+  createHeroSiegeState,
+  createSiegeRuntime,
+  getBossDisplayName,
+  grantSiegeXpAndGold,
+  pickSiegeAiHeroTemplate,
+  refreshStructureInvulnerability,
+  tryPurchaseSiegeUpgrade,
+} from './siegeHelpers';
+import {
   CHAR_BASE_RADIUS,
   ELEV_PADDING,
   angleDiff,
@@ -57,6 +82,7 @@ import { CustomMapData, buildArenaMapFromCustom } from './customMaps';
 import type {
   NetActorSnapshot,
   NetEquippedSlot,
+  NetSiegeSnapshot,
   NetTransientEvent,
   NetWorldSnapshot,
   RemotePlayerInput,
@@ -71,6 +97,7 @@ import {
   EquippedWeapon,
   FactionId,
   FloatingText,
+  GameMode,
   GridTile,
   GunDef,
   HudSnapshot,
@@ -82,6 +109,14 @@ import {
   PlayerState,
   Projectile,
   PushableIceBlock,
+  SiegeBossKind,
+  SiegeFactionId,
+  SiegeHudState,
+  SiegeLane,
+  SiegePlayerLoadout,
+  SiegeOptions,
+  SiegeStructure,
+  SiegeUpgradeTrack,
   SkillTrace,
   SlashEffect,
   WeaponHand,
@@ -142,6 +177,12 @@ interface RemoteHumanRuntime {
   lastSwapSeq: number;
   lastPickupSeq: number;
   lastDropSeq: number;
+  lastTacticalSeq: number;
+  lastUltSeq: number;
+  lastRecallSeq: number;
+  lastUpgradeSeq: number;
+  disconnected?: boolean;
+  siegeLoadout?: SiegePlayerLoadout;
   input: RemotePlayerInput;
 }
 
@@ -224,7 +265,8 @@ function evaluateBlackDragonHit(
 }
 
 export class TwilightEngine {
-  public mode = 'frontier' as const;
+  public mode: GameMode = 'frontier';
+  public siege: SiegeRuntime | null = null;
   public mapId: string;
   public status: HudSnapshot['status'] = 'PLAYING';
   public map: ArenaMap;
@@ -284,6 +326,7 @@ export class TwilightEngine {
   private remoteHumans = new Map<string, RemoteHumanRuntime>();
   private netEvents: NetTransientEvent[] = [];
   private snapshotSeq = 0;
+  private forceNextKeyframe = false;
   private lastReputationSnapshotSeq = 0;
   private appliedReputationChanges: Record<FactionId, number> = { royal: 0, shadow: 0, mercenary: 0 };
   private spectatorMode: 'follow' | 'free' = 'follow';
@@ -302,24 +345,42 @@ export class TwilightEngine {
     onReputationChange?: ReputationChangeHandler,
     customMap?: CustomMapData,
     private readonly difficulty: AiDifficulty = 'standard',
-    multiplayer?: MultiplayerEngineConfig
+    multiplayer?: MultiplayerEngineConfig,
+    mode: GameMode = 'frontier',
+    siegeOptions?: SiegeOptions
   ) {
-    this.mapId = mapId;
+    this.mode = mode;
+    const activeFaction: FactionId = mode === 'siege' && faction === 'mercenary' ? 'royal' : faction;
+    const effectiveMapId = mode === 'siege' && !customMap ? SIEGE_MAP_ID : mapId;
+    this.mapId = effectiveMapId;
     this.onHudUpdate = onHudUpdate;
     this.onReputationChange = onReputationChange;
     this.multiplayer = multiplayer;
 
-    this.map = customMap ? buildArenaMapFromCustom(customMap) : createArenaMap(mapId);
-    const fac = FACTIONS[faction];
+    this.map = customMap ? buildArenaMapFromCustom(customMap) : createArenaMap(effectiveMapId);
+    const fac = FACTIONS[activeFaction];
     const startGun = GUNS.find((g) => g.id === fac.startGunId) || GUNS[0];
     const startMelee = MELEES.find((m) => m.id === fac.startMeleeId) || MELEES[0];
-    const spawnPt = this.map.factionSpawns[faction][0] || { x: this.map.width / 2, y: this.map.height / 2 };
+
+    if (mode === 'siege') {
+      const siegeFac: SiegeFactionId = activeFaction === 'shadow' ? 'shadow' : 'royal';
+      this.siege = createSiegeRuntime(siegeFac, characterSkin.id, siegeOptions?.loadout, siegeOptions?.durationSec);
+    }
+
+    const siegeLoadout = this.siege?.playerState.loadout;
+    const chosenGun = (siegeLoadout && ALL_GUNS_BY_ID.get(siegeLoadout.gunId)) || startGun;
+    const chosenMelee = (siegeLoadout && ALL_MELEES_BY_ID.get(siegeLoadout.meleeId)) || startMelee;
+    const spawnPt = this.siege
+      ? this.siege.spec.fountains[activeFaction === 'shadow' ? 'shadow' : 'royal']
+      : this.map.factionSpawns[activeFaction][0] || { x: this.map.width / 2, y: this.map.height / 2 };
 
     const normalizedReps: Record<FactionId, number> = {
       royal: Math.floor(Number.isFinite(initialReputations.royal) ? initialReputations.royal : 0),
       shadow: Math.floor(Number.isFinite(initialReputations.shadow) ? initialReputations.shadow : 0),
       mercenary: Math.floor(Number.isFinite(initialReputations.mercenary) ? initialReputations.mercenary : 0),
     };
+
+    const startMaxHp = this.siege ? computeSiegeMaxHp(this.siege.playerState) : 100;
 
     this.player = {
       x: spawnPt.x,
@@ -333,14 +394,14 @@ export class TwilightEngine {
       walkPhase: 0,
       moveIntensity: 0,
       elevation: 0,
-      hp: 100,
-      maxHp: 100,
+      hp: startMaxHp,
+      maxHp: startMaxHp,
       maxShield: 100,
       qi: 100,
       maxQi: 100,
-      lives: 3,
-      maxLives: 3,
-      reputation: normalizedReps[faction],
+      lives: this.siege ? 999 : 3,
+      maxLives: this.siege ? 999 : 3,
+      reputation: normalizedReps[activeFaction],
       reputations: normalizedReps,
       score: 0,
       totalDamage: 0,
@@ -348,12 +409,19 @@ export class TwilightEngine {
       maxCombo: 0,
       comboCount: 0,
       comboTimer: 0,
-      faction,
+      faction: activeFaction,
       characterSkin,
       activeHand: 0,
-      weapons: [equipGun(startGun), { type: 'melee', def: startMelee, durability: 0 }],
-      reserveAmmo: 30,
-      maxReserveAmmo: 45,
+      weapons: [
+        equipGun(chosenGun),
+        {
+          type: 'melee',
+          def: chosenMelee,
+          durability: chosenMelee.kind === 'shield' ? 100 : 0,
+        },
+      ],
+      reserveAmmo: this.siege ? 45 : 30,
+      maxReserveAmmo: this.siege ? 60 : 45,
       swapTimer: 0,
       swapDuration: 0,
       gunfireTimer: 0,
@@ -386,35 +454,46 @@ export class TwilightEngine {
     this.camera.y = initCam.y;
 
     // 三大陣營各自擁有 10 名士兵總兵力（合計 30 人），同陣營場上最多 2 人（真人可自由組隊不受 2 人AI上限限制）
-    this.deploymentQueue = {
-      royal: 10,
-      shadow: 10,
-      mercenary: 10,
-    };
+    this.deploymentQueue = this.siege
+      ? { royal: 0, shadow: 0, mercenary: 0 }
+      : {
+          royal: 10,
+          shadow: 10,
+          mercenary: 10,
+        };
     if (multiplayer) {
-      for (const peer of multiplayer.peers) {
-        this.deploymentQueue[peer.faction] = Math.max(0, this.deploymentQueue[peer.faction] - 1);
+      if (!this.siege) {
+        for (const peer of multiplayer.peers) {
+          this.deploymentQueue[peer.faction] = Math.max(0, this.deploymentQueue[peer.faction] - 1);
+        }
       }
       if (multiplayer.role === 'host') {
         this.initRemoteHumans(multiplayer);
       }
-    } else {
-      this.deploymentQueue[faction] = 9; // 玩家已佔用己方陣營第 1 席
+    } else if (!this.siege) {
+      this.deploymentQueue[activeFaction] = 9; // 玩家已佔用己方陣營第 1 席
     }
 
     this.buildNavigationGraph();
-    this.spawnMapWeapons();
-    this.spawnMapAmmoPickups();
-    this.spawnMapShieldPickups();
-    if (multiplayer?.role !== 'client') {
-      this.refillFieldUpToCap();
-    }
+    if (this.siege) {
+      if (multiplayer?.role !== 'client') {
+        this.initSiegeTeams();
+      }
+      this.showBanner(`${this.map.name} · 5v5 三路推塔攻防戰！摧毀敵方主城堡即奪勝！`, 5.0);
+    } else {
+      this.spawnMapWeapons();
+      this.spawnMapAmmoPickups();
+      this.spawnMapShieldPickups();
+      if (multiplayer?.role !== 'client') {
+        this.refillFieldUpToCap();
+      }
 
-    const winObjective =
-      faction === 'mercenary'
-        ? '第三勢力勝利條件：擊敗場上與後備全數敵我角色！'
-        : `${fac.name}勝利條件：清除全數非己方勢力敵軍！`;
-    this.showBanner(`${this.map.name} · 各陣營 10 兵編制（同陣營上限 2 人） · ${winObjective}`, 4.5);
+      const winObjective =
+        activeFaction === 'mercenary'
+          ? '第三勢力勝利條件：擊敗場上與後備全數敵我角色！'
+          : `${fac.name}勝利條件：清除全數非己方勢力敵軍！`;
+      this.showBanner(`${this.map.name} · 各陣營 10 兵編制（同陣營上限 2 人） · ${winObjective}`, 4.5);
+    }
     this.emitHud();
   }
 
@@ -505,22 +584,38 @@ export class TwilightEngine {
     }
   }
 
-  private findNearestStandableTile(gx: number, gy: number): number | null {
+  private isBlockedByAliveSiegeStructure(
+    x: number,
+    y: number,
+    extraRadius = getMoveCheckRadius(CHAR_BASE_RADIUS)
+  ): boolean {
+    if (!this.siege) return false;
+    for (const s of this.siege.structures) {
+      if (s.alive && dist(x, y, s.x, s.y) < s.radius + extraRadius) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private findNearestStandableTile(gx: number, gy: number, avoidStructures = false): number | null {
     const clampedX = clamp(gx, 0, this.map.cols - 1);
     const clampedY = clamp(gy, 0, this.map.rows - 1);
+    const isBlocked = (tx: number, ty: number) =>
+      avoidStructures && this.isBlockedByAliveSiegeStructure((tx + 0.5) * TILE, (ty + 0.5) * TILE);
     const direct = this.tileIndex(clampedX, clampedY);
-    if (this.navStandable.has(direct)) return direct;
+    if (this.navStandable.has(direct) && !isBlocked(clampedX, clampedY)) return direct;
 
     let bestIdx: number | null = null;
     let bestD = Infinity;
-    for (let r = 1; r <= 3; r++) {
+    for (let r = 1; r <= 4; r++) {
       for (let oy = -r; oy <= r; oy++) {
         for (let ox = -r; ox <= r; ox++) {
           const nx = clampedX + ox;
           const ny = clampedY + oy;
           if (nx < 0 || nx >= this.map.cols || ny < 0 || ny >= this.map.rows) continue;
           const idx = this.tileIndex(nx, ny);
-          if (this.navStandable.has(idx)) {
+          if (this.navStandable.has(idx) && !isBlocked(nx, ny)) {
             const d = Math.abs(ox) + Math.abs(oy);
             if (d < bestD) {
               bestD = d;
@@ -539,8 +634,9 @@ export class TwilightEngine {
    */
   public findPathAStar(startX: number, startY: number, goalX: number, goalY: number): GridTile[] {
     const { cols } = this.map;
-    const startIdx = this.findNearestStandableTile(Math.floor(startX / TILE), Math.floor(startY / TILE));
-    const goalIdx = this.findNearestStandableTile(Math.floor(goalX / TILE), Math.floor(goalY / TILE));
+    const avoidStructures = Boolean(this.siege);
+    const startIdx = this.findNearestStandableTile(Math.floor(startX / TILE), Math.floor(startY / TILE), avoidStructures);
+    const goalIdx = this.findNearestStandableTile(Math.floor(goalX / TILE), Math.floor(goalY / TILE), avoidStructures);
     if (startIdx === null || goalIdx === null) return [];
 
     const goalGx = goalIdx % cols;
@@ -586,6 +682,18 @@ export class TwilightEngine {
       for (const nxt of this.navAdj.get(current) || []) {
         const ngx = nxt % cols;
         const ngy = Math.floor(nxt / cols);
+        if (avoidStructures) {
+          const nxtCenterX = (ngx + 0.5) * TILE;
+          const nxtCenterY = (ngy + 0.5) * TILE;
+          const edgeMidX = ((curGx + ngx) * 0.5 + 0.5) * TILE;
+          const edgeMidY = ((curGy + ngy) * 0.5 + 0.5) * TILE;
+          if (
+            this.isBlockedByAliveSiegeStructure(nxtCenterX, nxtCenterY) ||
+            this.isBlockedByAliveSiegeStructure(edgeMidX, edgeMidY)
+          ) {
+            continue;
+          }
+        }
         const nxtElev = this.getWalkableElevation((ngx + 0.5) * TILE, (ngy + 0.5) * TILE);
         const stepCost = 1 + (Math.abs(nxtElev - curElev) > 0.01 ? 0.08 : 0);
         const tentativeG = curG + stepCost;
@@ -660,6 +768,7 @@ export class TwilightEngine {
   private checkVictoryCondition() {
     if (this.status !== 'PLAYING') return;
     if (this.multiplayer?.role === 'client') return;
+    if (this.mode === 'siege') return;
     const p = this.player;
 
     if (this.multiplayer?.role === 'host') {
@@ -777,6 +886,13 @@ export class TwilightEngine {
           cy <= obs.y + obs.h + pad
         ) {
           return false;
+        }
+      }
+      if (this.siege) {
+        for (const s of this.siege.structures) {
+          if (s.alive && dist(cx, cy, s.x, s.y) < s.radius + pad) {
+            return false;
+          }
         }
       }
       return true;
@@ -976,6 +1092,21 @@ export class TwilightEngine {
       const res = resolveCircleRect(nx, ny, padRadius, tree);
       nx = res.x;
       ny = res.y;
+    }
+
+    if (this.siege) {
+      for (const s of this.siege.structures) {
+        if (!s.alive) continue;
+        const dx = nx - s.x;
+        const dy = ny - s.y;
+        const minD = s.radius + padRadius;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < minD * minD) {
+          const d = Math.sqrt(d2) || 0.001;
+          nx = s.x + (dx / d) * minD;
+          ny = s.y + (dy / d) * minD;
+        }
+      }
     }
 
     nx = clamp(nx, padRadius, this.map.width - padRadius);
@@ -1507,7 +1638,49 @@ export class TwilightEngine {
       return;
     }
 
-    if (this.status !== 'PLAYING') return;
+    if (this.status !== 'PLAYING') {
+      if (this.mode === 'siege' && this.status === 'RESPAWNING') {
+        if (code === 'Digit3') this.buySiegeUpgrade('firepower');
+        else if (code === 'Digit4') this.buySiegeUpgrade('blade');
+        else if (code === 'Digit5') this.buySiegeUpgrade('armor');
+        else if (code === 'Digit6') this.buySiegeUpgrade('core');
+      }
+      return;
+    }
+
+    if (this.mode === 'siege') {
+      if (code === 'KeyE') {
+        this.triggerSiegeTactical();
+        return;
+      }
+      if (code === 'KeyF') {
+        this.triggerSiegeUltimate();
+        return;
+      }
+      if (code === 'KeyB') {
+        this.startSiegeRecall();
+        return;
+      }
+      if (code === 'Digit3') {
+        this.buySiegeUpgrade('firepower');
+        return;
+      }
+      if (code === 'Digit4') {
+        this.buySiegeUpgrade('blade');
+        return;
+      }
+      if (code === 'Digit5') {
+        this.buySiegeUpgrade('armor');
+        return;
+      }
+      if (code === 'Digit6') {
+        this.buySiegeUpgrade('core');
+        return;
+      }
+      if (code === 'Escape' || code === 'Space') {
+        return;
+      }
+    }
 
     if (code === 'Escape') {
       this.dropActiveWeapon();
@@ -1577,11 +1750,15 @@ export class TwilightEngine {
   private getPlayerGunSpread(gun: GunDef) {
     const p = this.player;
     const pointer = this.getWorldPointer();
+    let focus = p.eagleEyeTimer > 0 ? RIFLE_RECOIL.eagleEyeMultiplier : 1;
+    if (this.siege?.playerState.loadout.passiveId === 'royal_steady_aim') {
+      focus *= 0.75;
+    }
     return getGunSpread(
       gun.kind,
       gun.baseCrosshair + this.crosshairBloom,
       dist(p.x, p.y, pointer.x, pointer.y),
-      p.eagleEyeTimer > 0 ? RIFLE_RECOIL.eagleEyeMultiplier : 1
+      focus
     );
   }
 
@@ -1630,7 +1807,14 @@ export class TwilightEngine {
       sfx.emptyGun();
       return;
     }
-    weapon.reloadTimer = weapon.def.reloadTime;
+    let reloadMult = 1;
+    if (this.siege) {
+      const ps = this.siege.playerState;
+      reloadMult -= (ps.upgrades.firepower ?? 0) * 0.08;
+      if (ps.loadout.passiveId === 'royal_steady_aim') reloadMult -= 0.15;
+      reloadMult = Math.max(0.55, reloadMult);
+    }
+    weapon.reloadTimer = weapon.def.reloadTime * reloadMult;
     sfx.reload(weapon.def.kind, 'start');
     this.spawnText(p.x, p.y - 36, '裝填彈藥中...', '#FBBF24', 0.95);
     this.emitHud();
@@ -1728,6 +1912,10 @@ export class TwilightEngine {
     if (weapon.type === 'gun') {
       if (weapon.reloadTimer > 0 || weapon.ammoInMag <= 0) return;
 
+      if (this.siege) {
+        this.siege.playerState.recallTimer = 0;
+        this.siege.playerState.outOfCombatTimer = 0;
+      }
       if (p.royalShieldTimer > 0) {
         p.royalShieldTimer = 0;
         this.spawnText(p.x, p.y - 40, '遠程開火 · 聖光護盾破裂!', '#38BDF8', 1.1);
@@ -1763,45 +1951,66 @@ export class TwilightEngine {
         let segEndY = fullSeg.y2;
 
         // 槍械子彈碰人即止，不可一子彈攻擊兩人，且不得隔實牆、對角牆縫或地形高箱遮擋擦邊命中！
-        const candidates: { enemy: EnemyEntity; t: number; perpDist: number; hitX: number; hitY: number }[] = [];
+        type PlayerHitCandidate =
+          | { kind: 'enemy'; enemy: EnemyEntity; t: number; perpDist: number; hitX: number; hitY: number }
+          | { kind: 'structure'; structure: SiegeStructure; t: number; perpDist: number; hitX: number; hitY: number };
+        const candidates: PlayerHitCandidate[] = [];
         for (const e of this.enemies) {
+          if (this.mode === 'siege' && !areHostile(p.faction, 'player', e.faction, e.id)) continue;
           if (e.elevation - p.elevation >= 2.0) continue;
           const res = this.getHitscanContact(fullSeg, e);
           if (!res.hit) continue;
           if (this.findEarliestWallHit(res.hitX, res.hitY, e.x, e.y)) continue;
           const hitDist = dist(fullSeg.x1, fullSeg.y1, res.hitX, res.hitY);
           if (e.elevation - fullSeg.elevAt(hitDist) >= 2.0) continue;
-          candidates.push({ enemy: e, ...res });
+          candidates.push({ kind: 'enemy', enemy: e, ...res });
+        }
+        if (this.siege) {
+          for (const st of this.siege.structures) {
+            if (!st.alive || st.faction === p.faction) continue;
+            const res = segmentCircleHit(fullSeg.x1, fullSeg.y1, fullSeg.x2, fullSeg.y2, st.x, st.y, st.radius);
+            if (!res.hit) continue;
+            if (this.findEarliestWallHit(fullSeg.x1, fullSeg.y1, res.hitX, res.hitY)) continue;
+            candidates.push({ kind: 'structure', structure: st, ...res });
+          }
         }
         candidates.sort((c1, c2) => c1.t - c2.t);
 
         if (candidates.length > 0) {
           const hitInfo = candidates[0];
-          const centerAccuracy = clamp(1 - hitInfo.perpDist / hitInfo.enemy.radius, 0, 1);
-          const accuracyFactor = 0.28 + 0.72 * centerAccuracy;
-          const maxShotDmg = gun.damage * comboMult;
-          const actualDmg = Math.max(1, Math.round(maxShotDmg * accuracyFactor));
-
-          if (hitInfo.enemy.royalShieldTimer > 0) {
-            this.deflectShieldShot(hitInfo.enemy, hitInfo.hitX, hitInfo.hitY, a);
+          const firepowerMult = this.siege ? 1 + (this.siege.playerState.upgrades.firepower ?? 0) * 0.14 : 1;
+          if (hitInfo.kind === 'structure') {
+            const maxShotDmg = gun.damage * comboMult * firepowerMult;
+            this.damageSiegeStructure(hitInfo.structure, Math.max(1, Math.round(maxShotDmg)), 'player', p.faction);
+            segEndX = hitInfo.hitX;
+            segEndY = hitInfo.hitY;
           } else {
-            this.damageEnemy(
-              hitInfo.enemy,
-              actualDmg,
-              false,
-              Math.cos(a) * 100,
-              Math.sin(a) * 100,
-              centerAccuracy >= 0.8,
-              false,
-              'player',
-              p.faction,
-              p.x,
-              p.y
-            );
-          }
+            const centerAccuracy = clamp(1 - hitInfo.perpDist / hitInfo.enemy.radius, 0, 1);
+            const accuracyFactor = 0.28 + 0.72 * centerAccuracy;
+            const maxShotDmg = gun.damage * comboMult * firepowerMult;
+            const actualDmg = Math.max(1, Math.round(maxShotDmg * accuracyFactor));
 
-          segEndX = hitInfo.hitX;
-          segEndY = hitInfo.hitY;
+            if (hitInfo.enemy.royalShieldTimer > 0) {
+              this.deflectShieldShot(hitInfo.enemy, hitInfo.hitX, hitInfo.hitY, a);
+            } else {
+              this.damageEnemy(
+                hitInfo.enemy,
+                actualDmg,
+                false,
+                Math.cos(a) * 100,
+                Math.sin(a) * 100,
+                centerAccuracy >= 0.8,
+                false,
+                'player',
+                p.faction,
+                p.x,
+                p.y
+              );
+            }
+
+            segEndX = hitInfo.hitX;
+            segEndY = hitInfo.hitY;
+          }
         } else if (reachedMuzzle && fullSegDist < infiniteRange - 1) {
           this.spawnBurst(fullSeg.x2, fullSeg.y2, '#E2E8F0', 4);
         }
@@ -1880,7 +2089,12 @@ export class TwilightEngine {
     }
     this.emitNetSfx('melee', p.x, p.y, melee.kind);
     const giantMult = p.giantTimer > 0 ? 1.3 : 1.0;
-    const dmg = Math.round(melee.damage * comboMult * giantMult);
+    const bladeMult = this.siege ? 1 + (this.siege.playerState.upgrades.blade ?? 0) * 0.16 : 1.0;
+    const dmg = Math.round(melee.damage * comboMult * giantMult * bladeMult);
+    if (this.siege) {
+      this.siege.playerState.recallTimer = 0;
+      this.siege.playerState.outOfCombatTimer = 0;
+    }
     if (melee.kind !== 'shield') {
       const style = melee.kind === 'knife' ? 'thrust' : melee.kind === 'claw' ? 'claw' : 'sweep';
       this.pushSlash({
@@ -1913,6 +2127,15 @@ export class TwilightEngine {
     const p = this.player;
     const fac = p.faction;
     const mk = weapon.def.kind;
+    if (this.mode === 'siege' && this.siege && mk !== 'shield') {
+      const ultId = this.siege.playerState.loadout.ultimateId;
+      const ultMeta = getUltimateMeta(ultId);
+      this.activeSkillBanner = `${FACTIONS[fac].name} · ${ultMeta.name}`;
+      this.activeSkillBannerTimer = 2.5;
+      this.castSiegeUltimateSkill('player', p, ultId, p.angle, comboMult);
+      this.emitHud();
+      return;
+    }
     const facColor = FACTIONS[fac].accentHex;
     const skillName = FACTIONS[fac].meleeSkills[mk].name;
 
@@ -2150,6 +2373,17 @@ export class TwilightEngine {
         }
       }
     }
+    if (this.siege && damage > 0) {
+      for (const st of this.siege.structures) {
+        if (!st.alive || st.faction === this.player.faction) continue;
+        if (dist(ox, oy, st.x, st.y) <= reach + st.radius) {
+          const ang = Math.atan2(st.y - oy, st.x - ox);
+          if (Math.abs(angleDiff(aimAngle, ang)) <= arc * 0.62) {
+            this.damageSiegeStructure(st, damage, 'player', this.player.faction);
+          }
+        }
+      }
+    }
   }
 
   private isFrontalShieldBlock(defX: number, defY: number, defAngle: number, origX: number, origY: number): boolean {
@@ -2247,6 +2481,7 @@ export class TwilightEngine {
     victim: { faction: FactionId; x: number; y: number },
     friendlyFire: boolean
   ) {
+    if (this.mode === 'siege') return;
     const local = attackerId === 'player';
     const remote = this.getRemoteHumanByEntityId(attackerId);
     if (!local && !remote) return;
@@ -2299,7 +2534,7 @@ export class TwilightEngine {
     const isHostile = areHostile(attackerFaction, attackerId, enemy.faction, enemy.id);
 
     if (!isHostile) {
-      if (noFriendlyFire || baseDmg <= 0) return;
+      if (noFriendlyFire || baseDmg <= 0 || this.mode === 'siege') return;
       const ffDmg = Math.max(1, Math.round(baseDmg * 0.5));
       enemy.hp -= ffDmg;
       enemy.hitFlash = 0.12;
@@ -2331,6 +2566,42 @@ export class TwilightEngine {
     if (enemy.royalShieldTimer > 0 && isMelee) dmg *= 0.8;
     if (enemy.shrinkTimer > 0 && isMelee) dmg *= 1.35;
     if (enemy.giantTimer > 0) dmg *= 0.9;
+
+    if (this.siege && dmg > 0) {
+      if (enemy.siegeAegisReflectTimer && enemy.siegeAegisReflectTimer > 0) {
+        dmg *= 0.4;
+        if (!isMelee && hitOriginX !== undefined && hitOriginY !== undefined) {
+          const reflectDmg = Math.max(2, Math.round(baseDmg * 0.35));
+          if (isPlayerAttacker && p.hp > 0) {
+            this.damagePlayer(reflectDmg, false, enemy.id, enemy.x, enemy.y);
+          } else {
+            const ae = this.enemies.find((x) => x.id === attackerId);
+            if (ae && ae.hp > 0) {
+              ae.hp = Math.max(1, ae.hp - reflectDmg);
+              this.spawnText(ae.x, ae.y - 26, `反震 -${reflectDmg}`, '#38BDF8', 0.85, true);
+            }
+          }
+        }
+      }
+      if ((enemy.siegeMarkedTimer ?? 0) > 0) {
+        dmg *= 1.22;
+      }
+      if (this.isInSanctuaryZone(enemy.x, enemy.y, enemy.faction)) {
+        dmg *= 0.75;
+      }
+      const attackerHero = this.getSiegeHeroState(attackerId);
+      if (attackerHero) {
+        if (attackerHero.loadout.passiveId === 'shadow_assassin' && enemy.hp / enemy.maxHp < 0.45) {
+          dmg *= 1.2;
+        }
+        if (
+          attackerHero.loadout.passiveId === 'shadow_executioner' &&
+          (enemy.siegeUnitKind === 'hero' || enemy.siegeUnitKind === 'boss')
+        ) {
+          dmg *= 1.15;
+        }
+      }
+    }
 
     let finalDmg = baseDmg <= 0 ? 0 : Math.max(1, Math.round(dmg));
 
@@ -2419,8 +2690,17 @@ export class TwilightEngine {
       p.totalDamage += finalDmg;
       p.score += finalDmg;
 
-      if (p.hp > 0 && p.vampireTimer > 0 && finalDmg > 0) {
-        this.applyVampireHealing(p, enemy, finalDmg, isMelee);
+      if (p.hp > 0 && finalDmg > 0) {
+        if (p.vampireTimer > 0) {
+          this.applyVampireHealing(p, enemy, finalDmg, isMelee);
+        } else if (
+          this.siege &&
+          (p.faction === 'royal' || p.faction === 'shadow') &&
+          this.siege.teamBuffs[p.faction].baronTimer > 0
+        ) {
+          const heal = Math.max(1, Math.round(finalDmg * 0.15));
+          p.hp = Math.min(p.maxHp, p.hp + heal);
+        }
       }
 
       if (finalDmg > 0) {
@@ -2434,9 +2714,22 @@ export class TwilightEngine {
         attackingHumanRuntime.score += finalDmg;
         this.emitNetSfx('hit', enemy.x, enemy.y, undefined, bullseye);
       }
-      if (attackerEntity && attackerEntity.vampireTimer > 0 && finalDmg > 0) {
-        this.applyVampireHealing(attackerEntity, enemy, finalDmg, isMelee);
+      if (attackerEntity && finalDmg > 0) {
+        if (attackerEntity.vampireTimer > 0) {
+          this.applyVampireHealing(attackerEntity, enemy, finalDmg, isMelee);
+        } else if (
+          this.siege &&
+          (attackerEntity.faction === 'royal' || attackerEntity.faction === 'shadow') &&
+          this.siege.teamBuffs[attackerEntity.faction].baronTimer > 0
+        ) {
+          const heal = Math.max(1, Math.round(finalDmg * 0.15));
+          attackerEntity.hp = Math.min(attackerEntity.maxHp, attackerEntity.hp + heal);
+        }
       }
+    }
+
+    if (this.siege && finalDmg > 0 && enemy.siegeUnitKind === 'hero' && (attackerId === 'player' || this.enemies.some((a) => a.id === attackerId && a.siegeUnitKind === 'hero'))) {
+      this.notifySiegeTurretHeroAggro(attackerId, enemy);
     }
 
     this.spawnBurst(enemy.x, enemy.y, finalDmg === 0 ? '#FFFFFF' : bullseye ? '#FBBF24' : '#F87171', bullseye ? 7 : 5);
@@ -2466,6 +2759,10 @@ export class TwilightEngine {
 
     this.recordKillReputation(attackerId, enemy, friendlyFire);
 
+    if (this.siege) {
+      this.handleSiegeEnemyRemoved(enemy, attackerId);
+    }
+
     if (attackerId === 'player' && !friendlyFire) {
       const p = this.player;
       p.kills += 1;
@@ -2490,20 +2787,30 @@ export class TwilightEngine {
     if (enemy.isHumanPlayer && enemy.peerId) {
       const victimRt = this.remoteHumans.get(enemy.peerId);
       if (victimRt) {
-        victimRt.lives = Math.max(0, victimRt.lives - 1);
-        if (victimRt.lives > 0) {
-          victimRt.respawnTimer = RESPAWN_DELAY_SECONDS;
-          this.spawnText(enemy.x, enemy.y - 36, `${victimRt.name} 重傷撤離 (剩 ${victimRt.lives} 命)`, '#FBBF24', 1.0);
+        if (this.siege) {
+          const rState = this.siege.remoteStates.get(enemy.peerId);
+          if (rState) rState.deaths += 1;
+          const respSec = computeSiegeRespawnSeconds(this.siege.matchTime, this.siege.suddenDeath);
+          victimRt.respawnTimer = respSec;
+          this.spawnText(enemy.x, enemy.y - 36, `${victimRt.name} 陣亡 (${respSec}s 後復活)`, '#FBBF24', 1.0);
         } else {
-          this.spawnText(enemy.x, enemy.y - 36, `${victimRt.name} 已陣亡淘汰`, '#F87171', 1.05);
+          victimRt.lives = Math.max(0, victimRt.lives - 1);
+          if (victimRt.lives > 0) {
+            victimRt.respawnTimer = RESPAWN_DELAY_SECONDS;
+            this.spawnText(enemy.x, enemy.y - 36, `${victimRt.name} 重傷撤離 (剩 ${victimRt.lives} 命)`, '#FBBF24', 1.0);
+          } else {
+            this.spawnText(enemy.x, enemy.y - 36, `${victimRt.name} 已陣亡淘汰`, '#F87171', 1.05);
+          }
         }
       }
     }
 
-    // 場上武器數量固定：只有非預設武器（非小槍／非小刀）會在持有者陣亡時掉回地面，防彈盾保留剩餘耐久
-    const droppedFirst = this.dropWeapon(enemy.weapons[0], enemy.x, enemy.y);
-    const secondX = droppedFirst ? clamp(enemy.x + 18, TILE * 0.5, this.map.width - TILE * 0.5) : enemy.x;
-    this.dropWeapon(enemy.weapons[1], secondX, enemy.y);
+    if (!this.siege) {
+      // 場上武器數量固定：只有非預設武器（非小槍／非小刀）會在持有者陣亡時掉回地面，防彈盾保留剩餘耐久
+      const droppedFirst = this.dropWeapon(enemy.weapons[0], enemy.x, enemy.y);
+      const secondX = droppedFirst ? clamp(enemy.x + 18, TILE * 0.5, this.map.width - TILE * 0.5) : enemy.x;
+      this.dropWeapon(enemy.weapons[1], secondX, enemy.y);
+    }
 
     this.checkVictoryCondition();
     this.emitHud();
@@ -2555,6 +2862,39 @@ export class TwilightEngine {
     if (p.royalShieldTimer > 0 && isMeleeAttack) dmg *= 0.8;
     if (p.shrinkTimer > 0 && isMeleeAttack) dmg *= 1.35;
     if (p.giantTimer > 0) dmg *= 0.9;
+
+    if (this.siege && dmg > 0) {
+      const ps = this.siege.playerState;
+      ps.recallTimer = 0;
+      if (ps.aegisReflectTimer > 0) {
+        dmg *= 0.4;
+        if (!isMeleeAttack && attackerId) {
+          const ae = this.enemies.find((e) => e.id === attackerId);
+          if (ae && ae.hp > 0) {
+            const reflectDmg = Math.max(2, Math.round(rawDmg * 0.35));
+            this.damageEnemy(ae, reflectDmg, false, 0, 0, false, true, 'player', p.faction, p.x, p.y);
+          }
+        }
+      }
+      if (ps.markedTimer > 0) dmg *= 1.22;
+      if (this.isInSanctuaryZone(p.x, p.y, p.faction === 'shadow' ? 'shadow' : 'royal')) {
+        dmg *= 0.75;
+      }
+      if (attackerId?.startsWith('turret_') && ps.loadout.passiveId === 'royal_fortitude') {
+        dmg *= 0.85;
+      }
+      if (attackerId) {
+        const attackerHero = this.getSiegeHeroState(attackerId);
+        if (attackerHero) {
+          if (attackerHero.loadout.passiveId === 'shadow_assassin' && p.hp / p.maxHp < 0.45) {
+            dmg *= 1.2;
+          }
+          if (attackerHero.loadout.passiveId === 'shadow_executioner') {
+            dmg *= 1.15;
+          }
+        }
+      }
+    }
 
     let finalDmg = rawDmg <= 0 ? 0 : Math.max(2, Math.round(dmg));
 
@@ -2614,9 +2954,30 @@ export class TwilightEngine {
       this.recordKillReputation(attacker.entityId, p, !areHostile(attacker.faction, attacker.entityId, p.faction, 'player'));
     }
     p.hp = 0;
-    p.lives -= 1;
     this.clearInputs();
     sfx.playerDown();
+
+    if (this.siege) {
+      const ps = this.siege.playerState;
+      ps.deaths += 1;
+      ps.recallTimer = 0;
+      ps.aegisReflectTimer = 0;
+      ps.smokeSpeedTimer = 0;
+      ps.markedTimer = 0;
+      if (attackerId) {
+        const ae = this.enemies.find((e) => e.id === attackerId);
+        if (ae && ae.siegeUnitKind === 'hero') {
+          this.awardSiegeHeroKill(attackerId, 150, 130, true);
+        }
+      }
+      this.status = 'RESPAWNING';
+      this.respawnTimer = computeSiegeRespawnSeconds(this.siege.matchTime, this.siege.suddenDeath);
+      this.spawnBurst(p.x, p.y, FACTIONS[p.faction].accentHex, 16);
+      this.emitHud();
+      return;
+    }
+
+    p.lives -= 1;
 
     const droppedFirst = this.dropWeapon(p.weapons[0], p.x, p.y);
     const secondX = droppedFirst ? clamp(p.x + 18, TILE * 0.5, this.map.width - TILE * 0.5) : p.x;
@@ -2655,13 +3016,25 @@ export class TwilightEngine {
       enemy.chargingMelee = false;
       enemy.chargeReady = false;
     }
-    const spawnPt = this.map.factionSpawns[p.faction][0];
+    const spawnPt = this.siege
+      ? this.siege.spec.fountains[p.faction === 'shadow' ? 'shadow' : 'royal']
+      : this.map.factionSpawns[p.faction][0];
     p.x = spawnPt.x;
     p.y = spawnPt.y;
     p.vx = 0;
     p.vy = 0;
     p.elevation = this.getWalkableElevation(p.x, p.y);
-    p.weapons = [defaultWeaponForHand(0), defaultWeaponForHand(1)];
+    if (this.siege) {
+      const loadout = this.siege.playerState.loadout;
+      const g = ALL_GUNS_BY_ID.get(loadout.gunId) || DEFAULT_PISTOL;
+      const m = ALL_MELEES_BY_ID.get(loadout.meleeId) || DEFAULT_KNIFE;
+      p.weapons = [equipGun(g), { type: 'melee', def: m, durability: m.kind === 'shield' ? 100 : 0 }];
+      p.maxHp = computeSiegeMaxHp(this.siege.playerState);
+      p.reserveAmmo = p.maxReserveAmmo;
+    } else {
+      p.weapons = [defaultWeaponForHand(0), defaultWeaponForHand(1)];
+      p.reserveAmmo = 30;
+    }
     p.activeHand = 0;
     p.swapTimer = 0;
     p.swapDuration = 0;
@@ -2683,7 +3056,6 @@ export class TwilightEngine {
     p.radius = p.baseRadius;
     p.hp = p.maxHp;
     p.qi = p.maxQi;
-    p.reserveAmmo = 30;
     this.resetGunFeedback();
     this.distanceSinceStep = 0;
     p.moveIntensity = 0;
@@ -2696,7 +3068,10 @@ export class TwilightEngine {
     this.camera.x = respawnCam.x;
     this.camera.y = respawnCam.y;
     this.spawnBurst(p.x, p.y, '#FFFFFF', 14);
-    this.showBanner(`出生點復活！變回小槍／小刀 · 剩餘生命：${p.lives} 條`, 2.5);
+    this.showBanner(
+      this.siege ? '泉水復活！滿血滿彈重返戰場！' : `出生點復活！變回小槍／小刀 · 剩餘生命：${p.lives} 條`,
+      2.5
+    );
     this.emitHud();
   }
 
@@ -3186,7 +3561,11 @@ export class TwilightEngine {
     // 聲望越高，集氣與回氣速度越快（依當前出戰陣營之獨立聲望計算；冰凍期間無法集氣）
     const activeRep = p.reputations[p.faction];
     p.reputation = activeRep;
-    const repSpeedMult = getReputationQiMultiplier(activeRep);
+    let repSpeedMult = getReputationQiMultiplier(activeRep);
+    if (this.siege) {
+      const ps = this.siege.playerState;
+      repSpeedMult *= 1 + (ps.upgrades.core ?? 0) * 0.18 + (ps.loadout.passiveId === 'shadow_swift_foot' ? 0.25 : 0);
+    }
     if (p.freezeTimer > 0) {
       this.cancelMeleeCharge();
     } else {
@@ -3221,7 +3600,8 @@ export class TwilightEngine {
     }
     const weaponSpeedMult = weapon.def.moveSpeedMult;
     const freezeSpeedMult = p.freezeTimer > 0 ? 0.9 : 1.0;
-    const baseSpeed = PLAYER_MOVEMENT.speed * weaponSpeedMult * freezeSpeedMult;
+    const siegeSpeedMult = this.siege ? computeSiegeMoveSpeedMult(this.siege.playerState) : 1.0;
+    const baseSpeed = PLAYER_MOVEMENT.speed * weaponSpeedMult * freezeSpeedMult * siegeSpeedMult;
     const prevPlayerX = p.x;
     const prevPlayerY = p.y;
     const moved = this.moveCharacterWithElevation(
@@ -3237,6 +3617,9 @@ export class TwilightEngine {
     p.elevation = moved.elevation;
     p.vx = dt > 0 ? (p.x - prevPlayerX) / dt : 0;
     p.vy = dt > 0 ? (p.y - prevPlayerY) / dt : 0;
+    if (this.siege && Math.hypot(p.x - prevPlayerX, p.y - prevPlayerY) > 1.0) {
+      this.siege.playerState.recallTimer = 0;
+    }
 
     this.applyIceVentFreezeCheck(p, true);
 
@@ -3316,11 +3699,16 @@ export class TwilightEngine {
       }
     });
 
-    // 定期遞補陣亡的各陣營 10 人編制兵力（同陣營場上最多 2 人）
-    this.spawnStaggerTimer += dt;
-    if (this.spawnStaggerTimer >= 0.65) {
-      this.spawnStaggerTimer = 0;
-      this.refillFieldUpToCap();
+    if (this.siege) {
+      this.updateSiegeMode(dt);
+      if (!this.isBattleActive()) return;
+    } else {
+      // 定期遞補陣亡的各陣營 10 人編制兵力（同陣營場上最多 2 人）
+      this.spawnStaggerTimer += dt;
+      if (this.spawnStaggerTimer >= 0.65) {
+        this.spawnStaggerTimer = 0;
+        this.refillFieldUpToCap();
+      }
     }
 
     this.updateEnemies(dt);
@@ -4087,10 +4475,11 @@ export class TwilightEngine {
 
       type Candidate =
         | { kind: 'player'; t: number; perpDist: number; hitX: number; hitY: number }
-        | { kind: 'enemy'; enemy: EnemyEntity; t: number; perpDist: number; hitX: number; hitY: number };
+        | { kind: 'enemy'; enemy: EnemyEntity; t: number; perpDist: number; hitX: number; hitY: number }
+        | { kind: 'structure'; structure: SiegeStructure; t: number; perpDist: number; hitX: number; hitY: number };
 
       const candidates: Candidate[] = [];
-      const allowFriendlyFire = Boolean(e.isHumanPlayer);
+      const allowFriendlyFire = Boolean(e.isHumanPlayer) && this.mode !== 'siege';
 
       if (
         p.hp > 0 &&
@@ -4118,6 +4507,15 @@ export class TwilightEngine {
           }
         }
       }
+      if (this.siege && (e.faction === 'royal' || e.faction === 'shadow')) {
+        for (const st of this.siege.structures) {
+          if (!st.alive || st.faction === e.faction) continue;
+          const res = segmentCircleHit(fullSeg.x1, fullSeg.y1, fullSeg.x2, fullSeg.y2, st.x, st.y, st.radius);
+          if (res.hit && !this.findEarliestWallHit(fullSeg.x1, fullSeg.y1, res.hitX, res.hitY)) {
+            candidates.push({ kind: 'structure', structure: st, ...res });
+          }
+        }
+      }
 
       candidates.sort((c1, c2) => c1.t - c2.t);
       if (candidates.length > 0) {
@@ -4125,34 +4523,51 @@ export class TwilightEngine {
         segEndX = firstHit.hitX;
         segEndY = firstHit.hitY;
 
-        const targetRadius = firstHit.kind === 'player' ? p.radius : firstHit.enemy.radius;
-        const centerAccuracy = clamp(1 - firstHit.perpDist / targetRadius, 0, 1);
-        const scaledDmg = Math.max(3, Math.round(gunDef.damage * (0.4 + 0.6 * centerAccuracy)));
-
-        const target = firstHit.kind === 'player' ? p : firstHit.enemy;
-        if (target.royalShieldTimer > 0) {
-          this.deflectShieldShot(target, firstHit.hitX, firstHit.hitY, a);
-        } else if (firstHit.kind === 'player') {
-          const isHostileToPlayer = areHostile(e.faction, e.id, p.faction, 'player');
-          if (isHostileToPlayer) {
-            this.damagePlayer(scaledDmg, false, e.id, e.x, e.y);
-          } else {
-            this.damagePlayer(Math.max(1, Math.round(scaledDmg * 0.5)), false, e.id, e.x, e.y, true);
-          }
+        if (firstHit.kind === 'structure') {
+          const heroState = this.getSiegeHeroState(e.id);
+          const fpMult = heroState ? 1 + (heroState.upgrades.firepower ?? 0) * 0.14 : 1;
+          const auraMult =
+            e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion'
+              ? this.getSiegeMinionDamageMult(e)
+              : 1;
+          const stDmg = Math.max(2, Math.round(gunDef.damage * 0.72 * fpMult * auraMult));
+          this.damageSiegeStructure(firstHit.structure, stDmg, e.id, e.faction);
         } else {
-          this.damageEnemy(
-            firstHit.enemy,
-            scaledDmg,
-            false,
-            Math.cos(a) * 80,
-            Math.sin(a) * 80,
-            centerAccuracy >= 0.8,
-            false,
-            e.id,
-            e.faction,
-            e.x,
-            e.y
-          );
+          const targetRadius = firstHit.kind === 'player' ? p.radius : firstHit.enemy.radius;
+          const centerAccuracy = clamp(1 - firstHit.perpDist / targetRadius, 0, 1);
+          const heroState = this.getSiegeHeroState(e.id);
+          const fpMult = heroState ? 1 + (heroState.upgrades.firepower ?? 0) * 0.14 : 1;
+          const auraMult =
+            e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion'
+              ? this.getSiegeMinionDamageMult(e)
+              : 1;
+          const scaledDmg = Math.max(3, Math.round(gunDef.damage * (0.4 + 0.6 * centerAccuracy) * fpMult * auraMult));
+
+          const target = firstHit.kind === 'player' ? p : firstHit.enemy;
+          if (target.royalShieldTimer > 0) {
+            this.deflectShieldShot(target, firstHit.hitX, firstHit.hitY, a);
+          } else if (firstHit.kind === 'player') {
+            const isHostileToPlayer = areHostile(e.faction, e.id, p.faction, 'player');
+            if (isHostileToPlayer) {
+              this.damagePlayer(scaledDmg, false, e.id, e.x, e.y);
+            } else {
+              this.damagePlayer(Math.max(1, Math.round(scaledDmg * 0.5)), false, e.id, e.x, e.y, true);
+            }
+          } else {
+            this.damageEnemy(
+              firstHit.enemy,
+              scaledDmg,
+              false,
+              Math.cos(a) * 80,
+              Math.sin(a) * 80,
+              centerAccuracy >= 0.8,
+              false,
+              e.id,
+              e.faction,
+              e.x,
+              e.y
+            );
+          }
         }
       } else if (reachedMuzzle && fullSegDist < maxRange - 1) {
         this.spawnBurst(fullSeg.x2, fullSeg.y2, '#E2E8F0', 4);
@@ -4188,6 +4603,13 @@ export class TwilightEngine {
     meleeWeapon: Extract<EquippedWeapon, { type: 'melee' }>,
     aimAngle: number
   ) {
+    if (this.siege && e.siegeLoadout && meleeWeapon.def.kind !== 'shield') {
+      const ultId = e.siegeLoadout.ultimateId;
+      const ultMeta = getUltimateMeta(ultId);
+      this.spawnText(e.x, e.y - 34, ultMeta.name, e.color, 1.05);
+      this.castSiegeUltimateSkill(e.id, e, ultId, aimAngle, 1.0);
+      return;
+    }
     const fac = e.faction;
     const mk = meleeWeapon.def.kind;
     const skillName = FACTIONS[fac].meleeSkills[mk].name;
@@ -4446,6 +4868,7 @@ export class TwilightEngine {
         e.crosshairBloom = Math.max(0, e.crosshairBloom - recoveryRate * dt);
       }
       e.hitFlash = Math.max(0, e.hitFlash - dt);
+      e.invulnTimer = Math.max(0, (e.invulnTimer ?? 0) - dt);
       e.swapTimer = Math.max(0, e.swapTimer - dt);
       e.attackAnimTimer = Math.max(0, e.attackAnimTimer - dt);
       if (e.attackAnimTimer === 0) e.attackAnimKind = null;
@@ -4461,6 +4884,11 @@ export class TwilightEngine {
       e.alertTimer = Math.max(0, e.alertTimer - dt);
       e.aggroLockTimer = Math.max(0, e.aggroLockTimer - dt);
       e.pathTimer = Math.max(0, e.pathTimer - dt);
+      if (this.siege) {
+        if ((e.siegeTacticalCd ?? 0) > 0) e.siegeTacticalCd = Math.max(0, (e.siegeTacticalCd ?? 0) - dt);
+        if ((e.siegeMarkedTimer ?? 0) > 0) e.siegeMarkedTimer = Math.max(0, (e.siegeMarkedTimer ?? 0) - dt);
+        if ((e.siegeAegisReflectTimer ?? 0) > 0) e.siegeAegisReflectTimer = Math.max(0, (e.siegeAegisReflectTimer ?? 0) - dt);
+      }
 
       if (e.freezeTimer > 0) {
         this.clearTimedSkillsOnFreeze(e);
@@ -4557,6 +4985,14 @@ export class TwilightEngine {
 
       for (const other of this.enemies) {
         if (!areHostile(e.faction, e.id, other.faction, other.id)) continue;
+        if (this.siege && (other.siegeUnitKind === 'jungle' || other.siegeUnitKind === 'boss')) {
+          if (e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion' || e.siegeUnitKind === 'vanguard_ally') {
+            continue;
+          }
+          if (e.siegeUnitKind === 'hero' && other.focusedTargetId !== e.id) {
+            continue;
+          }
+        }
         if (this.hasLineOfSight(e.x, e.y, e.elevation, other.x, other.y, other.elevation, sightRange)) {
           visibleHostiles.push({
             id: other.id,
@@ -4695,7 +5131,24 @@ export class TwilightEngine {
         e.patrolTimer = 0;
         e.lastSeenTargetPos = null;
       }
-      const desiredPickup = this.findNearestEligibleWeaponPickup(e);
+      const desiredPickup = this.mode === 'siege' ? null : this.findNearestEligibleWeaponPickup(e);
+      const siegeStructureTarget =
+        this.siege &&
+        (e.faction === 'royal' || e.faction === 'shadow') &&
+        !losTargetPos
+          ? this.findNearestHostileStructureInSight(e, sightRange + 40)
+          : null;
+      const siegeGoal = this.siege && !losTargetPos && !siegeStructureTarget ? this.getSiegeAiGoal(e) : null;
+
+      if (this.siege && e.siegeUnitKind === 'hero' && e.siegeLoadout && (e.siegeTacticalCd ?? 0) <= 0 && losTargetPos && readyToAttack) {
+        if (bestLosDist <= 300 && (e.hp < e.maxHp * 0.72 || bestLosDist <= 185)) {
+          this.castSiegeTacticalSkill(e.id, e, e.siegeLoadout, losTargetPos.x, losTargetPos.y);
+          e.siegeTacticalCd = computeSiegeTacticalCooldown({
+            loadout: e.siegeLoadout,
+            upgrades: e.siegeUpgrades ?? { firepower: 0, blade: 0, armor: 0, core: 0 },
+          });
+        }
+      }
 
       if (losTargetPos) {
         const rawTargetAngle = Math.atan2(losTargetPos.y - e.y, losTargetPos.x - e.x);
@@ -4793,6 +5246,26 @@ export class TwilightEngine {
           desiredY = e.y + Math.sin(strafe) * 80;
           moveFactor = 0.5;
         }
+      } else if (siegeStructureTarget) {
+        const stopDist = (heldGun ? Math.min(200, siegeStructureTarget.radius + 175) : siegeStructureTarget.radius + 52);
+        const sd = dist(e.x, e.y, siegeStructureTarget.x, siegeStructureTarget.y);
+        const maxTurn = combat.aimTurnSpeed * dt;
+        e.angle += clamp(angleDiff(e.angle, Math.atan2(siegeStructureTarget.y - e.y, siegeStructureTarget.x - e.x)), -maxTurn, maxTurn);
+        if (sd > stopDist) {
+          astarGoal = { x: siegeStructureTarget.x, y: siegeStructureTarget.y };
+          desiredX = siegeStructureTarget.x;
+          desiredY = siegeStructureTarget.y;
+          moveFactor = 0.95;
+        } else {
+          moveFactor = 0;
+        }
+      } else if (siegeGoal) {
+        astarGoal = siegeGoal;
+        desiredX = siegeGoal.x;
+        desiredY = siegeGoal.y;
+        const maxTurn = combat.aimTurnSpeed * dt;
+        e.angle += clamp(angleDiff(e.angle, Math.atan2(desiredY - e.y, desiredX - e.x)), -maxTurn, maxTurn);
+        moveFactor = e.siegeUnitKind === 'jungle' || e.siegeUnitKind === 'boss' ? 0.6 : 0.95;
       } else if (e.lastSeenTargetPos && (e.alertTimer > 0 || e.aggroLockTimer > 0)) {
         astarGoal = e.lastSeenTargetPos;
         desiredX = astarGoal.x;
@@ -4828,6 +5301,18 @@ export class TwilightEngine {
 
       // 使用 A* 路徑導航跨越高低差、階梯與橋樑
       if (moveFactor > 0 && astarGoal) {
+        if (
+          this.siege &&
+          e.pathTiles.length > 0 &&
+          this.isBlockedByAliveSiegeStructure(
+            (e.pathTiles[0].gx + 0.5) * TILE,
+            (e.pathTiles[0].gy + 0.5) * TILE,
+            getMoveCheckRadius(e.radius)
+          )
+        ) {
+          e.pathTiles = [];
+          e.pathTimer = 0;
+        }
         if (e.pathTimer <= 0 || e.pathTiles.length === 0) {
           e.pathTiles = this.findPathAStar(e.x, e.y, astarGoal.x, astarGoal.y);
           e.pathTimer = 0.35;
@@ -4836,7 +5321,7 @@ export class TwilightEngine {
           const wp = e.pathTiles[0];
           const wpX = (wp.gx + 0.5) * TILE;
           const wpY = (wp.gy + 0.5) * TILE;
-          if (dist(e.x, e.y, wpX, wpY) < 16) {
+          if (dist(e.x, e.y, wpX, wpY) < 24) {
             e.pathTiles.shift();
           } else {
             break;
@@ -4917,31 +5402,25 @@ export class TwilightEngine {
         );
         const dropBlocked = avoidDropOff && moved.elevation < e.elevation - 0.01;
         if (dropBlocked || dist(e.x, e.y, moved.x, moved.y) < stepDist * 0.25) {
-          const alt1 = this.moveCharacterWithElevation(
-            e.x,
-            e.y,
-            e.elevation,
-            Math.cos(moveAng + 1.1) * stepDist,
-            Math.sin(moveAng + 1.1) * stepDist,
-            e.radius
-          );
-          const alt2 = this.moveCharacterWithElevation(
-            e.x,
-            e.y,
-            e.elevation,
-            Math.cos(moveAng - 1.1) * stepDist,
-            Math.sin(moveAng - 1.1) * stepDist,
-            e.radius
-          );
-          const valid1 = !avoidDropOff || alt1.elevation >= e.elevation - 0.01;
-          const valid2 = !avoidDropOff || alt2.elevation >= e.elevation - 0.01;
-          const d1 = valid1 ? dist(e.x, e.y, alt1.x, alt1.y) : -1;
-          const d2 = valid2 ? dist(e.x, e.y, alt2.x, alt2.y) : -1;
-          if (d1 > 0 || d2 > 0) {
-            const pick = d1 >= d2 ? alt1 : alt2;
-            e.x = pick.x;
-            e.y = pick.y;
-            e.elevation = pick.elevation;
+          e.pathTimer = 0;
+          const turnSign = (e.id.charCodeAt(e.id.length - 1) & 1) ? 1 : -1;
+          const offsets = [turnSign * 1.05, -turnSign * 1.05, turnSign * 1.55, -turnSign * 1.55];
+          for (const offset of offsets) {
+            const alt = this.moveCharacterWithElevation(
+              e.x,
+              e.y,
+              e.elevation,
+              Math.cos(moveAng + offset) * stepDist,
+              Math.sin(moveAng + offset) * stepDist,
+              e.radius
+            );
+            const valid = !avoidDropOff || alt.elevation >= e.elevation - 0.01;
+            if (valid && dist(e.x, e.y, alt.x, alt.y) >= stepDist * 0.2) {
+              e.x = alt.x;
+              e.y = alt.y;
+              e.elevation = alt.elevation;
+              break;
+            }
           }
         } else {
           e.x = moved.x;
@@ -4976,11 +5455,51 @@ export class TwilightEngine {
       }
 
       // 路過或抵達地面武器點時自動拾取，並檢查是否踩踏冰氣孔
-      this.enemyTryPickupWeapon(e);
+      if (this.mode !== 'siege') {
+        this.enemyTryPickupWeapon(e);
+      }
       this.applyIceVentFreezeCheck(e, false);
 
       const postPickupWeapon = e.weapons[e.activeHand];
-      if (!e.chargingMelee && e.swapTimer <= 0 && readyToAttack && losTargetPos && e.attackCooldown <= 0 && (targetIsPlayer || targetEntity)) {
+      if (
+        this.siege &&
+        siegeStructureTarget &&
+        !losTargetPos &&
+        e.swapTimer <= 0 &&
+        e.attackCooldown <= 0
+      ) {
+        const sd = dist(e.x, e.y, siegeStructureTarget.x, siegeStructureTarget.y);
+        const targetAngle = Math.atan2(siegeStructureTarget.y - e.y, siegeStructureTarget.x - e.x);
+        const angleErr = Math.abs(angleDiff(e.angle, targetAngle));
+        if (postPickupWeapon.type === 'gun' && postPickupWeapon.reloadTimer <= 0 && sd <= 260) {
+          if (postPickupWeapon.ammoInMag <= 0) {
+            postPickupWeapon.reloadTimer = postPickupWeapon.def.reloadTime;
+          } else if (angleErr <= AI_GUN_AIM.fireAngleToleranceRad) {
+            e.attackCooldown =
+              (1 / postPickupWeapon.def.fireRate) *
+              AI_GUN_AIM.fireIntervalMultByKind[postPickupWeapon.def.kind];
+            this.fireEnemyGunHitscan(e, e.angle, postPickupWeapon, sd);
+            const spent = postPickupWeapon.def.kind === 'shotgun' ? postPickupWeapon.def.pellets : 1;
+            postPickupWeapon.ammoInMag = Math.max(0, postPickupWeapon.ammoInMag - spent);
+            if (postPickupWeapon.ammoInMag <= 0) postPickupWeapon.reloadTimer = postPickupWeapon.def.reloadTime;
+          }
+        } else if (postPickupWeapon.type === 'melee' && sd <= postPickupWeapon.def.reach + siegeStructureTarget.radius + 10) {
+          e.attackCooldown = 1 / postPickupWeapon.def.swingRate;
+          e.attackAnimDuration = 0.18;
+          e.attackAnimTimer = 0.18;
+          e.attackAnimKind = postPickupWeapon.def.kind;
+          const auraMult =
+            e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion'
+              ? this.getSiegeMinionDamageMult(e)
+              : 1;
+          this.damageSiegeStructure(
+            siegeStructureTarget,
+            Math.max(4, Math.round(Math.max(12, postPickupWeapon.def.damage) * auraMult)),
+            e.id,
+            e.faction
+          );
+        }
+      } else if (!e.chargingMelee && e.swapTimer <= 0 && readyToAttack && losTargetPos && e.attackCooldown <= 0 && (targetIsPlayer || targetEntity)) {
         const targetAngle = Math.atan2(losTargetPos.y - e.y, losTargetPos.x - e.x);
         const angleErr = Math.abs(angleDiff(e.angle, targetAngle));
         if (postPickupWeapon.type === 'melee' && isCloseMeleeRange && angleErr <= 0.75) {
@@ -5106,7 +5625,7 @@ export class TwilightEngine {
           }
 
           const nextX = proj.x + proj.vx * subDt;
-          if (this.isBlackDragonBlockedAt(nextX, proj.y, proj.minTraversedElevation)) {
+          if (!proj.ignoresWalls && this.isBlackDragonBlockedAt(nextX, proj.y, proj.minTraversedElevation)) {
             proj.vx = -proj.vx;
             bounced = true;
           } else {
@@ -5114,11 +5633,15 @@ export class TwilightEngine {
           }
 
           const nextY = proj.y + proj.vy * subDt;
-          if (this.isBlackDragonBlockedAt(proj.x, nextY, proj.minTraversedElevation)) {
+          if (!proj.ignoresWalls && this.isBlackDragonBlockedAt(proj.x, nextY, proj.minTraversedElevation)) {
             proj.vy = -proj.vy;
             bounced = true;
           } else {
             proj.y = nextY;
+          }
+          if (proj.x < 10 || proj.x > this.map.width - 10 || proj.y < 10 || proj.y > this.map.height - 10) {
+            destroyed = true;
+            break;
           }
 
           if (bounced) {
@@ -5182,6 +5705,16 @@ export class TwilightEngine {
                 );
               }
             }
+            if (this.siege && (proj.ownerFaction === 'royal' || proj.ownerFaction === 'shadow')) {
+              for (const st of this.siege.structures) {
+                if (!st.alive || st.faction === proj.ownerFaction || cooldowns[st.id]) continue;
+                const hitInfo = evaluateBlackDragonHit(proj, segs, prevX, prevY, st.x, st.y, st.radius);
+                if (hitInfo) {
+                  cooldowns[st.id] = 0.35;
+                  this.damageSiegeStructure(st, hitInfo.hitDmg, proj.ownerId, proj.ownerFaction);
+                }
+              }
+            }
           }
         }
 
@@ -5207,7 +5740,7 @@ export class TwilightEngine {
           break;
         }
 
-        const wallHit = this.findEarliestWallHit(prevSubX, prevSubY, proj.x, proj.y);
+        const wallHit = proj.ignoresWalls ? null : this.findEarliestWallHit(prevSubX, prevSubY, proj.x, proj.y);
         if (wallHit) {
           this.spawnBurst(wallHit.x, wallHit.y, proj.color, 4);
           destroyed = true;
@@ -5221,10 +5754,31 @@ export class TwilightEngine {
           proj.minTraversedElevation = Math.min(proj.minTraversedElevation, effectiveSurface);
         }
         const heightDiff = h.totalHeight - proj.minTraversedElevation;
-        if (h.isWall || heightDiff > 1.0) {
+        if (!proj.ignoresWalls && (h.isWall || heightDiff > 1.0)) {
           this.spawnBurst(proj.x, proj.y, proj.color, 4);
           destroyed = true;
           break;
+        }
+
+        if (dealDamage && proj.healAllies) {
+          if (p.hp > 0 && !proj.hitIds.has('player') && !areHostile(proj.ownerFaction, proj.ownerId, p.faction, 'player')) {
+            const hit = segmentCircleHit(proj.prevX, proj.prevY, proj.x, proj.y, p.x, p.y, p.radius + proj.radius * 0.7);
+            if (hit.hit) {
+              proj.hitIds.add('player');
+              p.hp = Math.min(p.maxHp, p.hp + 35);
+              this.spawnText(p.x, p.y - 30, '+35', '#4ADE80', 0.95, true);
+            }
+          }
+          for (const ally of this.enemies) {
+            if (ally.id === proj.ownerId || proj.hitIds.has(ally.id)) continue;
+            if (areHostile(proj.ownerFaction, proj.ownerId, ally.faction, ally.id)) continue;
+            const hit = segmentCircleHit(proj.prevX, proj.prevY, proj.x, proj.y, ally.x, ally.y, ally.radius + proj.radius * 0.7);
+            if (hit.hit) {
+              proj.hitIds.add(ally.id);
+              ally.hp = Math.min(ally.maxHp, ally.hp + 35);
+              this.spawnText(ally.x, ally.y - 26, '+35', '#4ADE80', 0.85, true);
+            }
+          }
         }
 
         const canHitPlayer =
@@ -5285,6 +5839,22 @@ export class TwilightEngine {
               }
             }
           }
+          if (!destroyed && this.siege && (proj.ownerFaction === 'royal' || proj.ownerFaction === 'shadow')) {
+            for (const st of this.siege.structures) {
+              if (!st.alive || st.faction === proj.ownerFaction || proj.hitIds.has(st.id)) continue;
+              const hit = segmentCircleHit(proj.prevX, proj.prevY, proj.x, proj.y, st.x, st.y, st.radius + proj.radius * 0.5);
+              if (hit.hit) {
+                proj.hitIds.add(st.id);
+                this.damageSiegeStructure(st, proj.damage, proj.ownerId, proj.ownerFaction);
+                if (proj.pierce > 0) {
+                  proj.pierce -= 1;
+                } else {
+                  destroyed = true;
+                  break;
+                }
+              }
+            }
+          }
         }
         if (destroyed) break;
       }
@@ -5310,6 +5880,24 @@ export class TwilightEngine {
 
     // 1–4 & 6–7: 繪製統一格線地板、河道橋樑、多層高台、階梯、草叢、樹幹、大箱子與特色牆柱
     renderMapBaseLayer(ctx, this.map, false, this.time);
+
+    if (this.siege) {
+      drawSiegeFountains(ctx, this.siege.spec.fountains, this.time);
+      drawSiegeZones(ctx, this.siege.zones, this.time);
+      const targetPosMap = new Map<string, { x: number; y: number }>();
+      if (this.player.hp > 0) targetPosMap.set('player', { x: this.player.x, y: this.player.y });
+      for (const e of this.enemies) {
+        if (e.hp > 0) targetPosMap.set(e.id, { x: e.x, y: e.y });
+      }
+      drawSiegeStructures(
+        ctx,
+        this.siege.structures,
+        this.player.faction === 'shadow' ? 'shadow' : 'royal',
+        { x: this.player.x, y: this.player.y },
+        targetPosMap,
+        this.time
+      );
+    }
 
     // 8. 地面武器與可重複彈藥補給
     for (const pk of this.pickups) {
@@ -5599,18 +6187,27 @@ export class TwilightEngine {
   private initRemoteHumans(multiplayer: MultiplayerEngineConfig) {
     for (const peer of multiplayer.peers) {
       if (peer.peerId === multiplayer.hostPeerId) continue;
-      const sp = this.pickBestDispersedSpawn(peer.faction);
+      const effFaction: FactionId = this.siege && peer.faction === 'mercenary' ? 'royal' : peer.faction;
+      const sp = this.siege
+        ? this.siege.spec.fountains[effFaction === 'shadow' ? 'shadow' : 'royal']
+        : this.pickBestDispersedSpawn(effFaction);
+      const siegeLoadout = this.siege
+        ? sanitizeSiegeLoadout(effFaction === 'shadow' ? 'shadow' : 'royal', peer.siegeLoadout ?? getDefaultSiegeLoadout(effFaction === 'shadow' ? 'shadow' : 'royal', peer.characterSkin.id))
+        : undefined;
+      if (this.siege && siegeLoadout) {
+        this.siege.remoteStates.set(peer.peerId, createHeroSiegeState(siegeLoadout));
+      }
       const rt: RemoteHumanRuntime = {
         peerId: peer.peerId,
         entityId: `human_${peer.peerId}`,
         name: peer.name,
-        faction: peer.faction,
+        faction: effFaction,
         reputationChanges: { royal: 0, shadow: 0, mercenary: 0 },
         characterSkin: peer.characterSkin,
-        lives: 3,
-        maxLives: 3,
-        reserveAmmo: 30,
-        maxReserveAmmo: 45,
+        lives: this.siege ? 999 : 3,
+        maxLives: this.siege ? 999 : 3,
+        reserveAmmo: this.siege ? 45 : 30,
+        maxReserveAmmo: this.siege ? 60 : 45,
         score: 0,
         totalDamage: 0,
         kills: 0,
@@ -5634,6 +6231,11 @@ export class TwilightEngine {
         lastSwapSeq: 0,
         lastPickupSeq: 0,
         lastDropSeq: 0,
+        lastTacticalSeq: 0,
+        lastUltSeq: 0,
+        lastRecallSeq: 0,
+        lastUpgradeSeq: 0,
+        siegeLoadout,
         input: {
           moveX: 0,
           moveY: 0,
@@ -5653,21 +6255,25 @@ export class TwilightEngine {
   }
 
   private spawnRemoteHumanEntity(rt: RemoteHumanRuntime, initial: boolean) {
-    const sp = this.pickBestDispersedSpawn(rt.faction);
+    const sp = this.siege
+      ? this.siege.spec.fountains[rt.faction === 'shadow' ? 'shadow' : 'royal']
+      : this.pickBestDispersedSpawn(rt.faction);
     const fac = FACTIONS[rt.faction];
-    const startGun = GUNS.find((g) => g.id === fac.startGunId) || DEFAULT_PISTOL;
-    const startMelee = MELEES.find((m) => m.id === fac.startMeleeId) || DEFAULT_KNIFE;
+    const startGun = (rt.siegeLoadout && ALL_GUNS_BY_ID.get(rt.siegeLoadout.gunId)) || GUNS.find((g) => g.id === fac.startGunId) || DEFAULT_PISTOL;
+    const startMelee = (rt.siegeLoadout && ALL_MELEES_BY_ID.get(rt.siegeLoadout.meleeId)) || MELEES.find((m) => m.id === fac.startMeleeId) || DEFAULT_KNIFE;
     const elev = this.getWalkableElevation(sp.x, sp.y);
+    const rSiegeState = this.siege?.remoteStates.get(rt.peerId);
+    const maxHp = rSiegeState ? computeSiegeMaxHp(rSiegeState) : 100;
     const entity: EnemyEntity = {
       id: rt.entityId,
-      isHumanPlayer: true,
+      isHumanPlayer: !rt.disconnected,
       peerId: rt.peerId,
       name: rt.name,
       archetype: 'trooper',
       faction: rt.faction,
       isAlly: !areHostile(rt.faction, rt.entityId, this.player.faction, 'player'),
       activeHand: 0,
-      weapons: [equipGun(startGun), { type: 'melee', def: startMelee, durability: 0 }],
+      weapons: [equipGun(startGun), { type: 'melee', def: startMelee, durability: startMelee.kind === 'shield' ? 100 : 0 }],
       swapTimer: 0,
       swapDuration: 0,
       x: sp.x,
@@ -5681,8 +6287,8 @@ export class TwilightEngine {
       walkPhase: 0,
       moveIntensity: 0,
       elevation: elev,
-      hp: 100,
-      maxHp: 100,
+      hp: maxHp,
+      maxHp,
       qi: 100,
       maxQi: 100,
       chargingMelee: false,
@@ -5722,6 +6328,7 @@ export class TwilightEngine {
       attackAnimKind: null,
       color: fac.accentHex,
       characterSkin: rt.characterSkin,
+      ...(this.siege ? { siegeUnitKind: 'hero' as const, siegeLoadout: rt.siegeLoadout } : {}),
     };
     this.enemies.push(entity);
     rt.prevAimX = sp.x + 120;
@@ -5742,6 +6349,57 @@ export class TwilightEngine {
     rt.input = input;
   }
 
+  public markRemoteHumanDisconnected(peerId: string) {
+    const rt = this.remoteHumans.get(peerId);
+    if (!rt) return;
+    rt.disconnected = true;
+    rt.wasMouseDown = false;
+    rt.chargeSessionAllowed = false;
+    rt.input.mouseDown = false;
+    rt.input.moveX = 0;
+    rt.input.moveY = 0;
+    const ent = this.enemies.find((e) => e.id === rt.entityId);
+    if (ent) {
+      ent.isHumanPlayer = false;
+      ent.chargingMelee = false;
+      ent.chargeReady = false;
+      this.spawnText(ent.x, ent.y - 36, `${rt.name} 暫時斷線 (AI 託管)`, '#FBBF24', 1.0);
+    }
+    this.emitHud();
+  }
+
+  public rejoinRemoteHuman(peerId: string) {
+    const rt = this.remoteHumans.get(peerId);
+    if (!rt) return;
+    rt.disconnected = false;
+    rt.wasMouseDown = false;
+    rt.chargeSessionAllowed = false;
+    rt.meleeHeldSeconds = 0;
+    rt.lastClickSeq = 0;
+    rt.lastReloadSeq = 0;
+    rt.lastSwapSeq = 0;
+    rt.lastPickupSeq = 0;
+    rt.lastDropSeq = 0;
+    rt.lastTacticalSeq = 0;
+    rt.lastUltSeq = 0;
+    rt.lastRecallSeq = 0;
+    rt.lastUpgradeSeq = 0;
+    rt.input.mouseDown = false;
+    rt.input.moveX = 0;
+    rt.input.moveY = 0;
+    const ent = this.enemies.find((e) => e.id === rt.entityId);
+    if (ent) {
+      ent.isHumanPlayer = true;
+      ent.chargingMelee = false;
+      ent.chargeReady = false;
+      this.spawnText(ent.x, ent.y - 36, `${rt.name} 已重返戰場!`, '#4ADE80', 1.1);
+    } else if (rt.respawnTimer <= 0 && rt.lives > 0) {
+      this.spawnRemoteHumanEntity(rt, false);
+    }
+    this.forceNextKeyframe = true;
+    this.emitHud();
+  }
+
   public removeRemoteHuman(peerId: string) {
     const rt = this.remoteHumans.get(peerId);
     if (!rt) return;
@@ -5758,10 +6416,17 @@ export class TwilightEngine {
 
   private tickRemoteHumanRespawns(dt: number) {
     for (const rt of this.remoteHumans.values()) {
+      if (this.siege) {
+        const rState = this.siege.remoteStates.get(rt.peerId);
+        if (rState && (rt.input.upgradeSeq ?? 0) > rt.lastUpgradeSeq && rt.input.upgradeTrack && rt.respawnTimer > 0) {
+          rt.lastUpgradeSeq = rt.input.upgradeSeq ?? 0;
+          tryPurchaseSiegeUpgrade(rState, rt.input.upgradeTrack);
+        }
+      }
       if (rt.respawnTimer <= 0) continue;
       rt.respawnTimer = Math.max(0, rt.respawnTimer - dt);
       if (rt.respawnTimer === 0 && rt.lives > 0) {
-        rt.reserveAmmo = 30;
+        rt.reserveAmmo = this.siege ? 45 : 30;
         rt.comboEmpowerTimer = 0;
         rt.delayCancelReady = false;
         rt.rifleRecoilAngle = 0;
@@ -6063,13 +6728,49 @@ export class TwilightEngine {
 
     if (inp.pickupSeq > rt.lastPickupSeq) {
       rt.lastPickupSeq = inp.pickupSeq;
-      this.remoteHumanPickup(e, rt);
+      if (this.mode !== 'siege') this.remoteHumanPickup(e, rt);
     }
 
     const dropSeq = inp.dropSeq ?? 0;
     if (dropSeq > rt.lastDropSeq) {
       rt.lastDropSeq = dropSeq;
-      this.remoteHumanDropActiveWeapon(e, rt);
+      if (this.mode !== 'siege') this.remoteHumanDropActiveWeapon(e, rt);
+    }
+
+    if (this.siege) {
+      const rState = this.siege.remoteStates.get(rt.peerId);
+      if (rState) {
+        if ((inp.tacticalSeq ?? 0) > rt.lastTacticalSeq) {
+          rt.lastTacticalSeq = inp.tacticalSeq ?? 0;
+          if (rState.tacticalCd <= 0 && e.freezeTimer <= 0 && e.stunTimer <= 0) {
+            this.castSiegeTacticalSkill(e.id, e, rState.loadout, inp.aimX, inp.aimY);
+            rState.tacticalCd = computeSiegeTacticalCooldown(rState);
+          }
+        }
+        if ((inp.ultSeq ?? 0) > rt.lastUltSeq) {
+          rt.lastUltSeq = inp.ultSeq ?? 0;
+          if (e.qi >= e.maxQi - 0.5 && e.freezeTimer <= 0 && e.stunTimer <= 0) {
+            e.qi = 0;
+            this.castSiegeUltimateSkill(e.id, e, rState.loadout.ultimateId, e.angle, 1.0);
+          }
+        }
+        if ((inp.recallSeq ?? 0) > rt.lastRecallSeq) {
+          rt.lastRecallSeq = inp.recallSeq ?? 0;
+          if (rState.recallTimer <= 0 && !this.isInsideOwnFountain(e.x, e.y, e.faction === 'shadow' ? 'shadow' : 'royal')) {
+            rState.recallTimer = SIEGE_CONFIG.recallDurationSec;
+          }
+        }
+        if ((inp.upgradeSeq ?? 0) > rt.lastUpgradeSeq && inp.upgradeTrack) {
+          rt.lastUpgradeSeq = inp.upgradeSeq ?? 0;
+          if (this.isInsideOwnFountain(e.x, e.y, e.faction === 'shadow' ? 'shadow' : 'royal')) {
+            const res = tryPurchaseSiegeUpgrade(rState, inp.upgradeTrack);
+            if (res.ok && inp.upgradeTrack === 'armor') {
+              e.maxHp = computeSiegeMaxHp(rState);
+              e.hp = Math.min(e.maxHp, e.hp + 22);
+            }
+          }
+        }
+      }
     }
 
     const activeWeapon = e.weapons[e.activeHand];
@@ -6238,6 +6939,11 @@ export class TwilightEngine {
     swapSeq: number;
     pickupSeq: number;
     dropSeq: number;
+    tacticalSeq?: number;
+    ultSeq?: number;
+    recallSeq?: number;
+    upgradeSeq?: number;
+    upgradeTrack?: SiegeUpgradeTrack;
   }): RemotePlayerInput {
     const mv = this.getMoveVector();
     const ptr = this.getWorldPointer();
@@ -6252,6 +6958,10 @@ export class TwilightEngine {
       swapSeq: seqs.swapSeq,
       pickupSeq: seqs.pickupSeq,
       dropSeq: seqs.dropSeq,
+      ...(seqs.tacticalSeq ? { tacticalSeq: seqs.tacticalSeq } : {}),
+      ...(seqs.ultSeq ? { ultSeq: seqs.ultSeq } : {}),
+      ...(seqs.recallSeq ? { recallSeq: seqs.recallSeq } : {}),
+      ...(seqs.upgradeSeq ? { upgradeSeq: seqs.upgradeSeq, upgradeTrack: seqs.upgradeTrack } : {}),
     };
   }
 
@@ -6334,6 +7044,7 @@ export class TwilightEngine {
         angle: Number(p.angle.toFixed(3)),
         elev: p.elevation,
         hp: Math.round(p.hp),
+        ...(p.maxHp !== 100 ? { maxHp: Math.round(p.maxHp) } : {}),
         qi: Math.round(p.qi),
         lives: p.lives,
         ...(this.respawnTimer > 0 ? { respawn: round1(this.respawnTimer) } : {}),
@@ -6373,12 +7084,12 @@ export class TwilightEngine {
 
     const liveRemotePeerIds = new Set<string>();
     for (const e of this.enemies) {
-      const rt = e.isHumanPlayer && e.peerId ? this.remoteHumans.get(e.peerId) : undefined;
-      if (e.isHumanPlayer && e.peerId) liveRemotePeerIds.add(e.peerId);
+      const rt = e.peerId ? this.remoteHumans.get(e.peerId) : undefined;
+      if (rt && e.peerId) liveRemotePeerIds.add(e.peerId);
       actors.push({
         id: e.id,
         ...(e.peerId ? { peerId: e.peerId } : {}),
-        isHuman: Boolean(e.isHumanPlayer),
+        isHuman: Boolean(rt) || Boolean(e.isHumanPlayer),
         name: e.name,
         faction: e.faction,
         skinId: e.characterSkin.id,
@@ -6390,6 +7101,7 @@ export class TwilightEngine {
         angle: Number(e.angle.toFixed(3)),
         elev: e.elevation,
         hp: Math.round(e.hp),
+        ...(e.maxHp !== 100 ? { maxHp: Math.round(e.maxHp) } : {}),
         qi: Math.round(e.qi),
         ...(rt
           ? {
@@ -6466,7 +7178,8 @@ export class TwilightEngine {
     const events = this.netEvents;
     this.netEvents = [];
     const nextSeq = ++this.snapshotSeq;
-    const isKeyframe = nextSeq === 1 || nextSeq % 25 === 0;
+    const isKeyframe = this.forceNextKeyframe || nextSeq === 1 || nextSeq % 25 === 0;
+    this.forceNextKeyframe = false;
 
     const pickupsSig = this.pickups
       .map((pk) => `${pk.id}:${Math.round(pk.x)},${Math.round(pk.y)},${pk.ammoInMag ?? ''},${pk.durability ?? ''}`)
@@ -6538,6 +7251,7 @@ export class TwilightEngine {
             })),
           }
         : {}),
+      ...(this.siege ? { siege: this.exportSiegeSnapshot() } : {}),
       events,
     };
   }
@@ -6567,6 +7281,9 @@ export class TwilightEngine {
     p.vy = localActor.vy ?? 0;
     p.elevation = localActor.elev;
     p.hp = localActor.hp;
+    if (localActor.maxHp !== undefined) {
+      p.maxHp = localActor.maxHp;
+    }
     p.qi = localActor.qi;
     p.lives = localActor.lives ?? p.lives;
     p.score = localActor.score ?? p.score;
@@ -6657,7 +7374,7 @@ export class TwilightEngine {
           moveIntensity: 0,
           elevation: actor.elev,
           hp: actor.hp,
-          maxHp: 100,
+          maxHp: actor.maxHp ?? 100,
           qi: actor.qi,
           maxQi: 100,
           chargingMelee: Boolean(actor.charging),
@@ -6720,6 +7437,9 @@ export class TwilightEngine {
         ent.elevation = actor.elev;
         ent.chargingMelee = Boolean(actor.charging);
         ent.chargeReady = Boolean(actor.chargeReady);
+        if (actor.maxHp !== undefined) {
+          ent.maxHp = actor.maxHp;
+        }
         ent.royalShieldTimer = actor.shield ?? 0;
         ent.royalShieldImpact = actor.shieldImp;
         ent.eagleEyeTimer = actor.eagle ?? 0;
@@ -6843,13 +7563,20 @@ export class TwilightEngine {
     this.activeSkillBanner = snapshot.skillBanner ?? '';
     this.activeSkillBannerTimer = snapshot.skillBanner ? 0.5 : 0;
 
+    if (snapshot.siege && this.siege) {
+      this.applySiegeSnapshot(snapshot.siege, localPeerId);
+    }
+
     if (snapshot.status === 'VICTORY' || snapshot.status === 'GAME_OVER') {
-      const clientWon =
-        localActor.hp > 0 ||
-        (localActor.faction !== 'mercenary' &&
-          snapshot.actors.some(
-            (a) => a.faction === localActor.faction && (a.hp > 0 || (a.lives ?? 0) > 0)
-          ));
+      const clientWon = this.siege
+        ? this.siege.structures.find((s) => s.faction !== (localActor.faction === 'shadow' ? 'shadow' : 'royal') && s.kind === 'castle')?.alive === false ||
+          ((this.siege.structures.find((s) => s.faction === (localActor.faction === 'shadow' ? 'shadow' : 'royal') && s.kind === 'castle')?.hp ?? 0) >
+            (this.siege.structures.find((s) => s.faction !== (localActor.faction === 'shadow' ? 'shadow' : 'royal') && s.kind === 'castle')?.hp ?? 0))
+        : localActor.hp > 0 ||
+          (localActor.faction !== 'mercenary' &&
+            snapshot.actors.some(
+              (a) => a.faction === localActor.faction && (a.hp > 0 || (a.lives ?? 0) > 0)
+            ));
       const nextStatus = clientWon ? 'VICTORY' : 'GAME_OVER';
       if (this.status !== nextStatus) {
         if (nextStatus === 'VICTORY') sfx.victory();
@@ -7038,7 +7765,11 @@ export class TwilightEngine {
     const hostiles = this.enemies.filter((e) => areHostile(p.faction, 'player', e.faction, e.id));
     const weapon = p.weapons[p.activeHand];
     const offHandWeapon = p.weapons[p.activeHand === 0 ? 1 : 0];
-    const activeSkill = weapon.type === 'melee' ? FACTIONS[p.faction].meleeSkills[weapon.def.kind].name : null;
+    const activeSkill = this.siege
+      ? getUltimateMeta(this.siege.playerState.loadout.ultimateId).name
+      : weapon.type === 'melee'
+        ? FACTIONS[p.faction].meleeSkills[weapon.def.kind].name
+        : null;
 
     const buffs: string[] = [];
     const activeTimedSkills: HudSnapshot['player']['activeTimedSkills'] = [];
@@ -7144,6 +7875,1781 @@ export class TwilightEngine {
         activeTimedSkills,
       },
       factionScores: { ...this.factionScores },
+      siege: this.siege ? this.exportSiegeHudState() : null,
     });
+  }
+
+  // ==================== 3-Lane Castle Siege / MOBA Runtime ====================
+
+  private initSiegeTeams() {
+    if (!this.siege) return;
+    const usedByFaction: Record<SiegeFactionId, Set<string>> = {
+      royal: new Set<string>(),
+      shadow: new Set<string>(),
+    };
+    const countByFaction: Record<SiegeFactionId, number> = { royal: 0, shadow: 0 };
+
+    const pFac: SiegeFactionId = this.player.faction === 'shadow' ? 'shadow' : 'royal';
+    usedByFaction[pFac].add(this.player.characterSkin.id);
+    countByFaction[pFac] += 1;
+
+    for (const rt of this.remoteHumans.values()) {
+      const rFac: SiegeFactionId = rt.faction === 'shadow' ? 'shadow' : 'royal';
+      usedByFaction[rFac].add(rt.characterSkin.id);
+      countByFaction[rFac] += 1;
+    }
+
+    for (const fac of ['royal', 'shadow'] as SiegeFactionId[]) {
+      let laneIdx = 0;
+      while (countByFaction[fac] < SIEGE_CONFIG.teamSize) {
+        const tpl = pickSiegeAiHeroTemplate(fac, usedByFaction[fac], laneIdx++);
+        usedByFaction[fac].add(tpl.skinId);
+        const skin = this.resolveSkinById(tpl.skinId, fac);
+        const hero = this.spawnSiegeHero(fac, tpl.skinId, tpl.loadout, tpl.lane, skin.name);
+        this.enemies.push(hero);
+        countByFaction[fac] += 1;
+      }
+    }
+  }
+
+  private spawnSiegeHero(
+    faction: SiegeFactionId,
+    skinId: string,
+    loadout: SiegePlayerLoadout,
+    lane: SiegeLane,
+    name: string,
+    existingGold = 120,
+    existingUpgrades = { firepower: 0, blade: 0, armor: 0, core: 0 },
+    existingDeaths = 0
+  ): EnemyEntity {
+    const fountain = this.siege!.spec.fountains[faction];
+    const jitter = ((Math.random() - 0.5) * 48);
+    const jitterY = ((Math.random() - 0.5) * 48);
+    const sx = clamp(fountain.x + jitter, TILE * 1.5, this.map.width - TILE * 1.5);
+    const sy = clamp(fountain.y + jitterY, TILE * 1.5, this.map.height - TILE * 1.5);
+    const skin = this.resolveSkinById(skinId, faction);
+    const gun = ALL_GUNS_BY_ID.get(loadout.gunId) || DEFAULT_PISTOL;
+    const melee = ALL_MELEES_BY_ID.get(loadout.meleeId) || DEFAULT_KNIFE;
+    const maxHp = computeSiegeMaxHp({ level: 1, upgrades: existingUpgrades, loadout });
+    const hero: EnemyEntity = {
+      id: uid('siege_hero'),
+      name,
+      archetype: gun.kind === 'sniper' ? 'sniper' : gun.kind === 'shotgun' ? 'rusher' : 'trooper',
+      faction,
+      isAlly: faction === this.player.faction,
+      activeHand: 0,
+      weapons: [equipGun(gun), { type: 'melee', def: melee, durability: melee.kind === 'shield' ? 100 : 0 }],
+      swapTimer: 0,
+      swapDuration: 0,
+      x: sx,
+      y: sy,
+      vx: 0,
+      vy: 0,
+      baseRadius: CHAR_BASE_RADIUS,
+      radius: CHAR_BASE_RADIUS,
+      sizeScale: 1,
+      angle: faction === 'royal' ? -Math.PI / 4 : (3 * Math.PI) / 4,
+      walkPhase: 0,
+      moveIntensity: 0,
+      elevation: this.getWalkableElevation(sx, sy),
+      hp: maxHp,
+      maxHp,
+      qi: 100,
+      maxQi: 100,
+      chargingMelee: false,
+      chargeReady: false,
+      speed: 158,
+      attackCooldown: 0.5,
+      aiTimer: Math.random() * 2,
+      lastSeenTargetPos: null,
+      alertTimer: 0,
+      hasLosToTarget: false,
+      visibleTargetId: null,
+      reactionTimer: 0,
+      focusedTargetId: null,
+      aggroLockTimer: 0,
+      pathTiles: [],
+      pathTimer: 0,
+      patrolAnchor: { x: sx, y: sy },
+      patrolTarget: null,
+      patrolTimer: 0,
+      royalShieldTimer: 0,
+      eagleEyeTimer: 0,
+      shadowCloneTimer: 0,
+      vampireTimer: 0,
+      shrinkTimer: 0,
+      giantTimer: 0,
+      blindTimer: 0,
+      stunTimer: 0,
+      freezeTimer: 0,
+      invulnTimer: 1.5,
+      hitFlash: 0,
+      gunfireTimer: 0,
+      crosshairBloom: 0,
+      bloomDelayTimer: 0,
+      lastAimAngle: 0,
+      attackAnimTimer: 0,
+      attackAnimDuration: 0,
+      attackAnimKind: null,
+      color: FACTIONS[faction].accentHex,
+      characterSkin: skin,
+      siegeUnitKind: 'hero',
+      siegeLane: lane,
+      siegeWaypointIdx: faction === 'royal' ? 0 : this.siege!.spec.laneWaypoints[lane].length - 1,
+      siegeLoadout: { ...loadout },
+      siegeTacticalCd: 1.5,
+      siegeDeaths: existingDeaths,
+      siegeGold: existingGold,
+      siegeUpgrades: { ...existingUpgrades },
+    };
+    return hero;
+  }
+
+  private spawnSiegeMinionWave() {
+    if (!this.siege) return;
+    const activeMinions = this.enemies.filter(
+      (e) => e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion'
+    ).length;
+    if (activeMinions >= SIEGE_CONFIG.maxActiveMinions) return;
+
+    this.siege.waveNumber += 1;
+    const lanes: SiegeLane[] = ['top', 'mid', 'bot'];
+    const rifleDef = ALL_GUNS_BY_ID.get('rifle') || DEFAULT_PISTOL;
+    const shotgunDef = ALL_GUNS_BY_ID.get('shotgun') || DEFAULT_PISTOL;
+
+    for (const fac of ['royal', 'shadow'] as SiegeFactionId[]) {
+      const opp: SiegeFactionId = fac === 'royal' ? 'shadow' : 'royal';
+      const baronActive = this.siege.teamBuffs[fac].baronTimer > 0;
+      const defaultSkin = FACTION_CHARACTERS[fac][0];
+      for (const lane of lanes) {
+        const wps = this.siege.spec.laneWaypoints[lane];
+        const spawnPt = fac === 'royal' ? wps[0] : wps[wps.length - 1];
+        const oppInner = this.siege.structures.find((s) => s.id === `${opp}_${lane}_inner`);
+        const spawnSuper = this.siege.suddenDeath || Boolean(oppInner && !oppInner.alive);
+
+        const specs: { kind: 'minion' | 'super_minion'; role: 'melee' | 'ranged'; hp: number }[] = [
+          {
+            kind: spawnSuper ? 'super_minion' : 'minion',
+            role: 'melee',
+            hp: Math.round((spawnSuper ? 220 : 130) * (baronActive ? 1.35 : 1)),
+          },
+          { kind: 'minion', role: 'ranged', hp: Math.round(70 * (baronActive ? 1.35 : 1)) },
+          { kind: 'minion', role: 'ranged', hp: Math.round(70 * (baronActive ? 1.35 : 1)) },
+        ];
+
+        specs.forEach((sp, idx) => {
+          const rawX = clamp(spawnPt.x + (idx - 1) * 18, TILE, this.map.width - TILE);
+          const rawY = clamp(spawnPt.y + (idx - 1) * 14, TILE, this.map.height - TILE);
+          const isSuper = sp.kind === 'super_minion';
+          const mRadius = isSuper ? 17 : 13;
+          const rawElev = this.getWalkableElevation(rawX, rawY);
+          const spawnValid =
+            this.canStandWithPadding(rawX, rawY, rawElev, mRadius) &&
+            !this.isBlockedByAliveSiegeStructure(rawX, rawY, getMoveCheckRadius(mRadius));
+          const sx = spawnValid ? rawX : spawnPt.x;
+          const sy = spawnValid ? rawY : spawnPt.y;
+          const weapons: [EquippedWeapon, EquippedWeapon] =
+            sp.role === 'melee'
+              ? [
+                  isSuper ? equipGun(shotgunDef) : { type: 'melee', def: DEFAULT_KNIFE, durability: 0 },
+                  { type: 'melee', def: DEFAULT_KNIFE, durability: 0 },
+                ]
+              : [equipGun(rifleDef), { type: 'melee', def: DEFAULT_KNIFE, durability: 0 }];
+          this.enemies.push({
+            id: uid('minion'),
+            name: isSuper ? '重裝超級兵' : sp.role === 'melee' ? '先鋒盾兵' : '遠程步槍兵',
+            archetype: sp.role === 'melee' ? 'rusher' : 'trooper',
+            faction: fac,
+            isAlly: fac === this.player.faction,
+            activeHand: 0,
+            weapons,
+            swapTimer: 0,
+            swapDuration: 0,
+            x: sx,
+            y: sy,
+            vx: 0,
+            vy: 0,
+            baseRadius: mRadius,
+            radius: mRadius,
+            sizeScale: isSuper ? 0.85 : 0.65,
+            angle: fac === 'royal' ? -Math.PI / 4 : (3 * Math.PI) / 4,
+            walkPhase: 0,
+            moveIntensity: 0,
+            elevation: this.getWalkableElevation(sx, sy),
+            hp: sp.hp,
+            maxHp: sp.hp,
+            qi: 0,
+            maxQi: 100,
+            chargingMelee: false,
+            chargeReady: false,
+            speed: isSuper ? 126 : 118,
+            attackCooldown: 0.4,
+            aiTimer: Math.random(),
+            lastSeenTargetPos: null,
+            alertTimer: 0,
+            hasLosToTarget: false,
+            visibleTargetId: null,
+            reactionTimer: 0,
+            focusedTargetId: null,
+            aggroLockTimer: 0,
+            pathTiles: [],
+            pathTimer: 0,
+            patrolAnchor: { x: sx, y: sy },
+            patrolTarget: null,
+            patrolTimer: 0,
+            royalShieldTimer: 0,
+            eagleEyeTimer: 0,
+            shadowCloneTimer: 0,
+            vampireTimer: 0,
+            shrinkTimer: 0,
+            giantTimer: 0,
+            blindTimer: 0,
+            stunTimer: 0,
+            freezeTimer: 0,
+            hitFlash: 0,
+            gunfireTimer: 0,
+            crosshairBloom: 0,
+            bloomDelayTimer: 0,
+            lastAimAngle: 0,
+            attackAnimTimer: 0,
+            attackAnimDuration: 0,
+            attackAnimKind: null,
+            color: FACTIONS[fac].accentHex,
+            characterSkin: defaultSkin,
+            siegeUnitKind: sp.kind,
+            siegeLane: lane,
+            siegeWaypointIdx: fac === 'royal' ? 0 : wps.length - 1,
+          });
+        });
+      }
+    }
+  }
+
+  private spawnSiegeVanguardAlly(faction: SiegeFactionId) {
+    if (!this.siege) return;
+    const fountain = this.siege.spec.fountains[faction];
+    const wps = this.siege.spec.laneWaypoints.mid;
+    const gun = ALL_GUNS_BY_ID.get('shotgun') || DEFAULT_PISTOL;
+    const greatsword = ALL_MELEES_BY_ID.get('greatsword') || DEFAULT_KNIFE;
+    const skin = this.resolveSkinById('merc_mirage', 'mercenary');
+    this.enemies.push({
+      id: uid('vanguard_ally'),
+      name: `${FACTIONS[faction].name}・攻城先鋒`,
+      archetype: 'heavy',
+      faction,
+      isAlly: faction === this.player.faction,
+      activeHand: 0,
+      weapons: [equipGun(gun), { type: 'melee', def: greatsword, durability: 0 }],
+      swapTimer: 0,
+      swapDuration: 0,
+      x: fountain.x,
+      y: fountain.y,
+      vx: 0,
+      vy: 0,
+      baseRadius: CHAR_BASE_RADIUS * 1.15,
+      radius: CHAR_BASE_RADIUS * 1.15,
+      sizeScale: 1.15,
+      angle: 0,
+      walkPhase: 0,
+      moveIntensity: 0,
+      elevation: this.getWalkableElevation(fountain.x, fountain.y),
+      hp: 650,
+      maxHp: 650,
+      qi: 0,
+      maxQi: 100,
+      chargingMelee: false,
+      chargeReady: false,
+      speed: 132,
+      attackCooldown: 0.4,
+      aiTimer: 0,
+      lastSeenTargetPos: null,
+      alertTimer: 0,
+      hasLosToTarget: false,
+      visibleTargetId: null,
+      reactionTimer: 0,
+      focusedTargetId: null,
+      aggroLockTimer: 0,
+      pathTiles: [],
+      pathTimer: 0,
+      patrolAnchor: { x: fountain.x, y: fountain.y },
+      patrolTarget: null,
+      patrolTimer: 0,
+      royalShieldTimer: 0,
+      eagleEyeTimer: 0,
+      shadowCloneTimer: 0,
+      vampireTimer: 0,
+      shrinkTimer: 0,
+      giantTimer: 0,
+      blindTimer: 0,
+      stunTimer: 0,
+      freezeTimer: 0,
+      hitFlash: 0,
+      gunfireTimer: 0,
+      crosshairBloom: 0,
+      bloomDelayTimer: 0,
+      lastAimAngle: 0,
+      attackAnimTimer: 0,
+      attackAnimDuration: 0,
+      attackAnimKind: null,
+      color: FACTIONS[faction].accentHex,
+      characterSkin: skin,
+      siegeUnitKind: 'vanguard_ally',
+      siegeLane: 'mid',
+      siegeWaypointIdx: faction === 'royal' ? 0 : wps.length - 1,
+    });
+  }
+
+  private spawnSiegeJungleUnit(campId: string) {
+    if (!this.siege) return;
+    const camp = this.siege.spec.jungleCamps.find((c) => c.id === campId);
+    if (!camp) return;
+    const skin = this.resolveSkinById(camp.skinId, 'mercenary');
+    const rifle = ALL_GUNS_BY_ID.get('rifle') || DEFAULT_PISTOL;
+    this.enemies.push({
+      id: `${camp.id}_${uid('j')}`,
+      name: camp.name,
+      archetype: 'trooper',
+      faction: 'mercenary',
+      isAlly: false,
+      activeHand: 0,
+      weapons: [equipGun(rifle), { type: 'melee', def: DEFAULT_KNIFE, durability: 0 }],
+      swapTimer: 0,
+      swapDuration: 0,
+      x: camp.x,
+      y: camp.y,
+      vx: 0,
+      vy: 0,
+      baseRadius: CHAR_BASE_RADIUS,
+      radius: CHAR_BASE_RADIUS,
+      sizeScale: 1,
+      angle: Math.random() * Math.PI * 2,
+      walkPhase: 0,
+      moveIntensity: 0,
+      elevation: this.getWalkableElevation(camp.x, camp.y),
+      hp: 260,
+      maxHp: 260,
+      qi: 0,
+      maxQi: 100,
+      chargingMelee: false,
+      chargeReady: false,
+      speed: 130,
+      attackCooldown: 0.6,
+      aiTimer: 0,
+      lastSeenTargetPos: null,
+      alertTimer: 0,
+      hasLosToTarget: false,
+      visibleTargetId: null,
+      reactionTimer: 0,
+      focusedTargetId: null,
+      aggroLockTimer: 0,
+      pathTiles: [],
+      pathTimer: 0,
+      patrolAnchor: { x: camp.x, y: camp.y },
+      patrolTarget: null,
+      patrolTimer: 0,
+      royalShieldTimer: 0,
+      eagleEyeTimer: 0,
+      shadowCloneTimer: 0,
+      vampireTimer: 0,
+      shrinkTimer: 0,
+      giantTimer: 0,
+      blindTimer: 0,
+      stunTimer: 0,
+      freezeTimer: 0,
+      hitFlash: 0,
+      gunfireTimer: 0,
+      crosshairBloom: 0,
+      bloomDelayTimer: 0,
+      lastAimAngle: 0,
+      attackAnimTimer: 0,
+      attackAnimDuration: 0,
+      attackAnimKind: null,
+      color: FACTIONS.mercenary.accentHex,
+      characterSkin: skin,
+      siegeUnitKind: 'jungle',
+      siegeHomePos: { x: camp.x, y: camp.y },
+    });
+  }
+
+  public spawnSiegeBoss(kind: SiegeBossKind) {
+    if (!this.siege) return;
+    const spot = this.siege.spec.bossSpawns[kind];
+    const isBaron = kind === 'baron';
+    const skin = this.resolveSkinById(isBaron ? 'merc_titan' : 'merc_mirage', 'mercenary');
+    const gun = ALL_GUNS_BY_ID.get(isBaron ? 'shotgun' : 'rifle') || DEFAULT_PISTOL;
+    const melee = ALL_MELEES_BY_ID.get(isBaron ? 'greatsword' : 'claw') || DEFAULT_KNIFE;
+    const maxHp = isBaron ? 2400 : 850;
+    const scale = isBaron ? 1.35 : 1.1;
+    this.enemies.push({
+      id: uid(`boss_${kind}`),
+      name: getBossDisplayName(kind),
+      archetype: isBaron ? 'heavy' : 'phantom',
+      faction: 'mercenary',
+      isAlly: false,
+      activeHand: 0,
+      weapons: [equipGun(gun), { type: 'melee', def: melee, durability: 0 }],
+      swapTimer: 0,
+      swapDuration: 0,
+      x: spot.x,
+      y: spot.y,
+      vx: 0,
+      vy: 0,
+      baseRadius: CHAR_BASE_RADIUS,
+      radius: CHAR_BASE_RADIUS * scale,
+      sizeScale: scale,
+      angle: 0,
+      walkPhase: 0,
+      moveIntensity: 0,
+      elevation: this.getWalkableElevation(spot.x, spot.y),
+      hp: maxHp,
+      maxHp,
+      qi: 100,
+      maxQi: 100,
+      chargingMelee: false,
+      chargeReady: false,
+      speed: isBaron ? 128 : 150,
+      attackCooldown: 0.7,
+      aiTimer: 0,
+      lastSeenTargetPos: null,
+      alertTimer: 0,
+      hasLosToTarget: false,
+      visibleTargetId: null,
+      reactionTimer: 0,
+      focusedTargetId: null,
+      aggroLockTimer: 0,
+      pathTiles: [],
+      pathTimer: 0,
+      patrolAnchor: { x: spot.x, y: spot.y },
+      patrolTarget: null,
+      patrolTimer: 0,
+      royalShieldTimer: 0,
+      eagleEyeTimer: 0,
+      shadowCloneTimer: 0,
+      vampireTimer: 0,
+      shrinkTimer: 0,
+      giantTimer: isBaron ? 4 : 0,
+      blindTimer: 0,
+      stunTimer: 0,
+      freezeTimer: 0,
+      hitFlash: 0,
+      gunfireTimer: 0,
+      crosshairBloom: 0,
+      bloomDelayTimer: 0,
+      lastAimAngle: 0,
+      attackAnimTimer: 0,
+      attackAnimDuration: 0,
+      attackAnimKind: null,
+      color: '#F59E0B',
+      characterSkin: skin,
+      siegeUnitKind: 'boss',
+      siegeBossKind: kind,
+      siegeHomePos: { x: spot.x, y: spot.y },
+    });
+    if (kind === 'baron') {
+      this.siege.baronState = 'alive';
+      this.showBanner('【終極 Boss 降臨】上河道「狂戰巨神・重砲鐵拳」已登場！', 4.0);
+    } else {
+      this.siege.vanguardState = 'alive';
+      this.showBanner('【中期 Boss 登場】下河道「幻沙先鋒・雙影巨獸」現身！', 3.5);
+    }
+  }
+
+  public triggerSiegeTactical() {
+    if (this.mode !== 'siege' || !this.siege || this.status !== 'PLAYING') return;
+    if (this.multiplayer?.role === 'client') return;
+    const p = this.player;
+    const ps = this.siege.playerState;
+    if (p.hp <= 0 || p.freezeTimer > 0) return;
+    if (ps.tacticalCd > 0) {
+      this.spawnText(p.x, p.y - 34, `冷卻中 (${ps.tacticalCd.toFixed(1)}s)`, '#94A3B8', 0.9, true);
+      return;
+    }
+    const ptr = this.getWorldPointer();
+    ps.recallTimer = 0;
+    this.castSiegeTacticalSkill('player', p, ps.loadout, ptr.x, ptr.y);
+    ps.tacticalCd = computeSiegeTacticalCooldown(ps);
+    this.emitHud();
+  }
+
+  public triggerSiegeUltimate() {
+    if (this.mode !== 'siege' || !this.siege || this.status !== 'PLAYING') return;
+    if (this.multiplayer?.role === 'client') return;
+    const p = this.player;
+    const ps = this.siege.playerState;
+    if (p.hp <= 0 || p.freezeTimer > 0) return;
+    if (p.qi < p.maxQi - 0.5) {
+      this.spawnText(p.x, p.y - 34, `氣力不足 (${Math.round(p.qi)}/100)`, '#38BDF8', 0.9, true);
+      return;
+    }
+    p.qi = 0;
+    ps.recallTimer = 0;
+    this.cancelMeleeCharge();
+    sfx.ultimate();
+    this.emitNetSfx('skill', p.x, p.y);
+    this.camera.shake = 7;
+    const ultMeta = getUltimateMeta(ps.loadout.ultimateId);
+    this.activeSkillBanner = `${FACTIONS[p.faction].name} · ${ultMeta.name}`;
+    this.activeSkillBannerTimer = 2.5;
+    this.castSiegeUltimateSkill('player', p, ps.loadout.ultimateId, p.angle, 1.0);
+    this.emitHud();
+  }
+
+  public startSiegeRecall() {
+    if (this.mode !== 'siege' || !this.siege || this.status !== 'PLAYING') return;
+    if (this.multiplayer?.role === 'client') return;
+    const p = this.player;
+    const ps = this.siege.playerState;
+    if (p.hp <= 0) return;
+    const fac: SiegeFactionId = p.faction === 'shadow' ? 'shadow' : 'royal';
+    if (this.isInsideOwnFountain(p.x, p.y, fac)) {
+      this.spawnText(p.x, p.y - 34, '已在基地泉水內', '#38BDF8', 0.9, true);
+      return;
+    }
+    ps.recallTimer = SIEGE_CONFIG.recallDurationSec;
+    this.spawnText(p.x, p.y - 38, '回城引導中 (3.5s)...', '#38BDF8', 1.0);
+    this.emitHud();
+  }
+
+  public buySiegeUpgrade(track: SiegeUpgradeTrack): boolean {
+    if (this.mode !== 'siege' || !this.siege) return false;
+    if (this.multiplayer?.role === 'client') return false;
+    const p = this.player;
+    const ps = this.siege.playerState;
+    const fac: SiegeFactionId = p.faction === 'shadow' ? 'shadow' : 'royal';
+    const canShop = this.status === 'RESPAWNING' || this.isInsideOwnFountain(p.x, p.y, fac);
+    if (!canShop) {
+      this.spawnText(p.x, p.y - 36, '須回泉水 [B] 或復活時升級', '#FBBF24', 0.95);
+      return false;
+    }
+    const res = tryPurchaseSiegeUpgrade(ps, track);
+    if (!res.ok) {
+      this.spawnText(p.x, p.y - 36, res.reason || '無法升級', '#F87171', 0.95);
+      return false;
+    }
+    if (track === 'armor') {
+      p.maxHp = computeSiegeMaxHp(ps);
+      if (p.hp > 0) p.hp = Math.min(p.maxHp, p.hp + 22);
+    }
+    sfx.pickup();
+    const meta = SIEGE_UPGRADES.find((u) => u.track === track);
+    this.spawnText(p.x, p.y - 40, `${meta?.name ?? track} Lv.${res.level}!`, meta?.color ?? '#FACC15', 1.15);
+    this.emitHud();
+    return true;
+  }
+
+  private castSiegeTacticalSkill(
+    casterId: string,
+    caster: PlayerState | EnemyEntity,
+    loadout: SiegePlayerLoadout,
+    aimX: number,
+    aimY: number
+  ) {
+    if (!this.siege) return;
+    const fac: SiegeFactionId = caster.faction === 'shadow' ? 'shadow' : 'royal';
+    const meta = getTacticalMeta(loadout.tacticalId);
+    const heroState = this.getSiegeHeroState(casterId);
+    const bladeMult = heroState ? 1 + (heroState.upgrades.blade ?? 0) * 0.15 : 1;
+    this.spawnText(caster.x, caster.y - 40, meta.name, meta.color, 1.15);
+    sfx.ultimate();
+    this.emitNetSfx('skill', caster.x, caster.y);
+
+    if (loadout.tacticalId === 'royal_aegis_reflect') {
+      if (casterId === 'player') {
+        this.siege.playerState.aegisReflectTimer = 3.5;
+      } else if ('siegeAegisReflectTimer' in caster) {
+        caster.siegeAegisReflectTimer = 3.5;
+        const rState = caster.peerId ? this.siege.remoteStates.get(caster.peerId) : undefined;
+        if (rState) rState.aegisReflectTimer = 3.5;
+      }
+      this.spawnBurst(caster.x, caster.y, '#38BDF8', 14);
+      return;
+    }
+
+    if (loadout.tacticalId === 'royal_sanctuary_zone') {
+      this.siege.zones.push({
+        id: uid('zone'),
+        kind: 'sanctuary',
+        faction: fac,
+        ownerId: casterId,
+        x: caster.x,
+        y: caster.y,
+        radius: 160,
+        life: 4.5,
+        maxLife: 4.5,
+        tickTimer: 0.2,
+        heal: 7,
+      });
+      return;
+    }
+
+    if (loadout.tacticalId === 'royal_dash_bash') {
+      const ang = Math.atan2(aimY - caster.y, aimX - caster.x);
+      const d = Math.min(190, Math.max(40, dist(caster.x, caster.y, aimX, aimY)));
+      const spot = this.findSafeTeleportSpot(
+        caster.x + Math.cos(ang) * d,
+        caster.y + Math.sin(ang) * d,
+        ang,
+        4,
+        caster.radius,
+        caster.x,
+        caster.y
+      );
+      this.addSkillTrace('blink', caster, spot, 0.45);
+      caster.x = spot.x;
+      caster.y = spot.y;
+      caster.elevation = this.getWalkableElevation(caster.x, caster.y);
+      this.pushSlash({
+        x: caster.x,
+        y: caster.y,
+        angle: ang,
+        arc: Math.PI * 2,
+        reach: 115,
+        color: '#60A5FA',
+        life: 0.24,
+        maxLife: 0.24,
+        isUltimate: true,
+        style: 'sweep',
+      });
+      const bashDmg = Math.round(25 * bladeMult);
+      if (casterId !== 'player' && this.player.hp > 0 && areHostile(fac, casterId, this.player.faction, 'player')) {
+        if (dist(caster.x, caster.y, this.player.x, this.player.y) <= 115 + this.player.radius) {
+          this.damagePlayer(bashDmg, true, casterId, caster.x, caster.y);
+        }
+      }
+      for (const e of [...this.enemies]) {
+        if (e.id === casterId || !areHostile(fac, casterId, e.faction, e.id)) continue;
+        if (dist(caster.x, caster.y, e.x, e.y) <= 115 + e.radius) {
+          const pushA = Math.atan2(e.y - caster.y, e.x - caster.x);
+          this.damageEnemy(e, bashDmg, true, Math.cos(pushA) * 520, Math.sin(pushA) * 520, false, true, casterId, fac, caster.x, caster.y);
+          if (e.hp > 0) e.stunTimer = Math.max(e.stunTimer, 0.8);
+        }
+      }
+      return;
+    }
+
+    if (loadout.tacticalId === 'shadow_blink_swap') {
+      this.siege.zones.push({
+        id: uid('decoy'),
+        kind: 'decoy',
+        faction: fac,
+        ownerId: casterId,
+        x: caster.x,
+        y: caster.y,
+        radius: 110,
+        life: 1.4,
+        maxLife: 1.4,
+        tickTimer: 99,
+        damage: Math.round(38 * bladeMult),
+      });
+      const ang = Math.atan2(aimY - caster.y, aimX - caster.x);
+      const d = Math.min(190, Math.max(50, dist(caster.x, caster.y, aimX, aimY)));
+      const spot = this.findSafeTeleportSpot(
+        caster.x + Math.cos(ang) * d,
+        caster.y + Math.sin(ang) * d,
+        ang,
+        4,
+        caster.radius,
+        caster.x,
+        caster.y
+      );
+      this.addSkillTrace('blink', caster, spot, 0.48);
+      caster.x = spot.x;
+      caster.y = spot.y;
+      caster.elevation = this.getWalkableElevation(caster.x, caster.y);
+      return;
+    }
+
+    if (loadout.tacticalId === 'shadow_hunter_mark') {
+      caster.eagleEyeTimer = Math.max(caster.eagleEyeTimer, 4.5);
+      let markedCount = 0;
+      if (casterId !== 'player' && this.player.hp > 0 && areHostile(fac, casterId, this.player.faction, 'player')) {
+        if (dist(caster.x, caster.y, this.player.x, this.player.y) <= 480) {
+          this.siege.playerState.markedTimer = 5.0;
+          this.spawnText(this.player.x, this.player.y - 36, '被獵殺標記!', '#FB7185', 1.0);
+          markedCount += 1;
+        }
+      }
+      const nearEnemies = this.enemies
+        .filter((e) => areHostile(fac, casterId, e.faction, e.id) && dist(caster.x, caster.y, e.x, e.y) <= 480)
+        .sort((a, b) => dist(caster.x, caster.y, a.x, a.y) - dist(caster.x, caster.y, b.x, b.y));
+      for (const target of nearEnemies) {
+        if (markedCount >= 2) break;
+        target.siegeMarkedTimer = 5.0;
+        this.spawnText(target.x, target.y - 34, '獵殺標記 +22%傷', '#FB7185', 0.95);
+        markedCount += 1;
+      }
+      return;
+    }
+
+    // shadow_smoke_shroud
+    caster.shadowCloneTimer = Math.max(caster.shadowCloneTimer, 3.5);
+    if (casterId === 'player') {
+      this.siege.playerState.smokeSpeedTimer = 3.5;
+    } else if ('peerId' in caster && caster.peerId) {
+      const rState = this.siege.remoteStates.get(caster.peerId);
+      if (rState) rState.smokeSpeedTimer = 3.5;
+    }
+    this.spawnBurst(caster.x, caster.y, '#A855F7', 12);
+  }
+
+  private castSiegeUltimateSkill(
+    casterId: string,
+    caster: PlayerState | EnemyEntity,
+    ultId: SiegePlayerLoadout['ultimateId'],
+    aimAngle: number,
+    comboMult: number
+  ) {
+    if (!this.siege) return;
+    const fac: SiegeFactionId = caster.faction === 'shadow' ? 'shadow' : 'royal';
+    const heroState = this.getSiegeHeroState(casterId);
+    const bladeMult = (heroState ? 1 + (heroState.upgrades.blade ?? 0) * 0.16 : 1) * comboMult;
+    const ultMeta = getUltimateMeta(ultId);
+    this.spawnText(caster.x, caster.y - 44, `${ultMeta.name}!`, ultMeta.color, 1.3);
+
+    if (ultId === 'royal_judgment_beam') {
+      const range = 760;
+      const wallSeg = this.traceBulletSegment(caster.x, caster.y, aimAngle, range, caster.elevation, false);
+      const endX = wallSeg.x2;
+      const endY = wallSeg.y2;
+      this.pushBeam({
+        x1: caster.x + Math.cos(aimAngle) * 20,
+        y1: caster.y + Math.sin(aimAngle) * 20,
+        x2: endX,
+        y2: endY,
+        color: '#FDE047',
+        life: 0.34,
+        maxLife: 0.34,
+        width: 14,
+      });
+      const unitDmg = Math.round(75 * bladeMult);
+      const structDmg = Math.round(180 * bladeMult);
+      if (casterId !== 'player' && this.player.hp > 0 && areHostile(fac, casterId, this.player.faction, 'player')) {
+        const hit = segmentCircleHit(caster.x, caster.y, endX, endY, this.player.x, this.player.y, this.player.radius + 14);
+        if (hit.hit) this.damagePlayer(unitDmg, false, casterId, caster.x, caster.y);
+      }
+      for (const e of [...this.enemies]) {
+        if (e.id === casterId || !areHostile(fac, casterId, e.faction, e.id)) continue;
+        const hit = segmentCircleHit(caster.x, caster.y, endX, endY, e.x, e.y, e.radius + 14);
+        if (hit.hit) {
+          this.damageEnemy(e, unitDmg, false, Math.cos(aimAngle) * 180, Math.sin(aimAngle) * 180, true, true, casterId, fac, caster.x, caster.y);
+        }
+      }
+      const hitStructures = this.siege.structures
+        .filter((st) => st.alive && st.faction !== fac)
+        .map((st) => ({ st, hit: segmentCircleHit(caster.x, caster.y, endX, endY, st.x, st.y, st.radius + 10) }))
+        .filter((x) => x.hit.hit)
+        .sort((a, b) => a.hit.t - b.hit.t);
+      if (hitStructures.length > 0) {
+        this.damageSiegeStructure(hitStructures[0].st, structDmg, casterId, fac);
+      }
+      return;
+    }
+
+    if (ultId === 'royal_light_rain' || ultId === 'royal_healing_salvo') {
+      const isHeal = ultId === 'royal_healing_salvo';
+      const spreadAngles = isHeal
+        ? [-0.3, -0.15, 0, 0.15, 0.3]
+        : [-0.48, -0.36, -0.24, -0.12, 0, 0.12, 0.24, 0.36, 0.48];
+      const dmg = Math.round((isHeal ? 32 : 28) * bladeMult);
+      for (const off of spreadAngles) {
+        const a = aimAngle + off;
+        this.projectiles.push({
+          id: uid('lightorb'),
+          x: caster.x + Math.cos(a) * 26,
+          y: caster.y + Math.sin(a) * 26,
+          prevX: caster.x,
+          prevY: caster.y,
+          vx: Math.cos(a) * 580,
+          vy: Math.sin(a) * 580,
+          radius: 13,
+          damage: dmg,
+          startElevation: caster.elevation,
+          minTraversedElevation: caster.elevation,
+          ownerId: casterId,
+          ownerFaction: fac,
+          fromPlayer: casterId === 'player',
+          isAlly: fac === this.player.faction,
+          noFriendlyFire: true,
+          healAllies: isHeal,
+          color: isHeal ? '#4ADE80' : '#FACC15',
+          life: 1.25,
+          maxLife: 1.25,
+          pierce: 8,
+          isLightOrb: true,
+          hitIds: new Set(),
+        });
+      }
+      return;
+    }
+
+    if (ultId === 'shadow_twin_dragons') {
+      const headDmg = Math.round(24 * bladeMult);
+      const bodyDmg = Math.round(16 * bladeMult);
+      for (const off of [-0.14, 0.14]) {
+        const a = aimAngle + off;
+        const startX = caster.x + Math.cos(a) * 26;
+        const startY = caster.y + Math.sin(a) * 26;
+        this.projectiles.push({
+          id: uid('blackdragon'),
+          x: startX,
+          y: startY,
+          prevX: caster.x,
+          prevY: caster.y,
+          vx: Math.cos(a) * 420,
+          vy: Math.sin(a) * 420,
+          radius: 19,
+          damage: headDmg,
+          headDamage: headDmg,
+          bodyDamage: bodyDmg,
+          startElevation: caster.elevation,
+          minTraversedElevation: caster.elevation,
+          ownerId: casterId,
+          ownerFaction: fac,
+          fromPlayer: casterId === 'player',
+          isAlly: fac === this.player.faction,
+          noFriendlyFire: true,
+          color: '#312E81',
+          life: 2.6,
+          maxLife: 2.6,
+          pierce: 99,
+          isWave: true,
+          isBlackDragon: true,
+          segments: [{ x: startX, y: startY }],
+          bouncesLeft: 3,
+          distanceTraveled: 0,
+          maxDistance: 900,
+          targetHitCooldowns: {},
+          hitIds: new Set(),
+        });
+      }
+      return;
+    }
+
+    if (ultId === 'shadow_pierce_dragon') {
+      const headDmg = Math.round(55 * bladeMult);
+      const bodyDmg = Math.round(38 * bladeMult);
+      const startX = caster.x + Math.cos(aimAngle) * 28;
+      const startY = caster.y + Math.sin(aimAngle) * 28;
+      this.projectiles.push({
+        id: uid('piercedragon'),
+        x: startX,
+        y: startY,
+        prevX: caster.x,
+        prevY: caster.y,
+        vx: Math.cos(aimAngle) * 640,
+        vy: Math.sin(aimAngle) * 640,
+        radius: 22,
+        damage: headDmg,
+        headDamage: headDmg,
+        bodyDamage: bodyDmg,
+        startElevation: caster.elevation,
+        minTraversedElevation: caster.elevation,
+        ownerId: casterId,
+        ownerFaction: fac,
+        fromPlayer: casterId === 'player',
+        isAlly: fac === this.player.faction,
+        noFriendlyFire: true,
+        ignoresWalls: true,
+        color: '#881337',
+        life: 2.5,
+        maxLife: 2.5,
+        pierce: 99,
+        isWave: true,
+        isBlackDragon: true,
+        segments: [{ x: startX, y: startY }],
+        bouncesLeft: 0,
+        distanceTraveled: 0,
+        maxDistance: 1500,
+        targetHitCooldowns: {},
+        hitIds: new Set(),
+      });
+      return;
+    }
+
+    // shadow_vortex_dragon
+    const ptr = casterId === 'player' ? this.getWorldPointer() : { x: caster.x + Math.cos(aimAngle) * 240, y: caster.y + Math.sin(aimAngle) * 240 };
+    const travel = clamp(dist(caster.x, caster.y, ptr.x, ptr.y), 90, 380);
+    const tx = clamp(caster.x + Math.cos(aimAngle) * travel, TILE, this.map.width - TILE);
+    const ty = clamp(caster.y + Math.sin(aimAngle) * travel, TILE, this.map.height - TILE);
+    this.addSkillTrace('blink', caster, { x: tx, y: ty }, 0.45);
+    this.siege.zones.push({
+      id: uid('vortex'),
+      kind: 'vortex',
+      faction: fac,
+      ownerId: casterId,
+      x: tx,
+      y: ty,
+      radius: 135,
+      life: 3.5,
+      maxLife: 3.5,
+      tickTimer: 0.1,
+      damage: Math.round(16 * bladeMult),
+    });
+  }
+
+  public damageSiegeStructure(
+    st: SiegeStructure,
+    rawDmg: number,
+    attackerId: string,
+    attackerFaction: FactionId
+  ): number {
+    if (!this.siege || !st.alive || st.faction === attackerFaction || rawDmg <= 0) return 0;
+    if (st.invulnerable) {
+      if (st.hitFlash <= 0) {
+        st.hitFlash = 0.25;
+        this.spawnText(
+          st.x,
+          st.y - st.radius - 16,
+          st.kind === 'castle' ? '主堡無敵! 先拆高地塔' : '高地塔無敵! 先拆外塔',
+          '#38BDF8',
+          0.9,
+          true
+        );
+      }
+      return 0;
+    }
+
+    let dmg = rawDmg;
+    if (st.backdoorProtected) dmg *= SIEGE_CONFIG.backdoorDamageMult;
+    if (this.siege.suddenDeath) dmg *= SIEGE_CONFIG.suddenDeathStructureDmgMult;
+
+    if (attackerFaction === 'royal' || attackerFaction === 'shadow') {
+      const buffs = this.siege.teamBuffs[attackerFaction];
+      dmg *= 1 + buffs.vanguardStacks * 0.1 + (buffs.baronTimer > 0 ? 0.25 : 0);
+    }
+    const heroState = this.getSiegeHeroState(attackerId);
+    if (heroState) {
+      dmg *= 1 + (heroState.upgrades.firepower ?? 0) * 0.15;
+    }
+
+    const finalDmg = Math.max(1, Math.round(dmg));
+    st.hp = Math.max(0, st.hp - finalDmg);
+    st.hitFlash = 0.1;
+
+    if (attackerId === 'player') {
+      this.player.totalDamage += finalDmg;
+      this.player.score += finalDmg;
+    } else {
+      const rt = this.getRemoteHumanByEntityId(attackerId);
+      if (rt) {
+        rt.totalDamage += finalDmg;
+        rt.score += finalDmg;
+      }
+    }
+
+    this.spawnBurst(st.x, st.y, '#FBBF24', 4);
+    if (st.hp > 0) return finalDmg;
+
+    st.alive = false;
+    this.spawnBurst(st.x, st.y, st.faction === 'royal' ? '#38BDF8' : '#C026D3', 28);
+    sfx.ultimate();
+    refreshStructureInvulnerability(this.siege.structures);
+
+    const killerFac: SiegeFactionId = attackerFaction === 'shadow' ? 'shadow' : 'royal';
+    this.awardSiegeTeamGold(killerFac, 60);
+    this.awardSiegeHeroKill(attackerId, 150, 120, false, true);
+
+    if (st.kind === 'castle') {
+      const playerWon = st.faction !== this.player.faction;
+      this.status = playerWon ? 'VICTORY' : 'GAME_OVER';
+      if (playerWon) sfx.victory();
+      else sfx.defeat();
+      this.showBanner(
+        st.faction === 'royal' ? '天影十字軍摧毀皇家主城堡！' : '皇家騎士團摧毀天影主城堡！',
+        5.0
+      );
+      this.clearInputs();
+      this.emitHud();
+    } else {
+      const label = st.kind === 'inner_tower' ? '高地防禦塔' : '外防禦塔';
+      this.showBanner(`${FACTIONS[killerFac].name} 摧毀了${FACTIONS[st.faction].name}${label}！`, 3.5);
+    }
+    return finalDmg;
+  }
+
+  private handleSiegeEnemyRemoved(enemy: EnemyEntity, attackerId?: string) {
+    if (!this.siege) return;
+    if (enemy.siegeUnitKind === 'hero' && !enemy.isHumanPlayer) {
+      const fac: SiegeFactionId = enemy.faction === 'shadow' ? 'shadow' : 'royal';
+      const respSec = computeSiegeRespawnSeconds(this.siege.matchTime, this.siege.suddenDeath);
+      this.siege.aiRespawns.push({
+        name: enemy.name,
+        skinId: enemy.characterSkin.id,
+        faction: fac,
+        lane: enemy.siegeLane ?? 'mid',
+        loadout: enemy.siegeLoadout ?? getDefaultSiegeLoadout(fac, enemy.characterSkin.id),
+        timer: respSec,
+        deaths: (enemy.siegeDeaths ?? 0) + 1,
+        gold: enemy.siegeGold ?? 120,
+        upgrades: enemy.siegeUpgrades ?? { firepower: 0, blade: 0, armor: 0, core: 0 },
+      });
+      if (attackerId) this.awardSiegeHeroKill(attackerId, 150, 130, true);
+      return;
+    }
+
+    if (enemy.siegeUnitKind === 'minion' || enemy.siegeUnitKind === 'super_minion') {
+      const isSuper = enemy.siegeUnitKind === 'super_minion';
+      if (attackerId) this.awardSiegeHeroKill(attackerId, isSuper ? 32 : 18, isSuper ? 35 : 22, false, false, true);
+      return;
+    }
+
+    if (enemy.siegeUnitKind === 'jungle') {
+      const camp = this.siege.spec.jungleCamps.find((c) => enemy.id.startsWith(`${c.id}_`));
+      if (camp) this.siege.jungleTimers[camp.id] = SIEGE_CONFIG.jungleRespawnSec;
+      if (attackerId) {
+        this.awardSiegeHeroKill(attackerId, camp?.goldReward ?? 45, camp?.xpReward ?? 55, false, false, true);
+        if (attackerId === 'player' && this.player.hp > 0) {
+          this.player.hp = Math.min(this.player.maxHp, this.player.hp + 15);
+          this.player.qi = Math.min(this.player.maxQi, this.player.qi + 25);
+        } else {
+          const ae = this.enemies.find((x) => x.id === attackerId);
+          if (ae && ae.hp > 0) {
+            ae.hp = Math.min(ae.maxHp, ae.hp + 15);
+            ae.qi = Math.min(ae.maxQi, ae.qi + 25);
+          }
+        }
+      }
+      return;
+    }
+
+    if (enemy.siegeUnitKind === 'boss') {
+      const killerActor = attackerId === 'player' ? this.player : this.enemies.find((x) => x.id === attackerId);
+      const killerFac: SiegeFactionId = killerActor?.faction === 'shadow' ? 'shadow' : 'royal';
+      if (enemy.siegeBossKind === 'baron') {
+        this.siege.baronState = 'countdown';
+        this.siege.baronTimer = SIEGE_CONFIG.baronRespawnSec;
+        this.siege.teamBuffs[killerFac].baronTimer = SIEGE_CONFIG.baronBuffDurationSec;
+        this.awardSiegeTeamGold(killerFac, 200);
+        this.showBanner(`【傭兵血契】${FACTIONS[killerFac].name} 擊殺狂戰巨神！獲得 90 秒全隊吸血與攻城強化！`, 4.5);
+      } else {
+        this.siege.vanguardState = 'countdown';
+        this.siege.vanguardTimer = SIEGE_CONFIG.vanguardRespawnSec;
+        this.siege.teamBuffs[killerFac].vanguardStacks += 1;
+        this.awardSiegeTeamGold(killerFac, 100);
+        this.spawnSiegeVanguardAlly(killerFac);
+        this.showBanner(`【幻沙先鋒歸順】${FACTIONS[killerFac].name} 召喚中路攻城先鋒！`, 4.0);
+      }
+    }
+  }
+
+  private awardSiegeTeamGold(faction: SiegeFactionId, gold: number) {
+    if (!this.siege) return;
+    if (this.player.faction === faction) {
+      grantSiegeXpAndGold(this.siege.playerState, gold, 0);
+    }
+    for (const [peerId, st] of this.siege.remoteStates.entries()) {
+      const rt = this.remoteHumans.get(peerId);
+      if (rt?.faction === faction) grantSiegeXpAndGold(st, gold, 0);
+    }
+    for (const e of this.enemies) {
+      if (e.siegeUnitKind === 'hero' && !e.isHumanPlayer && e.faction === faction) {
+        e.siegeGold = (e.siegeGold ?? 120) + gold;
+      }
+    }
+  }
+
+  private awardSiegeHeroKill(
+    attackerId: string,
+    gold: number,
+    xp: number,
+    isHeroKill: boolean,
+    isTowerKill = false,
+    isCreepKill = false
+  ) {
+    if (!this.siege) return;
+    if (attackerId === 'player') {
+      const ps = this.siege.playerState;
+      const res = grantSiegeXpAndGold(ps, gold, xp);
+      if (isTowerKill) ps.towerKills += 1;
+      if (isCreepKill) ps.minionKills += 1;
+      if (ps.loadout.passiveId === 'shadow_assassin' && (isHeroKill || isCreepKill)) {
+        this.player.qi = Math.min(this.player.maxQi, this.player.qi + 18);
+      }
+      if (isHeroKill || isCreepKill) {
+        this.player.reserveAmmo = Math.min(this.player.maxReserveAmmo, this.player.reserveAmmo + 12);
+      }
+      if (res.leveledUp) {
+        this.player.maxHp = computeSiegeMaxHp(ps);
+        this.player.hp = Math.min(this.player.maxHp, this.player.hp + res.hpGain + 15);
+        this.spawnText(this.player.x, this.player.y - 44, `升級 Lv.${res.newLevel}!`, '#FACC15', 1.2);
+      }
+      return;
+    }
+    const rPeer = this.getRemoteHumanByEntityId(attackerId);
+    if (rPeer) {
+      const rState = this.siege.remoteStates.get(rPeer.peerId);
+      if (rState) {
+        const res = grantSiegeXpAndGold(rState, gold, xp);
+        if (isTowerKill) rState.towerKills += 1;
+        if (isCreepKill) rState.minionKills += 1;
+        rPeer.reserveAmmo = Math.min(rPeer.maxReserveAmmo, rPeer.reserveAmmo + 12);
+        const ent = this.enemies.find((e) => e.id === attackerId);
+        if (ent && res.leveledUp) {
+          ent.maxHp = computeSiegeMaxHp(rState);
+          ent.hp = Math.min(ent.maxHp, ent.hp + res.hpGain + 15);
+        }
+      }
+      return;
+    }
+    const aiHero = this.enemies.find((e) => e.id === attackerId && e.siegeUnitKind === 'hero');
+    if (aiHero) {
+      aiHero.siegeGold = (aiHero.siegeGold ?? 120) + gold;
+    }
+  }
+
+  private getSiegeHeroState(entityId?: string): SiegeHeroState | undefined {
+    if (!this.siege || !entityId) return undefined;
+    if (entityId === 'player') return this.siege.playerState;
+    const rt = this.getRemoteHumanByEntityId(entityId);
+    if (rt) return this.siege.remoteStates.get(rt.peerId);
+    return undefined;
+  }
+
+  private getSiegeMinionDamageMult(e: EnemyEntity): number {
+    if (!this.siege) return 1;
+    let mult = 1;
+    const fac = e.faction === 'shadow' ? 'shadow' : 'royal';
+    if (this.siege.teamBuffs[fac].baronTimer > 0) mult += 0.35;
+    if (
+      this.siege.playerState.loadout.passiveId === 'royal_vanguard_aura' &&
+      this.player.faction === fac &&
+      this.player.hp > 0 &&
+      dist(this.player.x, this.player.y, e.x, e.y) <= 240
+    ) {
+      mult += 0.2;
+    }
+    return mult;
+  }
+
+  private isInSanctuaryZone(x: number, y: number, faction: FactionId): boolean {
+    if (!this.siege) return false;
+    return this.siege.zones.some((z) => z.kind === 'sanctuary' && z.faction === faction && dist(x, y, z.x, z.y) <= z.radius);
+  }
+
+  private isInsideOwnFountain(x: number, y: number, faction: SiegeFactionId): boolean {
+    if (!this.siege) return false;
+    const f = this.siege.spec.fountains[faction];
+    return dist(x, y, f.x, f.y) <= f.radius;
+  }
+
+  private notifySiegeTurretHeroAggro(attackerId: string, victim: EnemyEntity) {
+    if (!this.siege) return;
+    for (const st of this.siege.structures) {
+      if (!st.alive || st.faction !== victim.faction) continue;
+      if (dist(st.x, st.y, victim.x, victim.y) <= st.range) {
+        st.aggroTargetId = attackerId;
+        st.aggroLockTimer = 3.0;
+      }
+    }
+  }
+
+  private updateSiegeMode(dt: number) {
+    const sg = this.siege;
+    if (!sg) return;
+
+    sg.matchTime += dt;
+    if (!sg.suddenDeath && sg.matchTime >= sg.matchDuration - SIEGE_CONFIG.suddenDeathLeadSec) {
+      sg.suddenDeath = true;
+      if (!sg.suddenDeathAnnounced) {
+        sg.suddenDeathAnnounced = true;
+        this.showBanner('【總攻時刻！】最後 3 分鐘雙倍超級兵加速推進，所有建築護甲下降！', 4.5);
+      }
+    }
+
+    if (sg.matchTime >= sg.matchDuration && this.status === 'PLAYING') {
+      const rCastle = sg.structures.find((s) => s.id === 'royal_castle');
+      const sCastle = sg.structures.find((s) => s.id === 'shadow_castle');
+      const rPct = rCastle ? rCastle.hp / rCastle.maxHp : 0;
+      const sPct = sCastle ? sCastle.hp / sCastle.maxHp : 0;
+      const pFac: SiegeFactionId = this.player.faction === 'shadow' ? 'shadow' : 'royal';
+      const playerWon = pFac === 'royal' ? rPct >= sPct : sPct >= rPct;
+      this.status = playerWon ? 'VICTORY' : 'GAME_OVER';
+      if (playerWon) sfx.victory();
+      else sfx.defeat();
+      this.showBanner(`時間到！依主城堡血量判定：${playerWon ? '勝利' : '敗北'}`, 5.0);
+      this.clearInputs();
+      this.emitHud();
+      return;
+    }
+
+    sg.teamBuffs.royal.baronTimer = Math.max(0, sg.teamBuffs.royal.baronTimer - dt);
+    sg.teamBuffs.shadow.baronTimer = Math.max(0, sg.teamBuffs.shadow.baronTimer - dt);
+
+    sg.passiveGoldTimer += dt;
+    if (sg.passiveGoldTimer >= 1.0) {
+      sg.passiveGoldTimer -= 1.0;
+      this.awardSiegeTeamGold('royal', SIEGE_CONFIG.passiveGoldPerSec);
+      this.awardSiegeTeamGold('shadow', SIEGE_CONFIG.passiveGoldPerSec);
+    }
+
+    // Player siege timers, fountain heal, out-of-combat ammo regen, & recall
+    const ps = sg.playerState;
+    ps.tacticalCd = Math.max(0, ps.tacticalCd - dt);
+    ps.aegisReflectTimer = Math.max(0, ps.aegisReflectTimer - dt);
+    ps.smokeSpeedTimer = Math.max(0, ps.smokeSpeedTimer - dt);
+    ps.markedTimer = Math.max(0, ps.markedTimer - dt);
+    ps.outOfCombatTimer += dt;
+
+    const p = this.player;
+    const pFac: SiegeFactionId = p.faction === 'shadow' ? 'shadow' : 'royal';
+    if (p.hp > 0) {
+      if (this.isInsideOwnFountain(p.x, p.y, pFac)) {
+        p.hp = Math.min(p.maxHp, p.hp + SIEGE_CONFIG.fountainHealPerSec * dt);
+        p.qi = Math.min(p.maxQi, p.qi + 15 * dt);
+        p.reserveAmmo = p.maxReserveAmmo;
+        for (const w of p.weapons) {
+          if (w.type === 'gun' && w.reloadTimer <= 0) w.ammoInMag = w.def.magSize;
+        }
+      } else if (ps.outOfCombatTimer >= SIEGE_CONFIG.outOfCombatAmmoDelaySec) {
+        p.reserveAmmo = Math.min(p.maxReserveAmmo, p.reserveAmmo + SIEGE_CONFIG.outOfCombatAmmoPerSec * dt);
+      }
+
+      if (ps.recallTimer > 0) {
+        ps.recallTimer = Math.max(0, ps.recallTimer - dt);
+        if (ps.recallTimer === 0) {
+          const f = sg.spec.fountains[pFac];
+          p.x = f.x;
+          p.y = f.y;
+          p.elevation = this.getWalkableElevation(p.x, p.y);
+          this.spawnBurst(p.x, p.y, '#38BDF8', 16);
+          this.spawnText(p.x, p.y - 36, '回城完成!', '#38BDF8', 1.1);
+        }
+      }
+    }
+
+    // Remote human timers & fountain heal
+    for (const [peerId, rState] of sg.remoteStates.entries()) {
+      rState.tacticalCd = Math.max(0, rState.tacticalCd - dt);
+      rState.aegisReflectTimer = Math.max(0, rState.aegisReflectTimer - dt);
+      rState.smokeSpeedTimer = Math.max(0, rState.smokeSpeedTimer - dt);
+      rState.markedTimer = Math.max(0, rState.markedTimer - dt);
+      const rt = this.remoteHumans.get(peerId);
+      const ent = this.enemies.find((e) => e.peerId === peerId);
+      if (rt && ent && ent.hp > 0) {
+        const rFac: SiegeFactionId = ent.faction === 'shadow' ? 'shadow' : 'royal';
+        if (this.isInsideOwnFountain(ent.x, ent.y, rFac)) {
+          ent.hp = Math.min(ent.maxHp, ent.hp + SIEGE_CONFIG.fountainHealPerSec * dt);
+          rt.reserveAmmo = rt.maxReserveAmmo;
+        }
+        if (rState.recallTimer > 0) {
+          rState.recallTimer = Math.max(0, rState.recallTimer - dt);
+          if (rState.recallTimer === 0) {
+            const f = sg.spec.fountains[rFac];
+            ent.x = f.x;
+            ent.y = f.y;
+            ent.elevation = this.getWalkableElevation(ent.x, ent.y);
+            this.spawnBurst(ent.x, ent.y, '#38BDF8', 14);
+          }
+        }
+      }
+    }
+
+    // AI Heroes fountain heal & upgrades
+    for (const e of this.enemies) {
+      if (e.siegeUnitKind === 'hero' && !e.isHumanPlayer) {
+        const eFac: SiegeFactionId = e.faction === 'shadow' ? 'shadow' : 'royal';
+        if (this.isInsideOwnFountain(e.x, e.y, eFac)) {
+          e.hp = Math.min(e.maxHp, e.hp + SIEGE_CONFIG.fountainHealPerSec * dt);
+          const gold = e.siegeGold ?? 0;
+          const upg = e.siegeUpgrades ?? { firepower: 0, blade: 0, armor: 0, core: 0 };
+          const tracks: SiegeUpgradeTrack[] = ['firepower', 'armor', 'blade', 'core'];
+          for (const tr of tracks) {
+            const cur = upg[tr] ?? 0;
+            const cost = SIEGE_UPGRADES.find((u) => u.track === tr)?.costs[cur];
+            if (cur < 3 && cost !== undefined && gold >= cost) {
+              e.siegeGold = gold - cost;
+              upg[tr] = cur + 1;
+              e.siegeUpgrades = upg;
+              if (tr === 'armor') {
+                e.maxHp += 22;
+                e.hp = Math.min(e.maxHp, e.hp + 22);
+              }
+              break;
+            }
+          }
+        }
+      }
+      // Baron periodic giant/vampire frenzy
+      if (e.siegeUnitKind === 'boss' && e.siegeBossKind === 'baron' && e.hp < e.maxHp * 0.65) {
+        if (e.giantTimer <= 0) {
+          e.giantTimer = 6.0;
+          e.vampireTimer = 6.0;
+        }
+      }
+      // Jungle / Boss leash healing when out of combat at home
+      if ((e.siegeUnitKind === 'jungle' || e.siegeUnitKind === 'boss') && e.siegeHomePos && !e.focusedTargetId) {
+        if (dist(e.x, e.y, e.siegeHomePos.x, e.siegeHomePos.y) < 48 && e.hp < e.maxHp) {
+          e.hp = Math.min(e.maxHp, e.hp + 12 * dt);
+        }
+      }
+    }
+
+    // Minion waves
+    sg.waveTimer -= dt;
+    if (sg.waveTimer <= 0) {
+      sg.waveTimer = sg.suddenDeath ? SIEGE_CONFIG.suddenDeathWaveIntervalSec : SIEGE_CONFIG.waveIntervalSec;
+      this.spawnSiegeMinionWave();
+    }
+
+    // Jungle camps
+    for (const camp of sg.spec.jungleCamps) {
+      const aliveUnit = this.enemies.some((e) => e.id.startsWith(`${camp.id}_`));
+      if (!aliveUnit) {
+        sg.jungleTimers[camp.id] = Math.max(0, (sg.jungleTimers[camp.id] ?? 0) - dt);
+        if (sg.jungleTimers[camp.id] === 0) {
+          this.spawnSiegeJungleUnit(camp.id);
+        }
+      }
+    }
+
+    // Bosses
+    if (sg.vanguardState === 'countdown') {
+      sg.vanguardTimer = Math.max(0, sg.vanguardTimer - dt);
+      if (sg.vanguardTimer === 0) this.spawnSiegeBoss('vanguard');
+    }
+    if (sg.baronState === 'countdown') {
+      sg.baronTimer = Math.max(0, sg.baronTimer - dt);
+      if (sg.baronTimer === 0) this.spawnSiegeBoss('baron');
+    }
+
+    // AI hero respawns
+    for (let i = sg.aiRespawns.length - 1; i >= 0; i--) {
+      const item = sg.aiRespawns[i];
+      item.timer -= dt;
+      if (item.timer <= 0) {
+        sg.aiRespawns.splice(i, 1);
+        this.enemies.push(
+          this.spawnSiegeHero(item.faction, item.skinId, item.loadout, item.lane, item.name, item.gold, item.upgrades, item.deaths)
+        );
+      }
+    }
+
+    this.updateSiegeZones(dt);
+    this.updateSiegeStructures(dt);
+  }
+
+  private updateSiegeZones(dt: number) {
+    if (!this.siege) return;
+    const nextZones = [];
+    for (const z of this.siege.zones) {
+      z.life -= dt;
+      if (z.life <= 0) {
+        if (z.kind === 'decoy') {
+          const dmg = z.damage ?? 38;
+          this.spawnBurst(z.x, z.y, '#C084FC', 18);
+          this.pushSlash({
+            x: z.x,
+            y: z.y,
+            angle: 0,
+            arc: Math.PI * 2,
+            reach: z.radius,
+            color: '#C084FC',
+            life: 0.25,
+            maxLife: 0.25,
+            isUltimate: true,
+            style: 'sweep',
+          });
+          if (z.ownerId !== 'player' && this.player.hp > 0 && this.player.faction !== z.faction && dist(z.x, z.y, this.player.x, this.player.y) <= z.radius + this.player.radius) {
+            this.damagePlayer(dmg, true, z.ownerId, z.x, z.y);
+          }
+          for (const e of [...this.enemies]) {
+            if (e.faction !== z.faction && dist(z.x, z.y, e.x, e.y) <= z.radius + e.radius) {
+              this.damageEnemy(e, dmg, true, 0, 0, false, true, z.ownerId, z.faction, z.x, z.y);
+              if (e.hp > 0) e.stunTimer = Math.max(e.stunTimer, 0.5);
+            }
+          }
+        }
+        continue;
+      }
+
+      z.tickTimer -= dt;
+      if (z.tickTimer <= 0) {
+        if (z.kind === 'sanctuary') {
+          z.tickTimer = 0.5;
+          const heal = z.heal ?? 7;
+          if (this.player.hp > 0 && this.player.faction === z.faction && dist(z.x, z.y, this.player.x, this.player.y) <= z.radius) {
+            this.player.hp = Math.min(this.player.maxHp, this.player.hp + heal);
+          }
+          for (const e of this.enemies) {
+            if (e.faction === z.faction && dist(z.x, z.y, e.x, e.y) <= z.radius) {
+              e.hp = Math.min(e.maxHp, e.hp + heal);
+            }
+          }
+        } else if (z.kind === 'vortex') {
+          z.tickTimer = 0.45;
+          const dmg = z.damage ?? 16;
+          if (z.ownerId !== 'player' && this.player.hp > 0 && this.player.faction !== z.faction && dist(z.x, z.y, this.player.x, this.player.y) <= z.radius + this.player.radius) {
+            this.damagePlayer(dmg, true, z.ownerId, z.x, z.y);
+          }
+          for (const e of [...this.enemies]) {
+            if (e.faction !== z.faction && dist(z.x, z.y, e.x, e.y) <= z.radius + e.radius) {
+              this.damageEnemy(e, dmg, true, 0, 0, false, true, z.ownerId, z.faction, z.x, z.y);
+            }
+          }
+          for (const st of this.siege.structures) {
+            if (st.alive && st.faction !== z.faction && dist(z.x, z.y, st.x, st.y) <= z.radius + st.radius) {
+              this.damageSiegeStructure(st, dmg, z.ownerId, z.faction);
+            }
+          }
+        }
+      }
+      nextZones.push(z);
+    }
+    this.siege.zones = nextZones;
+  }
+
+  private updateSiegeStructures(dt: number) {
+    if (!this.siege) return;
+    const p = this.player;
+
+    for (const st of this.siege.structures) {
+      if (!st.alive) continue;
+      st.hitFlash = Math.max(0, st.hitFlash - dt);
+      st.aggroLockTimer = Math.max(0, st.aggroLockTimer - dt);
+      st.fireCooldown = Math.max(0, st.fireCooldown - dt);
+
+      const oppFac: SiegeFactionId = st.faction === 'royal' ? 'shadow' : 'royal';
+      const hasMinionNearby = this.enemies.some(
+        (e) =>
+          e.faction === oppFac &&
+          (e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion' || e.siegeUnitKind === 'vanguard_ally') &&
+          dist(st.x, st.y, e.x, e.y) <= SIEGE_CONFIG.backdoorRadiusPx
+      );
+      st.backdoorProtected = !hasMinionNearby;
+
+      // Validate locked aggro
+      if (st.aggroTargetId) {
+        const lockedPos =
+          st.aggroTargetId === 'player'
+            ? p.hp > 0
+              ? { x: p.x, y: p.y }
+              : null
+            : (() => {
+                const te = this.enemies.find((e) => e.id === st.aggroTargetId && e.hp > 0);
+                return te ? { x: te.x, y: te.y } : null;
+              })();
+        if (!lockedPos || dist(st.x, st.y, lockedPos.x, lockedPos.y) > st.range || st.aggroLockTimer <= 0) {
+          st.aggroTargetId = null;
+        }
+      }
+
+      if (!st.aggroTargetId) {
+        const minionsInRange = this.enemies
+          .filter(
+            (e) =>
+              e.faction === oppFac &&
+              (e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion' || e.siegeUnitKind === 'vanguard_ally') &&
+              dist(st.x, st.y, e.x, e.y) <= st.range
+          )
+          .sort((a, b) => dist(st.x, st.y, a.x, a.y) - dist(st.x, st.y, b.x, b.y));
+        if (minionsInRange.length > 0) {
+          st.aggroTargetId = minionsInRange[0].id;
+        } else {
+          const heroesInRange: { id: string; d: number }[] = [];
+          if (p.hp > 0 && p.faction === oppFac && dist(st.x, st.y, p.x, p.y) <= st.range) {
+            heroesInRange.push({ id: 'player', d: dist(st.x, st.y, p.x, p.y) });
+          }
+          for (const e of this.enemies) {
+            if (e.faction === oppFac && e.hp > 0 && dist(st.x, st.y, e.x, e.y) <= st.range) {
+              heroesInRange.push({ id: e.id, d: dist(st.x, st.y, e.x, e.y) });
+            }
+          }
+          heroesInRange.sort((a, b) => a.d - b.d);
+          if (heroesInRange.length > 0) st.aggroTargetId = heroesInRange[0].id;
+        }
+      }
+
+      if (st.aggroTargetId && st.fireCooldown <= 0) {
+        st.fireCooldown = st.fireInterval;
+        const beamColor = st.faction === 'royal' ? '#38BDF8' : '#C026D3';
+        if (st.aggroTargetId === 'player' && p.hp > 0) {
+          this.pushBeam({ x1: st.x, y1: st.y - 10, x2: p.x, y2: p.y, color: beamColor, life: 0.16, maxLife: 0.16, width: 3.4 });
+          // Turret energy bolts pierce 55% of Royal Shield instead of being 100% immune
+          if (p.royalShieldTimer > 0) {
+            p.hp -= Math.round(st.damage * 0.55);
+            if (p.hp <= 0) this.handlePlayerDeath(`turret_${st.id}`);
+          } else {
+            this.damagePlayer(st.damage, false, `turret_${st.id}`, st.x, st.y);
+          }
+        } else {
+          const te = this.enemies.find((e) => e.id === st.aggroTargetId && e.hp > 0);
+          if (te) {
+            this.pushBeam({ x1: st.x, y1: st.y - 10, x2: te.x, y2: te.y, color: beamColor, life: 0.16, maxLife: 0.16, width: 3.4 });
+            this.damageEnemy(te, st.damage, false, 0, 0, false, true, `turret_${st.id}`, st.faction, st.x, st.y);
+          }
+        }
+      }
+    }
+  }
+
+  private findNearestHostileStructureInSight(e: EnemyEntity, maxDist: number): SiegeStructure | null {
+    if (!this.siege) return null;
+    let best: SiegeStructure | null = null;
+    let bestD = maxDist;
+    for (const st of this.siege.structures) {
+      if (!st.alive || st.invulnerable || st.faction === e.faction) continue;
+      const d = dist(e.x, e.y, st.x, st.y) - st.radius;
+      if (d < bestD) {
+        bestD = d;
+        best = st;
+      }
+    }
+    return best;
+  }
+
+  private getSiegeAiGoal(e: EnemyEntity): { x: number; y: number } | null {
+    if (!this.siege) return null;
+    if (e.siegeUnitKind === 'jungle' || e.siegeUnitKind === 'boss') {
+      if (e.siegeHomePos && dist(e.x, e.y, e.siegeHomePos.x, e.siegeHomePos.y) > 260) {
+        e.focusedTargetId = null;
+        return e.siegeHomePos;
+      }
+      return e.siegeHomePos ?? null;
+    }
+
+    const fac: SiegeFactionId = e.faction === 'shadow' ? 'shadow' : 'royal';
+    if (e.siegeUnitKind === 'hero' && e.hp < e.maxHp * 0.24) {
+      return this.siege.spec.fountains[fac];
+    }
+
+    const lane = e.siegeLane ?? 'mid';
+    const wps = this.siege.spec.laneWaypoints[lane];
+    let idx = e.siegeWaypointIdx ?? (fac === 'royal' ? 0 : wps.length - 1);
+    idx = clamp(idx, 0, wps.length - 1);
+    const targetWp = wps[idx];
+    const nextIdx = fac === 'royal' ? Math.min(wps.length - 1, idx + 1) : Math.max(0, idx - 1);
+    const closerToNext =
+      nextIdx !== idx &&
+      dist(e.x, e.y, wps[nextIdx].x, wps[nextIdx].y) < dist(targetWp.x, targetWp.y, wps[nextIdx].x, wps[nextIdx].y);
+    if (dist(e.x, e.y, targetWp.x, targetWp.y) < 110 || closerToNext) {
+      idx = nextIdx;
+      e.siegeWaypointIdx = idx;
+    }
+
+    const oppCastle = this.siege.structures.find((s) => s.faction !== fac && s.kind === 'castle');
+    if (
+      oppCastle &&
+      oppCastle.alive &&
+      ((fac === 'royal' && idx === wps.length - 1) || (fac === 'shadow' && idx === 0))
+    ) {
+      return { x: oppCastle.x, y: oppCastle.y };
+    }
+    return wps[idx];
+  }
+
+  private exportSiegeSnapshot(): NetSiegeSnapshot {
+    const sg = this.siege!;
+    const players: NetSiegeSnapshot['players'] = [
+      {
+        peerId: this.multiplayer?.hostPeerId ?? 'host',
+        gold: Math.floor(sg.playerState.gold),
+        lvl: sg.playerState.level,
+        xp: Math.floor(sg.playerState.xp),
+        xpNext: sg.playerState.xpToNext,
+        upg: { ...sg.playerState.upgrades },
+        tacCd: round1(sg.playerState.tacticalCd),
+        rec: round1(sg.playerState.recallTimer),
+        mk: sg.playerState.minionKills,
+        tk: sg.playerState.towerKills,
+        deaths: sg.playerState.deaths,
+        maxHp: Math.round(this.player.maxHp),
+      },
+    ];
+    for (const [peerId, st] of sg.remoteStates.entries()) {
+      const ent = this.enemies.find((e) => e.peerId === peerId);
+      players.push({
+        peerId,
+        gold: Math.floor(st.gold),
+        lvl: st.level,
+        xp: Math.floor(st.xp),
+        xpNext: st.xpToNext,
+        upg: { ...st.upgrades },
+        tacCd: round1(st.tacticalCd),
+        rec: round1(st.recallTimer),
+        mk: st.minionKills,
+        tk: st.towerKills,
+        deaths: st.deaths,
+        maxHp: ent ? Math.round(ent.maxHp) : computeSiegeMaxHp(st),
+      });
+    }
+    return {
+      matchTime: round1(sg.matchTime),
+      matchDuration: sg.matchDuration,
+      suddenDeath: sg.suddenDeath,
+      vanguardState: sg.vanguardState,
+      vanguardSec: Math.ceil(sg.vanguardTimer),
+      baronState: sg.baronState,
+      baronSec: Math.ceil(sg.baronTimer),
+      teamBuffs: {
+        royal: { vanguardStacks: sg.teamBuffs.royal.vanguardStacks, baronTimer: round1(sg.teamBuffs.royal.baronTimer) },
+        shadow: { vanguardStacks: sg.teamBuffs.shadow.vanguardStacks, baronTimer: round1(sg.teamBuffs.shadow.baronTimer) },
+      },
+      structures: sg.structures.map((s) => ({
+        id: s.id,
+        hp: Math.round(s.hp),
+        alive: s.alive,
+        invuln: s.invulnerable,
+        bd: s.backdoorProtected,
+        aggro: s.aggroTargetId,
+        ...(s.hitFlash > 0 ? { hf: round1(s.hitFlash) } : {}),
+      })),
+      zones: sg.zones.map((z) => ({
+        id: z.id,
+        kind: z.kind,
+        fac: z.faction,
+        x: round1(z.x),
+        y: round1(z.y),
+        r: z.radius,
+        life: round1(z.life),
+        maxLife: z.maxLife,
+      })),
+      players,
+    };
+  }
+
+  private applySiegeSnapshot(snap: NetSiegeSnapshot, localPeerId?: string) {
+    if (!this.siege) return;
+    const sg = this.siege;
+    sg.matchTime = snap.matchTime;
+    sg.matchDuration = snap.matchDuration as typeof sg.matchDuration;
+    sg.suddenDeath = snap.suddenDeath;
+    sg.vanguardState = snap.vanguardState;
+    sg.vanguardTimer = snap.vanguardSec;
+    sg.baronState = snap.baronState;
+    sg.baronTimer = snap.baronSec;
+    sg.teamBuffs = {
+      royal: { ...snap.teamBuffs.royal },
+      shadow: { ...snap.teamBuffs.shadow },
+    };
+
+    const byId = new Map(snap.structures.map((s) => [s.id, s]));
+    for (const st of sg.structures) {
+      const n = byId.get(st.id);
+      if (!n) continue;
+      st.hp = n.hp;
+      st.alive = n.alive;
+      st.invulnerable = n.invuln;
+      st.backdoorProtected = n.bd;
+      st.aggroTargetId = n.aggro;
+      st.hitFlash = n.hf ?? 0;
+    }
+
+    sg.zones = snap.zones.map((z) => ({
+      id: z.id,
+      kind: z.kind,
+      faction: z.fac,
+      ownerId: '',
+      x: z.x,
+      y: z.y,
+      radius: z.r,
+      life: z.life,
+      maxLife: z.maxLife,
+      tickTimer: 0,
+    }));
+
+    const localInfo = localPeerId ? snap.players.find((pl) => pl.peerId === localPeerId) : snap.players[0];
+    if (localInfo) {
+      sg.playerState.gold = localInfo.gold;
+      sg.playerState.level = localInfo.lvl;
+      sg.playerState.xp = localInfo.xp;
+      sg.playerState.xpToNext = localInfo.xpNext;
+      sg.playerState.upgrades = { ...localInfo.upg };
+      sg.playerState.tacticalCd = localInfo.tacCd;
+      sg.playerState.recallTimer = localInfo.rec;
+      sg.playerState.minionKills = localInfo.mk;
+      sg.playerState.towerKills = localInfo.tk;
+      sg.playerState.deaths = localInfo.deaths;
+      this.player.maxHp = localInfo.maxHp;
+    }
+  }
+
+  private exportSiegeHudState(): SiegeHudState {
+    const sg = this.siege!;
+    const p = this.player;
+    const pFac: SiegeFactionId = p.faction === 'shadow' ? 'shadow' : 'royal';
+    const inFountain = p.hp > 0 && this.isInsideOwnFountain(p.x, p.y, pFac);
+    const rCastle = sg.structures.find((s) => s.id === 'royal_castle');
+    const sCastle = sg.structures.find((s) => s.id === 'shadow_castle');
+    const rTowers = sg.structures.filter((s) => s.faction === 'royal' && s.kind !== 'castle' && s.alive).length;
+    const sTowers = sg.structures.filter((s) => s.faction === 'shadow' && s.kind !== 'castle' && s.alive).length;
+
+    const zoom = Math.max(0.5, this.camera.zoom);
+    const viewW = this.viewport.width / zoom;
+    const viewH = this.viewport.height / zoom;
+    const clampedCam = this.clampCameraToMap(this.camera.x, this.camera.y, this.viewport.width, this.viewport.height);
+
+    const minimapUnits: SiegeHudState['minimapUnits'] = [];
+    if (p.hp > 0) {
+      minimapUnits.push({ x: p.x, y: p.y, faction: p.faction, kind: 'player' });
+    }
+    for (const e of this.enemies) {
+      if (e.hp <= 0) continue;
+      const kind: SiegeHudState['minimapUnits'][0]['kind'] =
+        e.siegeUnitKind === 'boss'
+          ? 'boss'
+          : e.siegeUnitKind === 'jungle'
+            ? 'jungle'
+            : e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion' || e.siegeUnitKind === 'vanguard_ally'
+              ? 'minion'
+              : 'hero';
+      minimapUnits.push({ x: e.x, y: e.y, faction: e.faction, kind });
+    }
+
+    return {
+      matchTime: sg.matchTime,
+      matchDuration: sg.matchDuration,
+      suddenDeath: sg.suddenDeath,
+      royalCastleHp: rCastle?.hp ?? 0,
+      royalCastleMaxHp: rCastle?.maxHp ?? 4000,
+      shadowCastleHp: sCastle?.hp ?? 0,
+      shadowCastleMaxHp: sCastle?.maxHp ?? 4000,
+      royalTowersAlive: rTowers,
+      shadowTowersAlive: sTowers,
+      structures: sg.structures.map((s) => ({
+        id: s.id,
+        faction: s.faction,
+        kind: s.kind,
+        lane: s.lane,
+        x: s.x,
+        y: s.y,
+        hp: s.hp,
+        maxHp: s.maxHp,
+        alive: s.alive,
+        invulnerable: s.invulnerable,
+        backdoorProtected: s.backdoorProtected,
+      })),
+      vanguardState: sg.vanguardState,
+      vanguardSeconds: Math.ceil(sg.vanguardTimer),
+      baronState: sg.baronState,
+      baronSeconds: Math.ceil(sg.baronTimer),
+      playerGold: Math.floor(sg.playerState.gold),
+      playerLevel: sg.playerState.level,
+      playerXp: Math.floor(sg.playerState.xp),
+      playerXpToNext: sg.playerState.xpToNext,
+      upgrades: { ...sg.playerState.upgrades },
+      inFountain,
+      canShop: inFountain || this.status === 'RESPAWNING',
+      tacticalCd: sg.playerState.tacticalCd,
+      tacticalMaxCd: computeSiegeTacticalCooldown(sg.playerState),
+      recallTimer: sg.playerState.recallTimer,
+      recallDuration: SIEGE_CONFIG.recallDurationSec,
+      loadout: { ...sg.playerState.loadout },
+      teamBuffs: {
+        royal: { ...sg.teamBuffs.royal },
+        shadow: { ...sg.teamBuffs.shadow },
+      },
+      minionKills: sg.playerState.minionKills,
+      towerKills: sg.playerState.towerKills,
+      deaths: sg.playerState.deaths,
+      mapWidth: this.map.width,
+      mapHeight: this.map.height,
+      cameraRect: {
+        x: clampedCam.x - viewW / 2,
+        y: clampedCam.y - viewH / 2,
+        w: viewW,
+        h: viewH,
+      },
+      minimapUnits,
+    };
   }
 }

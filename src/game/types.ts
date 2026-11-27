@@ -1,6 +1,150 @@
-export type GameMode = 'frontier';
+export type GameMode = 'frontier' | 'siege';
 
 export type FactionId = 'royal' | 'shadow' | 'mercenary';
+
+export type SiegeFactionId = 'royal' | 'shadow';
+export type SiegeLane = 'top' | 'mid' | 'bot';
+export type SiegeStructureKind = 'outer_tower' | 'inner_tower' | 'castle';
+export type SiegeBossKind = 'vanguard' | 'baron';
+export type SiegeMatchDurationSec = 900 | 1080 | 1200;
+
+export type SiegeTacticalId =
+  | 'royal_aegis_reflect'
+  | 'royal_sanctuary_zone'
+  | 'royal_dash_bash'
+  | 'shadow_blink_swap'
+  | 'shadow_hunter_mark'
+  | 'shadow_smoke_shroud';
+
+export type SiegeUltimateId =
+  | 'royal_judgment_beam'
+  | 'royal_light_rain'
+  | 'royal_healing_salvo'
+  | 'shadow_twin_dragons'
+  | 'shadow_pierce_dragon'
+  | 'shadow_vortex_dragon';
+
+export type SiegePassiveId =
+  | 'royal_fortitude'
+  | 'royal_vanguard_aura'
+  | 'royal_steady_aim'
+  | 'shadow_assassin'
+  | 'shadow_swift_foot'
+  | 'shadow_executioner';
+
+export type SiegeUpgradeTrack = 'firepower' | 'blade' | 'armor' | 'core';
+
+export interface SiegePlayerLoadout {
+  gunId: string;
+  meleeId: string;
+  tacticalId: SiegeTacticalId;
+  ultimateId: SiegeUltimateId;
+  passiveId: SiegePassiveId;
+}
+
+export interface SiegeOptions {
+  loadout: SiegePlayerLoadout;
+  durationSec?: SiegeMatchDurationSec;
+}
+
+export interface SiegeStructure {
+  id: string;
+  faction: SiegeFactionId;
+  kind: SiegeStructureKind;
+  lane?: SiegeLane;
+  x: number;
+  y: number;
+  radius: number;
+  elevation: number;
+  hp: number;
+  maxHp: number;
+  range: number;
+  damage: number;
+  fireInterval: number;
+  fireCooldown: number;
+  aggroTargetId: string | null;
+  aggroLockTimer: number;
+  invulnerable: boolean;
+  backdoorProtected: boolean;
+  hitFlash: number;
+  alive: boolean;
+}
+
+export interface SiegeZoneEffect {
+  id: string;
+  kind: 'sanctuary' | 'vortex' | 'decoy';
+  faction: SiegeFactionId;
+  ownerId: string;
+  x: number;
+  y: number;
+  radius: number;
+  life: number;
+  maxLife: number;
+  tickTimer: number;
+  damage?: number;
+  heal?: number;
+}
+
+export interface SiegeMinimapUnit {
+  x: number;
+  y: number;
+  faction: FactionId;
+  kind: 'player' | 'hero' | 'minion' | 'boss' | 'jungle';
+}
+
+export interface SiegeStructureHudSummary {
+  id: string;
+  faction: SiegeFactionId;
+  kind: SiegeStructureKind;
+  lane?: SiegeLane;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  alive: boolean;
+  invulnerable: boolean;
+  backdoorProtected: boolean;
+}
+
+export interface SiegeHudState {
+  matchTime: number;
+  matchDuration: number;
+  suddenDeath: boolean;
+  royalCastleHp: number;
+  royalCastleMaxHp: number;
+  shadowCastleHp: number;
+  shadowCastleMaxHp: number;
+  royalTowersAlive: number;
+  shadowTowersAlive: number;
+  structures: SiegeStructureHudSummary[];
+  vanguardState: 'alive' | 'countdown';
+  vanguardSeconds: number;
+  baronState: 'alive' | 'countdown';
+  baronSeconds: number;
+  playerGold: number;
+  playerLevel: number;
+  playerXp: number;
+  playerXpToNext: number;
+  upgrades: Record<SiegeUpgradeTrack, number>;
+  inFountain: boolean;
+  canShop: boolean;
+  tacticalCd: number;
+  tacticalMaxCd: number;
+  recallTimer: number;
+  recallDuration: number;
+  loadout: SiegePlayerLoadout;
+  teamBuffs: {
+    royal: { vanguardStacks: number; baronTimer: number };
+    shadow: { vanguardStacks: number; baronTimer: number };
+  };
+  minionKills: number;
+  towerKills: number;
+  deaths: number;
+  mapWidth: number;
+  mapHeight: number;
+  cameraRect: { x: number; y: number; w: number; h: number };
+  minimapUnits: SiegeMinimapUnit[];
+}
 
 export type MapId =
   | 'tokyo_shrine'
@@ -378,6 +522,19 @@ export interface EnemyEntity {
   attackAnimKind: MeleeKind | null;
   color: string;
   characterSkin: CharacterSkin;
+  // Siege / MOBA optional runtime metadata
+  siegeUnitKind?: 'hero' | 'minion' | 'super_minion' | 'vanguard_ally' | 'jungle' | 'boss';
+  siegeLane?: SiegeLane;
+  siegeWaypointIdx?: number;
+  siegeLoadout?: SiegePlayerLoadout;
+  siegeTacticalCd?: number;
+  siegeBossKind?: SiegeBossKind;
+  siegeHomePos?: { x: number; y: number };
+  siegeMarkedTimer?: number;
+  siegeAegisReflectTimer?: number;
+  siegeDeaths?: number;
+  siegeGold?: number;
+  siegeUpgrades?: Record<SiegeUpgradeTrack, number>;
 }
 
 export interface Projectile {
@@ -404,6 +561,9 @@ export interface Projectile {
   isWave?: boolean;
   isLightOrb?: boolean;
   isBlackDragon?: boolean;
+  ignoresWalls?: boolean;
+  healAllies?: boolean;
+  vortexOnEnd?: boolean;
   segments?: { x: number; y: number }[];
   bouncesLeft?: number;
   distanceTraveled?: number;
@@ -558,6 +718,7 @@ export interface HudSnapshot {
     activeTimedSkills: TimedSkillHudItem[];
   };
   factionScores: Record<FactionId, number>;
+  siege?: SiegeHudState | null;
 }
 
 export interface RunRecord {
@@ -579,6 +740,7 @@ export interface MultiplayerPeerDescriptor {
   faction: FactionId;
   characterSkin: CharacterSkin;
   isHost: boolean;
+  siegeLoadout?: SiegePlayerLoadout;
 }
 
 export interface MultiplayerEngineConfig {

@@ -1,0 +1,248 @@
+import {
+  SIEGE_CONFIG,
+  SIEGE_HERO_PRESETS,
+  SIEGE_UPGRADES,
+  getDefaultSiegeLoadout,
+  getTacticalMeta,
+  sanitizeSiegeLoadout,
+} from './siegeData';
+import { SiegeMapSpec, createSiegeMapSpec } from './siegeMap';
+import {
+  SiegeBossKind,
+  SiegeFactionId,
+  SiegeLane,
+  SiegeMatchDurationSec,
+  SiegePlayerLoadout,
+  SiegeStructure,
+  SiegeUpgradeTrack,
+  SiegeZoneEffect,
+} from './types';
+
+export interface SiegeHeroState {
+  gold: number;
+  xp: number;
+  level: number;
+  xpToNext: number;
+  upgrades: Record<SiegeUpgradeTrack, number>;
+  tacticalCd: number;
+  recallTimer: number;
+  aegisReflectTimer: number;
+  smokeSpeedTimer: number;
+  markedTimer: number;
+  minionKills: number;
+  towerKills: number;
+  deaths: number;
+  outOfCombatTimer: number;
+  loadout: SiegePlayerLoadout;
+}
+
+export interface SiegeAiRespawnItem {
+  name: string;
+  skinId: string;
+  faction: SiegeFactionId;
+  lane: SiegeLane;
+  loadout: SiegePlayerLoadout;
+  timer: number;
+  deaths: number;
+  gold: number;
+  upgrades: Record<SiegeUpgradeTrack, number>;
+}
+
+export interface SiegeRuntime {
+  spec: SiegeMapSpec;
+  structures: SiegeStructure[];
+  zones: SiegeZoneEffect[];
+  matchTime: number;
+  matchDuration: SiegeMatchDurationSec;
+  suddenDeath: boolean;
+  suddenDeathAnnounced: boolean;
+  waveTimer: number;
+  waveNumber: number;
+  jungleTimers: Record<string, number>;
+  vanguardState: 'alive' | 'countdown';
+  vanguardTimer: number;
+  baronState: 'alive' | 'countdown';
+  baronTimer: number;
+  teamBuffs: {
+    royal: { vanguardStacks: number; baronTimer: number };
+    shadow: { vanguardStacks: number; baronTimer: number };
+  };
+  playerState: SiegeHeroState;
+  remoteStates: Map<string, SiegeHeroState>;
+  aiRespawns: SiegeAiRespawnItem[];
+  passiveGoldTimer: number;
+}
+
+export function createEmptyUpgrades(): Record<SiegeUpgradeTrack, number> {
+  return { firepower: 0, blade: 0, armor: 0, core: 0 };
+}
+
+export function createHeroSiegeState(loadout: SiegePlayerLoadout): SiegeHeroState {
+  return {
+    gold: 120,
+    xp: 0,
+    level: 1,
+    xpToNext: 100,
+    upgrades: createEmptyUpgrades(),
+    tacticalCd: 0,
+    recallTimer: 0,
+    aegisReflectTimer: 0,
+    smokeSpeedTimer: 0,
+    markedTimer: 0,
+    minionKills: 0,
+    towerKills: 0,
+    deaths: 0,
+    outOfCombatTimer: 0,
+    loadout,
+  };
+}
+
+export function createSiegeRuntime(
+  playerFaction: SiegeFactionId,
+  playerSkinId: string,
+  playerLoadout?: SiegePlayerLoadout,
+  durationSec: SiegeMatchDurationSec = SIEGE_CONFIG.defaultDurationSec
+): SiegeRuntime {
+  const spec = createSiegeMapSpec();
+  const structures = spec.createInitialStructures();
+  refreshStructureInvulnerability(structures);
+
+  const resolvedLoadout = sanitizeSiegeLoadout(
+    playerFaction,
+    playerLoadout ?? getDefaultSiegeLoadout(playerFaction, playerSkinId)
+  );
+
+  const jungleTimers: Record<string, number> = {};
+  for (const camp of spec.jungleCamps) {
+    jungleTimers[camp.id] = SIEGE_CONFIG.jungleInitialDelaySec;
+  }
+
+  return {
+    spec,
+    structures,
+    zones: [],
+    matchTime: 0,
+    matchDuration: durationSec,
+    suddenDeath: false,
+    suddenDeathAnnounced: false,
+    waveTimer: SIEGE_CONFIG.firstWaveDelaySec,
+    waveNumber: 0,
+    jungleTimers,
+    vanguardState: 'countdown',
+    vanguardTimer: SIEGE_CONFIG.vanguardInitialDelaySec,
+    baronState: 'countdown',
+    baronTimer: SIEGE_CONFIG.baronInitialDelaySec,
+    teamBuffs: {
+      royal: { vanguardStacks: 0, baronTimer: 0 },
+      shadow: { vanguardStacks: 0, baronTimer: 0 },
+    },
+    playerState: createHeroSiegeState(resolvedLoadout),
+    remoteStates: new Map(),
+    aiRespawns: [],
+    passiveGoldTimer: 0,
+  };
+}
+
+export function refreshStructureInvulnerability(structures: SiegeStructure[]) {
+  const byId = new Map(structures.map((s) => [s.id, s]));
+  for (const fac of ['royal', 'shadow'] as SiegeFactionId[]) {
+    for (const lane of ['top', 'mid', 'bot'] as SiegeLane[]) {
+      const outer = byId.get(`${fac}_${lane}_outer`);
+      const inner = byId.get(`${fac}_${lane}_inner`);
+      if (inner) {
+        inner.invulnerable = Boolean(outer && outer.alive);
+      }
+    }
+    const castle = byId.get(`${fac}_castle`);
+    if (castle) {
+      const anyInnerDown = (['top', 'mid', 'bot'] as SiegeLane[]).some(
+        (lane) => !byId.get(`${fac}_${lane}_inner`)?.alive
+      );
+      castle.invulnerable = !anyInnerDown;
+    }
+  }
+}
+
+export function computeSiegeMaxHp(state: Pick<SiegeHeroState, 'level' | 'upgrades' | 'loadout'>): number {
+  const passiveHp = state.loadout.passiveId === 'royal_fortitude' ? 25 : 0;
+  const armorHp = (state.upgrades.armor ?? 0) * 22;
+  const levelHp = Math.max(0, state.level - 1) * 8;
+  return 100 + passiveHp + armorHp + levelHp;
+}
+
+export function computeSiegeMoveSpeedMult(state: Pick<SiegeHeroState, 'upgrades' | 'loadout' | 'smokeSpeedTimer'>): number {
+  let mult = 1 + (state.upgrades.armor ?? 0) * 0.04;
+  if (state.loadout.passiveId === 'royal_vanguard_aura') mult += 0.1;
+  if (state.loadout.passiveId === 'shadow_swift_foot') mult += 0.12;
+  if (state.smokeSpeedTimer > 0) mult += 0.22;
+  return mult;
+}
+
+export function computeSiegeTacticalCooldown(state: Pick<SiegeHeroState, 'upgrades' | 'loadout'>): number {
+  const baseCd = getTacticalMeta(state.loadout.tacticalId).cooldownSec ?? 12;
+  const reduction = (state.upgrades.core ?? 0) * 0.1;
+  return Math.max(4, Number((baseCd * (1 - reduction)).toFixed(2)));
+}
+
+export function grantSiegeXpAndGold(
+  state: SiegeHeroState,
+  gold: number,
+  xp: number
+): { leveledUp: boolean; newLevel: number; hpGain: number } {
+  state.gold += Math.max(0, Math.round(gold));
+  state.xp += Math.max(0, Math.round(xp));
+  let leveledUp = false;
+  let hpGain = 0;
+  while (state.level < 10 && state.xp >= state.xpToNext) {
+    state.xp -= state.xpToNext;
+    state.level += 1;
+    state.xpToNext = Math.round(100 + (state.level - 1) * 45);
+    leveledUp = true;
+    hpGain += 8;
+  }
+  return { leveledUp, newLevel: state.level, hpGain };
+}
+
+export function tryPurchaseSiegeUpgrade(
+  state: SiegeHeroState,
+  track: SiegeUpgradeTrack
+): { ok: boolean; cost: number; level: number; reason?: string } {
+  const meta = SIEGE_UPGRADES.find((u) => u.track === track);
+  if (!meta) return { ok: false, cost: 0, level: 0, reason: '未知強化項目' };
+  const curLv = state.upgrades[track] ?? 0;
+  if (curLv >= meta.maxLevel) {
+    return { ok: false, cost: 0, level: curLv, reason: `${meta.name} 已滿級` };
+  }
+  const cost = meta.costs[curLv];
+  if (state.gold < cost) {
+    return { ok: false, cost, level: curLv, reason: `軍功不足（需 ${cost} 金）` };
+  }
+  state.gold -= cost;
+  state.upgrades[track] = curLv + 1;
+  return { ok: true, cost, level: curLv + 1 };
+}
+
+export function computeSiegeRespawnSeconds(matchTime: number, suddenDeath: boolean): number {
+  const base = 4 + Math.floor(matchTime / 110);
+  return suddenDeath ? Math.min(12, base) : Math.min(14, base);
+}
+
+export function pickSiegeAiHeroTemplate(
+  faction: SiegeFactionId,
+  usedSkinIds: Set<string>,
+  laneIndex: number
+): { skinId: string; loadout: SiegePlayerLoadout; lane: SiegeLane } {
+  const lanes: SiegeLane[] = ['mid', 'top', 'bot', 'bot', 'top'];
+  const lane = lanes[laneIndex % lanes.length];
+  const presets = SIEGE_HERO_PRESETS.filter((p) => p.faction === faction);
+  const picked = presets.find((p) => !usedSkinIds.has(p.skinId)) ?? presets[laneIndex % presets.length];
+  return {
+    skinId: picked.skinId,
+    loadout: { ...picked.loadout },
+    lane,
+  };
+}
+
+export function getBossDisplayName(kind: SiegeBossKind): string {
+  return kind === 'baron' ? '狂戰巨神・重砲鐵拳' : '幻沙先鋒・雙影巨獸';
+}

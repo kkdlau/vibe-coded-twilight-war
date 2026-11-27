@@ -1,0 +1,370 @@
+import { describe, expect, it } from 'vitest';
+import { FACTION_CHARACTERS } from './data';
+import { TwilightEngine } from './engine';
+import { TILE } from './maps';
+import { SIEGE_PASSIVES, SIEGE_TACTICAL_SKILLS, SIEGE_ULTIMATE_SKILLS, getDefaultSiegeLoadout } from './siegeData';
+import { SIEGE_MAP_ID, createSiegeMapSpec } from './siegeMap';
+import { HudSnapshot, SiegeFactionId, SiegePlayerLoadout } from './types';
+
+function createSiegeEngine(
+  faction: SiegeFactionId = 'royal',
+  loadoutOverride?: Partial<SiegePlayerLoadout>,
+  durationSec: 900 | 1080 | 1200 = 1080
+) {
+  let latestHud: HudSnapshot | null = null;
+  const skin = FACTION_CHARACTERS[faction][0];
+  const baseLoadout = getDefaultSiegeLoadout(faction, skin.id);
+  const loadout: SiegePlayerLoadout = { ...baseLoadout, ...loadoutOverride };
+
+  const engine = new TwilightEngine(
+    faction,
+    skin,
+    SIEGE_MAP_ID,
+    { royal: 0, shadow: 0, mercenary: 0 },
+    (snap) => {
+      latestHud = snap;
+    },
+    undefined,
+    undefined,
+    'standard',
+    undefined,
+    'siege',
+    { loadout, durationSec }
+  );
+
+  return { engine, getHud: () => latestHud };
+}
+
+describe('3-Lane Castle Siege / MOBA Mode (siege)', () => {
+  it('builds a symmetric 54x54 3-lane map with zero floor pickups and full A* reachability', () => {
+    const { engine } = createSiegeEngine('royal');
+    const spec = createSiegeMapSpec();
+
+    expect(engine.mode).toBe('siege');
+    expect(engine.map.id).toBe(SIEGE_MAP_ID);
+    expect(engine.map.cols).toBe(54);
+    expect(engine.map.rows).toBe(54);
+    expect(engine.map.weaponSpawns.length).toBe(0);
+    expect(engine.map.ammoSpawns.length).toBe(0);
+    expect(engine.map.shieldSpawns.length).toBe(0);
+    expect(engine.pickups.length).toBe(0);
+    expect(engine.siege?.structures.length).toBe(14);
+
+    // 5v5 hero roster: 1 player + 4 allied AI heroes + 5 enemy AI heroes
+    const royalHeroes = 1 + engine.enemies.filter((e) => e.faction === 'royal' && e.siegeUnitKind === 'hero').length;
+    const shadowHeroes = engine.enemies.filter((e) => e.faction === 'shadow' && e.siegeUnitKind === 'hero').length;
+    expect(royalHeroes).toBe(5);
+    expect(shadowHeroes).toBe(5);
+
+    const royalFountain = spec.fountains.royal;
+    const shadowFountain = spec.fountains.shadow;
+    expect(engine.findPathAStar(royalFountain.x, royalFountain.y, shadowFountain.x, shadowFountain.y).length).toBeGreaterThan(10);
+    expect(engine.findPathAStar(royalFountain.x, royalFountain.y, spec.bossSpawns.baron.x, spec.bossSpawns.baron.y).length).toBeGreaterThan(5);
+    expect(engine.findPathAStar(royalFountain.x, royalFountain.y, spec.bossSpawns.vanguard.x, spec.bossSpawns.vanguard.y).length).toBeGreaterThan(5);
+
+    for (const lane of ['top', 'mid', 'bot'] as const) {
+      const midWp = spec.laneWaypoints[lane][3];
+      expect(engine.findPathAStar(royalFountain.x, royalFountain.y, midWp.x, midWp.y).length).toBeGreaterThan(5);
+    }
+  });
+
+  it('grants infinite lives, disables weapon drops, and preserves custom loadout on respawn', () => {
+    const { engine } = createSiegeEngine('royal', { gunId: 'sniper', meleeId: 'greatsword' });
+
+    expect(engine.player.weapons[0].def.id).toBe('sniper');
+    expect(engine.player.weapons[1].def.id).toBe('greatsword');
+
+    // Dropping active weapon is disabled in Siege
+    engine.setKey('Escape', true);
+    engine.setKey('Escape', false);
+    expect(engine.pickups.length).toBe(0);
+    expect(engine.player.weapons[0].def.id).toBe('sniper');
+
+    // Kill player: must enter RESPAWNING (never GAME_OVER) and never drop weapons
+    engine.player.invulnTimer = 0;
+    (engine as unknown as { handlePlayerDeath: (id?: string) => void }).handlePlayerDeath();
+    expect(engine.status).toBe('RESPAWNING');
+    expect(engine.pickups.length).toBe(0);
+    expect(engine.siege?.playerState.deaths).toBe(1);
+
+    // Advance past respawn timer -> player revives at own fountain with custom loadout intact
+    for (let i = 0; i < 120; i++) {
+      engine.update(0.05, 1280, 720);
+    }
+    expect(engine.status).toBe('PLAYING');
+    expect(engine.player.hp).toBe(engine.player.maxHp);
+    expect(engine.player.weapons[0].def.id).toBe('sniper');
+    expect(engine.player.weapons[1].def.id).toBe('greatsword');
+  });
+
+  it('enforces tower invulnerability, backdoor protection, and ends with VICTORY when enemy Castle falls', () => {
+    const { engine } = createSiegeEngine('royal');
+    const sg = engine.siege!;
+    const shadowCastle = sg.structures.find((s) => s.id === 'shadow_castle')!;
+    const shadowMidOuter = sg.structures.find((s) => s.id === 'shadow_mid_outer')!;
+    const shadowMidInner = sg.structures.find((s) => s.id === 'shadow_mid_inner')!;
+
+    // Castle & inner towers start invulnerable while outer towers stand
+    expect(shadowCastle.invulnerable).toBe(true);
+    expect(shadowMidInner.invulnerable).toBe(true);
+    expect(engine.damageSiegeStructure(shadowCastle, 500, 'player', 'royal')).toBe(0);
+
+    // Destroying outer mid tower unlocks inner mid tower
+    engine.damageSiegeStructure(shadowMidOuter, 5000, 'player', 'royal');
+    expect(shadowMidOuter.alive).toBe(false);
+    expect(shadowMidInner.invulnerable).toBe(false);
+
+    // Backdoor protection: without nearby allied minions, structure damage is reduced
+    shadowMidInner.backdoorProtected = true;
+    const dmgWithBackdoor = engine.damageSiegeStructure(shadowMidInner, 100, 'player', 'royal');
+    expect(dmgWithBackdoor).toBeLessThan(50);
+
+    // Destroying inner mid tower unlocks Shadow Castle
+    shadowMidInner.backdoorProtected = false;
+    engine.damageSiegeStructure(shadowMidInner, 5000, 'player', 'royal');
+    expect(shadowMidInner.alive).toBe(false);
+    expect(shadowCastle.invulnerable).toBe(false);
+
+    // Destroying Shadow Castle immediately wins the match
+    shadowCastle.backdoorProtected = false;
+    engine.damageSiegeStructure(shadowCastle, 20000, 'player', 'royal');
+    expect(shadowCastle.alive).toBe(false);
+    expect(engine.status).toBe('VICTORY');
+  });
+
+  it('executes all 6 tactical skill variants and all 6 ultimate variants cleanly', () => {
+    for (const tac of SIEGE_TACTICAL_SKILLS) {
+      const { engine } = createSiegeEngine(tac.faction, { tacticalId: tac.id });
+      engine.setMousePos(800, 360);
+      engine.triggerSiegeTactical();
+      expect(engine.siege!.playerState.tacticalCd).toBeGreaterThan(0);
+
+      if (tac.id === 'royal_aegis_reflect') {
+        expect(engine.siege!.playerState.aegisReflectTimer).toBeGreaterThan(0);
+      } else if (tac.id === 'royal_sanctuary_zone') {
+        expect(engine.siege!.zones.some((z) => z.kind === 'sanctuary')).toBe(true);
+      } else if (tac.id === 'shadow_blink_swap') {
+        expect(engine.siege!.zones.some((z) => z.kind === 'decoy')).toBe(true);
+      } else if (tac.id === 'shadow_hunter_mark') {
+        expect(engine.player.eagleEyeTimer).toBeGreaterThan(0);
+      } else if (tac.id === 'shadow_smoke_shroud') {
+        expect(engine.player.shadowCloneTimer).toBeGreaterThan(0);
+      }
+    }
+
+    for (const ult of SIEGE_ULTIMATE_SKILLS) {
+      const { engine } = createSiegeEngine(ult.faction, { ultimateId: ult.id });
+      engine.setMousePos(800, 360);
+      engine.player.qi = 100;
+      engine.triggerSiegeUltimate();
+      expect(engine.player.qi).toBe(0);
+
+      if (ult.id === 'royal_judgment_beam') {
+        expect(engine.beams.length).toBeGreaterThan(0);
+      } else if (ult.id === 'royal_light_rain') {
+        expect(engine.projectiles.length).toBe(9);
+      } else if (ult.id === 'royal_healing_salvo') {
+        expect(engine.projectiles.length).toBe(5);
+        expect(engine.projectiles.every((p) => p.healAllies)).toBe(true);
+      } else if (ult.id === 'shadow_twin_dragons') {
+        expect(engine.projectiles.length).toBe(2);
+      } else if (ult.id === 'shadow_pierce_dragon') {
+        expect(engine.projectiles.length).toBe(1);
+        expect(engine.projectiles[0].ignoresWalls).toBe(true);
+      } else if (ult.id === 'shadow_vortex_dragon') {
+        expect(engine.siege!.zones.some((z) => z.kind === 'vortex')).toBe(true);
+      }
+    }
+
+    // Royal Fortitude passive raises starting max HP
+    const { engine: tankEng } = createSiegeEngine('royal', {
+      passiveId: SIEGE_PASSIVES.find((p) => p.id === 'royal_fortitude')!.id,
+    });
+    expect(tankEng.player.maxHp).toBe(125);
+  });
+
+  it('supports gold upgrades in Fountain and grants team buffs on Third-Faction Boss kills', () => {
+    const { engine } = createSiegeEngine('shadow');
+    const sg = engine.siege!;
+
+    // Player spawns inside own fountain; starts with 120 Gold
+    expect(sg.playerState.gold).toBe(120);
+    expect(engine.buySiegeUpgrade('armor')).toBe(true);
+    expect(sg.playerState.upgrades.armor).toBe(1);
+    expect(engine.player.maxHp).toBe(122);
+
+    // Insufficient gold (20G < 100G) is rejected
+    expect(engine.buySiegeUpgrade('firepower')).toBe(false);
+
+    // Moving outside fountain prevents shopping while alive
+    sg.playerState.gold = 500;
+    engine.player.x = 27 * TILE;
+    engine.player.y = 27 * TILE;
+    expect(engine.buySiegeUpgrade('firepower')).toBe(false);
+
+    // Spawn Baron Boss and slay it as player -> grants 90s Baron buff to Shadow
+    engine.spawnSiegeBoss('baron');
+    const baron = engine.enemies.find((e) => e.siegeBossKind === 'baron')!;
+    expect(baron).toBeTruthy();
+    (engine as unknown as { handleSiegeEnemyRemoved: (e: typeof baron, id?: string) => void }).handleSiegeEnemyRemoved(
+      baron,
+      'player'
+    );
+    expect(sg.teamBuffs.shadow.baronTimer).toBeGreaterThan(80);
+  });
+
+  it('supports mid-match remote human disconnect (AI stand-in) and seamless rejoin', () => {
+    const royalSkin = FACTION_CHARACTERS.royal[0];
+    const shadowSkin = FACTION_CHARACTERS.shadow[0];
+    const hostLoadout = getDefaultSiegeLoadout('royal', royalSkin.id);
+    const clientLoadout = getDefaultSiegeLoadout('shadow', shadowSkin.id);
+
+    const engine = new TwilightEngine(
+      'royal',
+      royalSkin,
+      SIEGE_MAP_ID,
+      { royal: 0, shadow: 0, mercenary: 0 },
+      () => {},
+      undefined,
+      undefined,
+      'standard',
+      {
+        role: 'host',
+        localPeerId: 'host1',
+        hostPeerId: 'host1',
+        peers: [
+          { peerId: 'host1', name: 'Host', faction: 'royal', characterSkin: royalSkin, isHost: true, siegeLoadout: hostLoadout },
+          { peerId: 'peer2', name: 'ShadowGuest', faction: 'shadow', characterSkin: shadowSkin, isHost: false, siegeLoadout: clientLoadout },
+        ],
+      },
+      'siege',
+      { loadout: hostLoadout, durationSec: 1080 }
+    );
+
+    const guestState = engine.siege!.remoteStates.get('peer2')!;
+    guestState.gold = 350;
+    guestState.upgrades.armor = 1;
+
+    let guestEnt = engine.enemies.find((e) => e.peerId === 'peer2')!;
+    expect(guestEnt).toBeTruthy();
+    expect(guestEnt.isHumanPlayer).toBe(true);
+
+    // Disconnect mid-match: AI takes over, entity stays in match, stats preserved
+    engine.markRemoteHumanDisconnected('peer2');
+    guestEnt = engine.enemies.find((e) => e.peerId === 'peer2')!;
+    expect(guestEnt).toBeTruthy();
+    expect(guestEnt.isHumanPlayer).toBe(false);
+
+    // Snapshot still maps seat to peer2 with preserved Siege state
+    const midSnap = engine.exportWorldSnapshot();
+    expect(midSnap.actors.some((a) => a.peerId === 'peer2')).toBe(true);
+    expect(midSnap.siege?.players.find((p) => p.peerId === 'peer2')?.gold).toBe(350);
+
+    // Rejoin via same link: human retakes direct control & fresh seq=1 inputs execute
+    engine.rejoinRemoteHuman('peer2');
+    guestEnt = engine.enemies.find((e) => e.peerId === 'peer2')!;
+    expect(guestEnt.isHumanPlayer).toBe(true);
+    engine.setRemoteInput('peer2', {
+      moveX: 1,
+      moveY: 0,
+      aimX: guestEnt.x + 120,
+      aimY: guestEnt.y,
+      mouseDown: false,
+      clickSeq: 0,
+      reloadSeq: 0,
+      swapSeq: 0,
+      pickupSeq: 0,
+      dropSeq: 0,
+      tacticalSeq: 1,
+    });
+    engine.update(0.05, 1280, 720);
+    expect(engine.siege!.remoteStates.get('peer2')!.tacticalCd).toBeGreaterThan(0);
+  });
+
+  it('clears Siege AI hero spawn invulnerability and passes player bullets through allies to hit enemies', () => {
+    const { engine } = createSiegeEngine('royal', { gunId: 'rifle' });
+    const shadowHero = engine.enemies.find((e) => e.faction === 'shadow' && e.siegeUnitKind === 'hero')!;
+    expect(shadowHero).toBeTruthy();
+
+    // Advance past the 1.5s spawn invulnerability window
+    for (let i = 0; i < 35; i++) {
+      engine.update(0.05, 1280, 720);
+    }
+    expect(shadowHero.invulnTimer ?? 0).toBe(0);
+
+    // Clear nearby obstacles/noise by placing player, allied minion, and enemy hero cleanly in mid lane
+    const p = engine.player;
+    p.x = 24 * TILE;
+    p.y = 30 * TILE;
+    p.elevation = 0;
+
+    // Move other actors aside so nothing else intercepts the shot
+    for (const e of engine.enemies) {
+      if (e.id !== shadowHero.id) {
+        e.x = 4 * TILE;
+        e.y = 4 * TILE;
+      }
+    }
+
+    const allyHero = engine.enemies.find((e) => e.faction === 'royal' && e.siegeUnitKind === 'hero')!;
+    allyHero.x = p.x + 60;
+    allyHero.y = p.y;
+    allyHero.elevation = 0;
+    const allyStartHp = allyHero.hp;
+
+    shadowHero.x = p.x + 150;
+    shadowHero.y = p.y;
+    shadowHero.elevation = 0;
+    shadowHero.royalShieldTimer = 0;
+    shadowHero.shadowCloneTimer = 0;
+    shadowHero.invulnTimer = 0;
+    const enemyStartHp = shadowHero.hp;
+
+    // Aim straight east through the allied hero onto the enemy hero
+    const cam = (engine as unknown as { camera: { x: number; y: number } }).camera;
+    const worldToScreenX = shadowHero.x - (cam.x - 1280 / 2);
+    const worldToScreenY = shadowHero.y - (cam.y - 720 / 2);
+    engine.setMousePos(worldToScreenX, worldToScreenY);
+    engine.player.angle = 0;
+    engine.setMouseDown(true);
+    engine.setMouseDown(false);
+
+    expect(allyHero.hp).toBe(allyStartHp);
+    expect(shadowHero.hp).toBeLessThan(enemyStartHp);
+  });
+
+  it('routes Siege A* paths around alive towers and lets lane minions advance past inner towers', () => {
+    const { engine } = createSiegeEngine('royal');
+    const spec = createSiegeMapSpec();
+    const structures = engine.siege!.structures;
+
+    for (const lane of ['top', 'mid', 'bot'] as const) {
+      const start = spec.laneWaypoints[lane][0];
+      const end = spec.laneWaypoints[lane][spec.laneWaypoints[lane].length - 1];
+      const path = engine.findPathAStar(start.x, start.y, end.x, end.y);
+      expect(path.length).toBeGreaterThan(15);
+
+      for (const cell of path) {
+        const cx = (cell.gx + 0.5) * TILE;
+        const cy = (cell.gy + 0.5) * TILE;
+        for (const st of structures) {
+          if (!st.alive) continue;
+          expect(Math.hypot(cx - st.x, cy - st.y)).toBeGreaterThanOrEqual(st.radius);
+        }
+      }
+    }
+
+    // Advance simulation past the first wave delay (8s) + 8s of marching
+    for (let i = 0; i < 320; i++) {
+      engine.update(0.05, 1280, 720);
+    }
+    const advancedRoyalTopMinions = engine.enemies.filter(
+      (e) =>
+        e.faction === 'royal' &&
+        (e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion') &&
+        e.siegeLane === 'top' &&
+        e.y < 35 * TILE
+    );
+    expect(advancedRoyalTopMinions.length).toBeGreaterThan(0);
+  });
+});

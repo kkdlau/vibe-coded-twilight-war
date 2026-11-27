@@ -6,6 +6,8 @@ export interface RoomConnectionOptions {
   faction: string;
   skinId: string;
   passcode?: string;
+  resumePeerId?: string;
+  resumeToken?: string;
 }
 
 export interface RoomTransport {
@@ -38,6 +40,10 @@ export class WebSocketRoomTransport implements RoomTransport {
     });
     if (opts.passcode && opts.passcode.trim().length > 0) {
       params.set('passcode', opts.passcode.trim());
+    }
+    if (opts.resumePeerId && opts.resumeToken) {
+      params.set('resumePeerId', opts.resumePeerId);
+      params.set('resumeToken', opts.resumeToken);
     }
     const url = `${proto}//${window.location.host}/api/rooms/${encodeURIComponent(opts.roomCode)}/ws?${params.toString()}`;
     const ws = new WebSocket(url);

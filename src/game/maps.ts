@@ -1,3 +1,4 @@
+import { createSiegeRiftMap, SIEGE_MAP_ID } from './siegeMap';
 import {
   AmmoSpawn,
   BridgeRect,
@@ -1912,6 +1913,9 @@ export function createArenaMap(mapId: MapId | string): ArenaMap {
       break;
     case 'glacier_rift':
       raw = createGlacierRiftMap();
+      break;
+    case SIEGE_MAP_ID:
+      raw = createSiegeRiftMap();
       break;
     case 'tokyo_shrine':
     default:

@@ -9,13 +9,26 @@ import { sfx } from '../audio/sfx';
 import { FACTIONS, FACTION_CHARACTERS } from '../game/data';
 import { CustomMapData } from '../game/customMaps';
 import { TwilightEngine } from '../game/engine';
+import { SIEGE_UPGRADES, getTacticalMeta, getUltimateMeta } from '../game/siegeData';
 import type { AiDifficulty } from '../game/tuning';
-import { CharacterSkin, FactionId, HudSnapshot, MultiplayerEngineConfig, RunRecord } from '../game/types';
+import {
+  CharacterSkin,
+  FactionId,
+  GameMode,
+  HudSnapshot,
+  MultiplayerEngineConfig,
+  RunRecord,
+  SiegeOptions,
+  SiegeUpgradeTrack,
+} from '../game/types';
 import { ClientInputSyncState, RoomLobbyState, shouldSendClientInput } from '../net/protocol';
 import type { ActiveMultiplayerSession } from './MultiplayerLobbyView';
+import { SiegeMinimap } from './SiegeMinimap';
 import { CharacterAvatarSvg, SkillIconSvg, WeaponIconSvg } from './WeaponArt';
 
 interface GameCanvasViewProps {
+  mode?: GameMode;
+  siegeOptions?: SiegeOptions;
   faction: FactionId;
   characterSkin: CharacterSkin;
   mapId: string;
@@ -36,6 +49,13 @@ interface GameCanvasViewProps {
 const OUTCOME_TITLE_DELAY_MS = 2400;
 const OUTCOME_PANEL_DELAY_MS = 850;
 
+function formatClock(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  const mm = String(Math.floor(s / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  return `${mm}:${ss}`;
+}
+
 function normalizeControlCode(e: KeyboardEvent): string {
   if (e.code && e.code !== 'Unidentified') {
     if (
@@ -50,7 +70,14 @@ function normalizeControlCode(e: KeyboardEvent): string {
         'ArrowRight',
         'KeyQ',
         'KeyR',
+        'KeyE',
+        'KeyF',
+        'KeyB',
         'KeyP',
+        'Digit3',
+        'Digit4',
+        'Digit5',
+        'Digit6',
         'Space',
         'Escape',
       ].includes(e.code)
@@ -65,7 +92,14 @@ function normalizeControlCode(e: KeyboardEvent): string {
   if (k === 'd') return 'KeyD';
   if (k === 'q') return 'KeyQ';
   if (k === 'r') return 'KeyR';
+  if (k === 'e') return 'KeyE';
+  if (k === 'f') return 'KeyF';
+  if (k === 'b') return 'KeyB';
   if (k === 'p') return 'KeyP';
+  if (k === '3') return 'Digit3';
+  if (k === '4') return 'Digit4';
+  if (k === '5') return 'Digit5';
+  if (k === '6') return 'Digit6';
   if (k === ' ') return 'Space';
   if (e.key === 'Escape' || e.key === 'Esc') {
     return 'Escape';
@@ -77,6 +111,8 @@ function normalizeControlCode(e: KeyboardEvent): string {
 }
 
 export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
+  mode = 'frontier',
+  siegeOptions,
   faction,
   characterSkin,
   mapId,
@@ -102,7 +138,30 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
   const engineRef = useRef<TwilightEngine | null>(null);
   const recordSavedRef = useRef(false);
   const matchEndedSentRef = useRef(false);
-  const seqsRef = useRef({ clickSeq: 0, reloadSeq: 0, swapSeq: 0, pickupSeq: 0, dropSeq: 0 });
+  const seqsRef = useRef<{
+    clickSeq: number;
+    reloadSeq: number;
+    swapSeq: number;
+    pickupSeq: number;
+    dropSeq: number;
+    tacticalSeq: number;
+    ultSeq: number;
+    recallSeq: number;
+    upgradeSeq: number;
+    upgradeTrack?: SiegeUpgradeTrack;
+  }>({
+    clickSeq: 0,
+    reloadSeq: 0,
+    swapSeq: 0,
+    pickupSeq: 0,
+    dropSeq: 0,
+    tacticalSeq: 0,
+    ultSeq: 0,
+    recallSeq: 0,
+    upgradeSeq: 0,
+  });
+  const siegeOptionsRef = useRef(siegeOptions);
+  siegeOptionsRef.current = siegeOptions;
   const clientSyncStateRef = useRef<ClientInputSyncState>({ lastSent: null, lastSentAt: 0, lastAimSentAt: 0 });
   const initRepsRef = useRef(initialReputations);
   initRepsRef.current = initialReputations;
@@ -167,7 +226,17 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
     sfx.prepareGunshot();
     recordSavedRef.current = false;
     matchEndedSentRef.current = false;
-    seqsRef.current = { clickSeq: 0, reloadSeq: 0, swapSeq: 0, pickupSeq: 0, dropSeq: 0 };
+    seqsRef.current = {
+      clickSeq: 0,
+      reloadSeq: 0,
+      swapSeq: 0,
+      pickupSeq: 0,
+      dropSeq: 0,
+      tacticalSeq: 0,
+      ultSeq: 0,
+      recallSeq: 0,
+      upgradeSeq: 0,
+    };
     clientSyncStateRef.current = { lastSent: null, lastSentAt: 0, lastAimSentAt: 0 };
 
     const mp = multiplayerRef.current;
@@ -184,6 +253,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
               FACTION_CHARACTERS[pl.faction].find((s) => s.id === pl.skinId) ||
               FACTION_CHARACTERS[pl.faction][0],
             isHost: pl.isHost,
+            siegeLoadout: pl.siegeLoadout,
           })),
         }
       : undefined;
@@ -197,7 +267,9 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       (reps, change) => repCallbackRef.current(reps, change),
       customMapRef.current,
       aiDifficulty,
-      mpConfig
+      mpConfig,
+      mode,
+      siegeOptionsRef.current
     );
     engineRef.current = engine;
 
@@ -245,6 +317,25 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
           isAction = true;
         } else if (norm === 'Escape') {
           seqsRef.current.dropSeq += 1;
+          isAction = true;
+        } else if (norm === 'KeyE') {
+          seqsRef.current.tacticalSeq += 1;
+          isAction = true;
+        } else if (norm === 'KeyF') {
+          seqsRef.current.ultSeq += 1;
+          isAction = true;
+        } else if (norm === 'KeyB') {
+          seqsRef.current.recallSeq += 1;
+          isAction = true;
+        } else if (norm === 'Digit3' || norm === 'Digit4' || norm === 'Digit5' || norm === 'Digit6') {
+          const trackMap: Record<string, SiegeUpgradeTrack> = {
+            Digit3: 'firepower',
+            Digit4: 'blade',
+            Digit5: 'armor',
+            Digit6: 'core',
+          };
+          seqsRef.current.upgradeSeq += 1;
+          seqsRef.current.upgradeTrack = trackMap[norm];
           isAction = true;
         }
         sendClientInputIfNeeded(isAction);
@@ -303,7 +394,14 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
         if (msg.type === 'remote_input' && isHost) {
           engine.setRemoteInput(msg.peerId, msg.input);
         } else if (msg.type === 'peer_left' && isHost) {
-          engine.removeRemoteHuman(msg.peerId);
+          if (msg.canRejoin) {
+            engine.markRemoteHumanDisconnected(msg.peerId);
+          } else {
+            engine.removeRemoteHuman(msg.peerId);
+          }
+        } else if (msg.type === 'peer_rejoined' && isHost) {
+          engine.rejoinRemoteHuman(msg.peerId);
+          transport.send({ type: 'world_snapshot', snapshot: engine.exportWorldSnapshot() });
         } else if (msg.type === 'world_snapshot' && !isHost) {
           engine.applyWorldSnapshot(msg.snapshot);
         } else if (msg.type === 'lobby_state' && msg.lobby.phase === 'lobby') {
@@ -380,7 +478,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       window.removeEventListener('mouseup', onWindowMouseUp);
       window.removeEventListener('blur', onBlur);
     };
-  }, [faction, characterSkin, mapId, aiDifficulty, runSeed, mpRoomKey]);
+  }, [faction, characterSkin, mapId, aiDifficulty, runSeed, mpRoomKey, mode]);
 
   useEffect(() => {
     setOutcomePhase(null);
@@ -467,6 +565,13 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
                 seqsRef.current.clickSeq += 1;
                 sendClientInputIfNeeded(true);
               }
+            } else if (e.button === 2 && mode === 'siege') {
+              sfx.unlock();
+              engineRef.current?.triggerSiegeTactical();
+              if (multiplayer && !multiplayer.session.isHost) {
+                seqsRef.current.tacticalSeq += 1;
+                sendClientInputIfNeeded(true);
+              }
             }
           }}
           onContextMenu={(e) => e.preventDefault()}
@@ -512,14 +617,20 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
                   {hpPct}%
                 </span>
                 <div className="flex items-center gap-0.5 mt-1">
-                  {Array.from({ length: p.maxLives }).map((_, i) => (
-                    <Heart
-                      key={i}
-                      className={`w-3.5 h-3.5 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)] ${
-                        i < p.lives ? 'text-rose-500 fill-rose-500' : 'text-slate-700 fill-slate-800'
-                      }`}
-                    />
-                  ))}
+                  {hud.mode === 'siege' ? (
+                    <span className="text-[11px] font-mono-num font-black text-sky-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)]">
+                      ∞ 無限復活
+                    </span>
+                  ) : (
+                    Array.from({ length: p.maxLives }).map((_, i) => (
+                      <Heart
+                        key={i}
+                        className={`w-3.5 h-3.5 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)] ${
+                          i < p.lives ? 'text-rose-500 fill-rose-500' : 'text-slate-700 fill-slate-800'
+                        }`}
+                      />
+                    ))
+                  )}
                 </div>
               </div>
             </div>
@@ -560,19 +671,60 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
               </div>
               <div className="text-[11px] text-slate-300 truncate">{p.characterSkin.name}</div>
               <div className="mt-1 flex items-baseline gap-2 font-mono-num bg-slate-900/85 border border-slate-700/80 rounded px-2 py-0.5">
-                <span className="text-[11px] font-sans text-slate-300">聲望</span>
-                <strong className="text-sm font-black text-amber-300 leading-none">{p.reputation}</strong>
-                <span className="text-slate-600">·</span>
-                <span className="text-xs font-bold text-sky-300">氣 {p.qiSpeedMultiplier.toFixed(2)}×</span>
+                {hud.mode === 'siege' && hud.siege ? (
+                  <>
+                    <span className="text-[11px] font-sans text-sky-300 font-bold">Lv.{hud.siege.playerLevel}</span>
+                    <span className="text-slate-600">·</span>
+                    <span className="text-[11px] font-sans text-amber-300">軍功</span>
+                    <strong className="text-sm font-black text-amber-300 leading-none">{hud.siege.playerGold}</strong>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-[11px] font-sans text-slate-300">聲望</span>
+                    <strong className="text-sm font-black text-amber-300 leading-none">{p.reputation}</strong>
+                    <span className="text-slate-600">·</span>
+                    <span className="text-xs font-bold text-sky-300">氣 {p.qiSpeedMultiplier.toFixed(2)}×</span>
+                  </>
+                )}
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* TOP-CENTER: Transient Combat Banners Only (Keeps Top-Right 100% Clear for Aiming) */}
-      {hud && (hud.activeSkillBanner || hud.bannerText) && (
+      {/* TOP-CENTER: Siege Scoreboard Bar + Transient Combat Banners */}
+      {hud && (
         <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 w-full max-w-xl px-4">
+          {hud.mode === 'siege' && hud.siege && (
+            <div className="bg-slate-950/88 border border-slate-700/90 rounded-xl px-3.5 py-1.5 shadow-xl flex items-center gap-3 text-xs font-mono-num">
+              <div className="flex items-center gap-1.5">
+                <span className="font-sans font-bold text-sky-300">皇家主堡</span>
+                <span className="font-black text-white">
+                  {Math.max(0, Math.round((hud.siege.royalCastleHp / Math.max(1, hud.siege.royalCastleMaxHp)) * 100))}%
+                </span>
+                <span className="text-[10px] text-slate-400">({hud.siege.royalTowersAlive}塔)</span>
+              </div>
+
+              <div className="px-2.5 py-0.5 rounded-lg bg-slate-900 border border-slate-700 text-center">
+                <div className={`font-black ${hud.siege.suddenDeath ? 'text-rose-400' : 'text-amber-300'}`}>
+                  {formatClock(hud.siege.matchTime)} / {formatClock(hud.siege.matchDuration)}
+                </div>
+                <div className="text-[9px] font-sans text-slate-400">
+                  {hud.siege.suddenDeath
+                    ? '總攻時刻 · 雙倍超級兵'
+                    : `先鋒 ${hud.siege.vanguardState === 'alive' ? '登場!' : `${hud.siege.vanguardSeconds}s`} · 巨神 ${hud.siege.baronState === 'alive' ? '登場!' : `${hud.siege.baronSeconds}s`}`}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-slate-400">({hud.siege.shadowTowersAlive}塔)</span>
+                <span className="font-black text-white">
+                  {Math.max(0, Math.round((hud.siege.shadowCastleHp / Math.max(1, hud.siege.shadowCastleMaxHp)) * 100))}%
+                </span>
+                <span className="font-sans font-bold text-fuchsia-300">天影主堡</span>
+              </div>
+            </div>
+          )}
           {hud.activeSkillBanner && (
             <div className="bg-slate-950/90 border border-sky-400/70 text-white px-4 py-1.5 rounded-lg text-xs font-bold shadow-lg">
               技能發動：{hud.activeSkillBanner}
@@ -590,15 +742,153 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       {hud && p && (
         <div className="pointer-events-none absolute bottom-3 left-3 flex flex-col items-start gap-2">
           <div className="text-[11px] text-slate-200 bg-slate-950/78 px-3 py-1.5 rounded-lg border border-slate-800/90">
-            [Q] 切換 · [Esc] 放下武器 · [R] 裝彈 · [Space] 拾取 · [Tab] 遊戲進展
+            {hud.mode === 'siege'
+              ? '[Q] 切武 · [R] 裝彈 · [Tab] 戰況'
+              : '[Q] 切換 · [Esc] 放下武器 · [R] 裝彈 · [Space] 拾取 · [Tab] 遊戲進展'}
             {(!multiplayer || multiplayer.session.isHost) && ' · [P] 暫停'}
           </div>
         </div>
       )}
 
-      {/* BOTTOM-RIGHT: Multiplayer Room & Latency Indicator */}
+      {/* BOTTOM-CENTER: Siege MOBA Skills & Upgrade Shop Bar */}
+      {hud && p && hud.mode === 'siege' && hud.siege && (
+        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 max-w-[calc(100vw-24px)]">
+          {!hud.siege.canShop && hud.siege.recallTimer <= 0 && (
+            <div className="pointer-events-none bg-slate-950/75 border border-slate-800/80 rounded-md px-2.5 py-0.5 text-[10px] text-slate-300">
+              回泉水 [B] 或復活時按 [3-6] 升級屬性
+            </div>
+          )}
+          {hud.siege.recallTimer > 0 && (
+            <div className="pointer-events-none bg-slate-950/90 border border-sky-400/70 rounded-lg px-3 py-1 text-xs font-bold text-sky-200 flex items-center gap-2">
+              <span>回城引導中 {hud.siege.recallTimer.toFixed(1)}s</span>
+              <div className="w-24 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-sky-400"
+                  style={{ width: `${Math.min(100, ((hud.siege.recallDuration - hud.siege.recallTimer) / hud.siege.recallDuration) * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 bg-slate-950/88 border border-slate-700/90 rounded-xl px-2.5 py-1.5 shadow-2xl">
+            {/* Tactical [E / RClick] */}
+            <button
+              type="button"
+              onClick={() => {
+                engineRef.current?.triggerSiegeTactical();
+                if (multiplayer && !multiplayer.session.isHost) {
+                  seqsRef.current.tacticalSeq += 1;
+                  sendClientInputIfNeeded(true);
+                }
+              }}
+              className={`px-2.5 py-1 rounded-lg border text-left cursor-pointer ${
+                hud.siege.tacticalCd <= 0 ? 'bg-sky-950/70 border-sky-400/80 text-white' : 'bg-slate-900 border-slate-700 text-slate-400'
+              }`}
+            >
+              <div className="text-[10px] font-mono-num text-sky-300">
+                [E/右鍵] {hud.siege.tacticalCd > 0 ? `${hud.siege.tacticalCd.toFixed(1)}s` : '就緒'}
+              </div>
+              <div className="text-[11px] font-bold truncate max-w-[84px]">
+                {getTacticalMeta(hud.siege.loadout.tacticalId).name}
+              </div>
+            </button>
+
+            {/* Ultimate [F / Charge] */}
+            <button
+              type="button"
+              onClick={() => {
+                engineRef.current?.triggerSiegeUltimate();
+                if (multiplayer && !multiplayer.session.isHost) {
+                  seqsRef.current.ultSeq += 1;
+                  sendClientInputIfNeeded(true);
+                }
+              }}
+              className={`px-2.5 py-1 rounded-lg border text-left cursor-pointer ${
+                p.qi >= p.maxQi - 1 ? 'bg-amber-950/70 border-amber-400/90 text-white' : 'bg-slate-900 border-slate-700 text-slate-400'
+              }`}
+            >
+              <div className="text-[10px] font-mono-num text-amber-300">
+                [F/滿氣] {Math.round((p.qi / p.maxQi) * 100)}%
+              </div>
+              <div className="text-[11px] font-bold truncate max-w-[84px]">
+                {getUltimateMeta(hud.siege.loadout.ultimateId).name}
+              </div>
+            </button>
+
+            {/* Recall [B] */}
+            <button
+              type="button"
+              onClick={() => {
+                engineRef.current?.startSiegeRecall();
+                if (multiplayer && !multiplayer.session.isHost) {
+                  seqsRef.current.recallSeq += 1;
+                  sendClientInputIfNeeded(true);
+                }
+              }}
+              className="px-2 py-1 rounded-lg border border-slate-700 bg-slate-900 hover:border-sky-400 text-slate-200 cursor-pointer"
+            >
+              <div className="text-[10px] font-mono-num text-sky-300">[B]</div>
+              <div className="text-[11px] font-bold">回城</div>
+            </button>
+
+            <div className="w-px h-7 bg-slate-700/80 mx-0.5" />
+
+            {/* 4 Gold Upgrade Buttons */}
+            {SIEGE_UPGRADES.map((u) => {
+              const lv = hud.siege!.upgrades[u.track] ?? 0;
+              const maxed = lv >= u.maxLevel;
+              const cost = maxed ? 0 : u.costs[lv];
+              const affordable = !maxed && hud.siege!.canShop && hud.siege!.playerGold >= cost;
+              return (
+                <button
+                  key={u.track}
+                  type="button"
+                  disabled={!affordable}
+                  onClick={() => {
+                    engineRef.current?.buySiegeUpgrade(u.track);
+                    if (multiplayer && !multiplayer.session.isHost) {
+                      seqsRef.current.upgradeSeq += 1;
+                      seqsRef.current.upgradeTrack = u.track;
+                      sendClientInputIfNeeded(true);
+                    }
+                  }}
+                  title={u.bonusText}
+                  className={`px-2 py-1 rounded-lg border text-left transition-all ${
+                    affordable
+                      ? 'bg-slate-900 border-amber-400/80 hover:bg-slate-800 text-white cursor-pointer'
+                      : 'bg-slate-950/70 border-slate-800 text-slate-500 cursor-default'
+                  }`}
+                >
+                  <div className="text-[10px] font-mono-num flex items-center justify-between gap-1">
+                    <span>[{u.keyHint}]</span>
+                    <span className={maxed ? 'text-emerald-400' : 'text-amber-300'}>
+                      {maxed ? 'MAX' : `${cost}G`}
+                    </span>
+                  </div>
+                  <div className="text-[11px] font-bold">
+                    {u.shortName} {lv}/{u.maxLevel}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* BOTTOM-RIGHT: Siege Minimap + Multiplayer Room Indicator */}
+      {hud && p && hud.mode === 'siege' && hud.siege && (
+        <div className="absolute bottom-3 right-3 flex flex-col items-end gap-1.5">
+          <SiegeMinimap siege={hud.siege} playerFaction={p.faction} />
+        </div>
+      )}
+
+      {/* BOTTOM-RIGHT: Multiplayer Room & Latency Indicator (shifted up if Siege minimap shown) */}
       {multiplayer && (
-        <div className="pointer-events-none absolute bottom-3 right-3 bg-slate-950/80 border border-slate-700/80 rounded-lg px-3 py-1.5 text-[11px] font-mono-num text-sky-300 shadow-lg">
+        <div
+          className={`pointer-events-none absolute right-3 bg-slate-950/80 border border-slate-700/80 rounded-lg px-3 py-1.5 text-[11px] font-mono-num text-sky-300 shadow-lg ${
+            hud?.mode === 'siege' ? 'bottom-[218px]' : 'bottom-3'
+          }`}
+        >
           房號 {multiplayer.session.lobby.roomCode} · {multiplayer.session.lobby.players.length} 人 ·{' '}
           {multiplayer.session.isHost ? '房主' : '連線玩家'}
           {mpRttMs !== null ? ` · ${mpRttMs}ms` : ''}
@@ -660,13 +950,30 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4 font-mono-num text-sm">
               <div className="bg-slate-900/90 p-3 rounded-lg border border-slate-800">
-                <div className="text-xs text-slate-400">剩餘敵對目標</div>
-                <div className="text-xl font-bold text-rose-400">{hud.enemiesRemaining}</div>
+                <div className="text-xs text-slate-400">
+                  {hud.mode === 'siege' ? '補兵 / 推塔 / 陣亡' : '剩餘敵對目標'}
+                </div>
+                <div className="text-xl font-bold text-rose-400">
+                  {hud.mode === 'siege' && hud.siege
+                    ? `${hud.siege.minionKills} / ${hud.siege.towerKills} / ${hud.siege.deaths}`
+                    : hud.enemiesRemaining}
+                </div>
               </div>
               <div className="bg-slate-900/90 p-3 rounded-lg border border-slate-800">
-                <div className="text-xs text-slate-400">目前積分 / 聲望</div>
+                <div className="text-xs text-slate-400">
+                  {hud.mode === 'siege' ? '等級 / 軍功金幣' : '目前積分 / 聲望'}
+                </div>
                 <div className="text-lg font-bold text-white">
-                  {p.score} <span className="text-sky-400 text-sm">/ {p.reputation}</span>
+                  {hud.mode === 'siege' && hud.siege ? (
+                    <>
+                      Lv.{hud.siege.playerLevel}{' '}
+                      <span className="text-amber-300 text-sm">/ {hud.siege.playerGold}G</span>
+                    </>
+                  ) : (
+                    <>
+                      {p.score} <span className="text-sky-400 text-sm">/ {p.reputation}</span>
+                    </>
+                  )}
                 </div>
               </div>
               <div className="bg-slate-900/90 p-3 rounded-lg border border-slate-800">
@@ -681,28 +988,57 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-3 font-mono-num text-xs">
-              <div className="bg-slate-900/90 p-3 rounded-lg border border-sky-500/30">
-                <div className="text-white font-sans font-bold mb-1">皇家騎士團</div>
-                <div className="text-white text-sm font-bold">總兵力 {hud.factionRemaining.royal} / 10</div>
-                <div className="text-slate-400 mt-0.5">場上現役：{hud.factionActive.royal} 人</div>
-                <div className="text-sky-300 mt-1">皇家聲望：{p.reputations.royal}</div>
-              </div>
-              <div className="bg-slate-900/90 p-3 rounded-lg border border-fuchsia-700/40">
-                <div className="font-sans font-bold mb-1" style={{ color: '#C026D3' }}>
-                  天影十字軍
+            {hud.mode === 'siege' && hud.siege ? (
+              <div className="grid grid-cols-2 gap-3 font-mono-num text-xs">
+                <div className="bg-slate-900/90 p-3 rounded-lg border border-sky-500/30">
+                  <div className="text-sky-300 font-sans font-bold mb-1">皇家騎士團</div>
+                  <div className="text-white text-sm font-bold">
+                    主堡：{hud.siege.royalCastleHp} / {hud.siege.royalCastleMaxHp}
+                  </div>
+                  <div className="text-slate-300 mt-0.5">存活防禦塔：{hud.siege.royalTowersAlive} / 6</div>
+                  <div className="text-amber-300 mt-1">
+                    先鋒增益 ×{hud.siege.teamBuffs.royal.vanguardStacks}
+                    {hud.siege.teamBuffs.royal.baronTimer > 0 && ` · 巨神血契 ${Math.ceil(hud.siege.teamBuffs.royal.baronTimer)}s`}
+                  </div>
                 </div>
-                <div className="text-white text-sm font-bold">總兵力 {hud.factionRemaining.shadow} / 10</div>
-                <div className="text-slate-400 mt-0.5">場上現役：{hud.factionActive.shadow} 人</div>
-                <div className="text-fuchsia-300 mt-1">天影聲望：{p.reputations.shadow}</div>
+                <div className="bg-slate-900/90 p-3 rounded-lg border border-fuchsia-700/40">
+                  <div className="font-sans font-bold mb-1" style={{ color: '#E879F9' }}>
+                    天影十字軍
+                  </div>
+                  <div className="text-white text-sm font-bold">
+                    主堡：{hud.siege.shadowCastleHp} / {hud.siege.shadowCastleMaxHp}
+                  </div>
+                  <div className="text-slate-300 mt-0.5">存活防禦塔：{hud.siege.shadowTowersAlive} / 6</div>
+                  <div className="text-amber-300 mt-1">
+                    先鋒增益 ×{hud.siege.teamBuffs.shadow.vanguardStacks}
+                    {hud.siege.teamBuffs.shadow.baronTimer > 0 && ` · 巨神血契 ${Math.ceil(hud.siege.teamBuffs.shadow.baronTimer)}s`}
+                  </div>
+                </div>
               </div>
-              <div className="bg-slate-900/90 p-3 rounded-lg border border-amber-500/30">
-                <div className="text-amber-500 font-sans font-bold mb-1">第三勢力（傭兵團）</div>
-                <div className="text-white text-sm font-bold">總兵力 {hud.factionRemaining.mercenary} / 10</div>
-                <div className="text-slate-400 mt-0.5">場上現役：{hud.factionActive.mercenary} 人</div>
-                <div className="text-amber-300 mt-1">第三聲望：{p.reputations.mercenary}</div>
+            ) : (
+              <div className="grid grid-cols-3 gap-3 font-mono-num text-xs">
+                <div className="bg-slate-900/90 p-3 rounded-lg border border-sky-500/30">
+                  <div className="text-white font-sans font-bold mb-1">皇家騎士團</div>
+                  <div className="text-white text-sm font-bold">總兵力 {hud.factionRemaining.royal} / 10</div>
+                  <div className="text-slate-400 mt-0.5">場上現役：{hud.factionActive.royal} 人</div>
+                  <div className="text-sky-300 mt-1">皇家聲望：{p.reputations.royal}</div>
+                </div>
+                <div className="bg-slate-900/90 p-3 rounded-lg border border-fuchsia-700/40">
+                  <div className="font-sans font-bold mb-1" style={{ color: '#C026D3' }}>
+                    天影十字軍
+                  </div>
+                  <div className="text-white text-sm font-bold">總兵力 {hud.factionRemaining.shadow} / 10</div>
+                  <div className="text-slate-400 mt-0.5">場上現役：{hud.factionActive.shadow} 人</div>
+                  <div className="text-fuchsia-300 mt-1">天影聲望：{p.reputations.shadow}</div>
+                </div>
+                <div className="bg-slate-900/90 p-3 rounded-lg border border-amber-500/30">
+                  <div className="text-amber-500 font-sans font-bold mb-1">第三勢力（傭兵團）</div>
+                  <div className="text-white text-sm font-bold">總兵力 {hud.factionRemaining.mercenary} / 10</div>
+                  <div className="text-slate-400 mt-0.5">場上現役：{hud.factionActive.mercenary} 人</div>
+                  <div className="text-amber-300 mt-1">第三聲望：{p.reputations.mercenary}</div>
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       )}
@@ -820,11 +1156,15 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
                 {hud.mapName} · {facInfo.name} · 戰役結算
               </div>
               <p className="text-sm text-slate-300 mb-6">
-                {hud.status === 'VICTORY'
-                  ? faction === 'mercenary'
-                    ? '你已清除全場所有敵我勢力，以孤狼之姿稱霸戰場！'
-                    : `你已協助${facInfo.name}清除全數非己方勢力，奪下本場勝利！`
-                  : '結算統計已寫入本地戰績殿堂，準備好再次出戰了嗎？'}
+                {hud.mode === 'siege'
+                  ? hud.status === 'VICTORY'
+                    ? `恭喜！你已協助${facInfo.name}攻破敵方主城堡，奪下三路攻防戰勝利！`
+                    : '己方主城堡已淪陷，調整出戰配裝與技能變種後再戰一局！'
+                  : hud.status === 'VICTORY'
+                    ? faction === 'mercenary'
+                      ? '你已清除全場所有敵我勢力，以孤狼之姿稱霸戰場！'
+                      : `你已協助${facInfo.name}清除全數非己方勢力，奪下本場勝利！`
+                    : '結算統計已寫入本地戰績殿堂，準備好再次出戰了嗎？'}
               </p>
 
               <div className="grid grid-cols-2 gap-3 mb-6 font-mono-num">

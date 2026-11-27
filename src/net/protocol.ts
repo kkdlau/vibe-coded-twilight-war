@@ -4,16 +4,21 @@ import type {
   CardinalDir,
   EnemyArchetype,
   FactionId,
+  GameMode,
   HudSnapshot,
   MeleeKind,
   PickupKind,
+  SiegeMatchDurationSec,
+  SiegePlayerLoadout,
+  SiegeStructureKind,
+  SiegeUpgradeTrack,
   WeaponHand,
 } from '../game/types';
 
 export const MAX_ROOM_PLAYERS = 8;
 export const ROOM_CODE_REGEX = /^[A-Z0-9]{6}$/;
 export const MAX_LOBBY_MSG_BYTES = 65_536;
-export const MAX_GAME_MSG_BYTES = 24_576;
+export const MAX_GAME_MSG_BYTES = 65_536;
 export const LOBBY_IDLE_TIMEOUT_MS = 5 * 60_000;
 export const POST_MATCH_CLEANUP_MS = 60_000;
 export const MAX_MATCH_DURATION_MS = 30 * 60_000;
@@ -44,6 +49,8 @@ export interface LobbyPlayerInfo {
   faction: FactionId;
   skinId: string;
   isHost: boolean;
+  disconnected?: boolean;
+  siegeLoadout?: SiegePlayerLoadout;
 }
 
 export type RoomPhase = 'lobby' | 'playing' | 'ended';
@@ -53,6 +60,8 @@ export interface RoomLobbyState {
   phase: RoomPhase;
   hostPeerId: string;
   maxPlayers: number;
+  mode?: GameMode;
+  siegeDurationSec?: SiegeMatchDurationSec;
   mapId: string;
   customMap?: CustomMapData;
   difficulty: AiDifficulty;
@@ -72,6 +81,11 @@ export interface RemotePlayerInput {
   swapSeq: number;
   pickupSeq: number;
   dropSeq: number;
+  tacticalSeq?: number;
+  ultSeq?: number;
+  recallSeq?: number;
+  upgradeSeq?: number;
+  upgradeTrack?: SiegeUpgradeTrack;
 }
 
 export const CLIENT_INPUT_TIMING = {
@@ -111,7 +125,11 @@ export function shouldSendClientInput(
     next.reloadSeq !== prev.reloadSeq ||
     next.swapSeq !== prev.swapSeq ||
     next.pickupSeq !== prev.pickupSeq ||
-    next.dropSeq !== prev.dropSeq
+    next.dropSeq !== prev.dropSeq ||
+    (next.tacticalSeq ?? 0) !== (prev.tacticalSeq ?? 0) ||
+    (next.ultSeq ?? 0) !== (prev.ultSeq ?? 0) ||
+    (next.recallSeq ?? 0) !== (prev.recallSeq ?? 0) ||
+    (next.upgradeSeq ?? 0) !== (prev.upgradeSeq ?? 0)
   ) {
     return true;
   }
@@ -155,6 +173,7 @@ export interface NetActorSnapshot {
   angle: number;
   elev: number;
   hp: number;
+  maxHp?: number;
   qi: number;
   lives?: number;
   respawn?: number;
@@ -246,6 +265,59 @@ export type NetTransientEvent =
   | { k: 'trace'; kind: 'blink' | 'siphon'; fx: number; fy: number; tx: number; ty: number; dur: number }
   | { k: 'sfx'; kind: 'gun' | 'melee' | 'hit' | 'down' | 'skill' | 'reload' | 'switch'; x: number; y: number; sub?: string; flag?: boolean };
 
+export interface NetSiegeStructureSnapshot {
+  id: string;
+  hp: number;
+  alive: boolean;
+  invuln: boolean;
+  bd: boolean;
+  aggro: string | null;
+  hf?: number;
+}
+
+export interface NetSiegeZoneSnapshot {
+  id: string;
+  kind: 'sanctuary' | 'vortex' | 'decoy';
+  fac: 'royal' | 'shadow';
+  x: number;
+  y: number;
+  r: number;
+  life: number;
+  maxLife: number;
+}
+
+export interface NetSiegePlayerSnapshot {
+  peerId: string;
+  gold: number;
+  lvl: number;
+  xp: number;
+  xpNext: number;
+  upg: Record<SiegeUpgradeTrack, number>;
+  tacCd: number;
+  rec: number;
+  mk: number;
+  tk: number;
+  deaths: number;
+  maxHp: number;
+}
+
+export interface NetSiegeSnapshot {
+  matchTime: number;
+  matchDuration: number;
+  suddenDeath: boolean;
+  vanguardState: 'alive' | 'countdown';
+  vanguardSec: number;
+  baronState: 'alive' | 'countdown';
+  baronSec: number;
+  teamBuffs: {
+    royal: { vanguardStacks: number; baronTimer: number };
+    shadow: { vanguardStacks: number; baronTimer: number };
+  };
+  structures: NetSiegeStructureSnapshot[];
+  zones: NetSiegeZoneSnapshot[];
+  players: NetSiegePlayerSnapshot[];
+}
+
 export interface NetWorldSnapshot {
   seq: number;
   t: number;
@@ -258,13 +330,28 @@ export interface NetWorldSnapshot {
   pickups?: NetPickupSnapshot[];
   projectiles: NetProjectileSnapshot[];
   iceBlocks?: NetIceBlockSnapshot[];
+  siege?: NetSiegeSnapshot;
   events: NetTransientEvent[];
 }
 
 export type ClientToServerMsg =
-  | { type: 'update_profile'; name: string; faction: FactionId; skinId: string }
-  | { type: 'update_room_settings'; mapId: string; customMap?: CustomMapData; difficulty: AiDifficulty }
-  | { type: 'start_match'; mapId: string; customMap?: CustomMapData; difficulty: AiDifficulty }
+  | { type: 'update_profile'; name: string; faction: FactionId; skinId: string; siegeLoadout?: SiegePlayerLoadout }
+  | {
+      type: 'update_room_settings';
+      mapId: string;
+      customMap?: CustomMapData;
+      difficulty: AiDifficulty;
+      mode?: GameMode;
+      siegeDurationSec?: SiegeMatchDurationSec;
+    }
+  | {
+      type: 'start_match';
+      mapId: string;
+      customMap?: CustomMapData;
+      difficulty: AiDifficulty;
+      mode?: GameMode;
+      siegeDurationSec?: SiegeMatchDurationSec;
+    }
   | { type: 'match_ended' }
   | { type: 'return_to_lobby' }
   | { type: 'player_input'; input: RemotePlayerInput }
@@ -272,12 +359,13 @@ export type ClientToServerMsg =
   | { type: 'ping'; clientTime: number };
 
 export type ServerToClientMsg =
-  | { type: 'welcome'; peerId: string; lobby: RoomLobbyState }
+  | { type: 'welcome'; peerId: string; lobby: RoomLobbyState; reconnectToken?: string }
   | { type: 'lobby_state'; lobby: RoomLobbyState }
   | { type: 'match_started'; lobby: RoomLobbyState }
   | { type: 'remote_input'; peerId: string; input: RemotePlayerInput }
   | { type: 'world_snapshot'; snapshot: NetWorldSnapshot }
-  | { type: 'peer_left'; peerId: string; name: string }
+  | { type: 'peer_left'; peerId: string; name: string; canRejoin?: boolean }
+  | { type: 'peer_rejoined'; peerId: string; name: string }
   | { type: 'room_closed'; reason: string }
   | { type: 'error'; code: string; message: string }
   | { type: 'pong'; clientTime: number };

@@ -13,7 +13,7 @@ import {
   ServerToClientMsg,
   sanitizeNickname,
 } from '../src/net/protocol';
-import type { FactionId } from '../src/game/types';
+import type { FactionId, GameMode, SiegeMatchDurationSec } from '../src/game/types';
 
 export interface Env {
   GAME_ROOM: DurableObjectNamespace<GameRoom>;
@@ -29,6 +29,8 @@ interface SocketAttachment {
 
 const VALID_FACTIONS: Set<FactionId> = new Set(['royal', 'shadow', 'mercenary']);
 const VALID_DIFFICULTIES = new Set(['relaxed', 'standard', 'hard']);
+const VALID_MODES: Set<GameMode> = new Set(['frontier', 'siege']);
+const VALID_SIEGE_DURATIONS = new Set<SiegeMatchDurationSec>([900, 1080, 1200]);
 
 function validFaction(raw: unknown): FactionId {
   return typeof raw === 'string' && VALID_FACTIONS.has(raw as FactionId) ? (raw as FactionId) : 'royal';
@@ -38,20 +40,33 @@ function validDifficulty(raw: unknown): 'relaxed' | 'standard' | 'hard' {
   return typeof raw === 'string' && VALID_DIFFICULTIES.has(raw) ? (raw as 'relaxed' | 'standard' | 'hard') : 'standard';
 }
 
+function validMode(raw: unknown): GameMode {
+  return typeof raw === 'string' && VALID_MODES.has(raw as GameMode) ? (raw as GameMode) : 'frontier';
+}
+
+function validSiegeDuration(raw: unknown): SiegeMatchDurationSec {
+  return typeof raw === 'number' && VALID_SIEGE_DURATIONS.has(raw as SiegeMatchDurationSec)
+    ? (raw as SiegeMatchDurationSec)
+    : 1080;
+}
+
 export class GameRoom extends DurableObject<Env> {
   private room: RoomLobbyState | null = null;
+  private reconnectTokens: Record<string, string> = {};
   private rateTracker = new Map<string, { sec: number; count: number }>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.blockConcurrencyWhile(async () => {
       this.room = (await this.ctx.storage.get<RoomLobbyState>('room')) ?? null;
+      this.reconnectTokens = (await this.ctx.storage.get<Record<string, string>>('tokens')) ?? {};
     });
   }
 
   private async persistRoom(): Promise<void> {
     if (!this.room) return;
     await this.ctx.storage.put('room', this.room);
+    await this.ctx.storage.put('tokens', this.reconnectTokens);
   }
 
   private async scheduleCleanupAt(timestampMs: number): Promise<void> {
@@ -100,6 +115,7 @@ export class GameRoom extends DurableObject<Env> {
       this.broadcast({ type: 'room_closed', reason });
     }
     this.room = null;
+    this.reconnectTokens = {};
     this.rateTracker.clear();
     for (const sock of this.ctx.getWebSockets()) {
       try {
@@ -145,7 +161,58 @@ export class GameRoom extends DurableObject<Env> {
     const [client, server] = Object.values(pair);
 
     const activeSockets = this.ctx.getWebSockets().filter((s) => s.readyState === 1);
+    const name = sanitizeNickname(url.searchParams.get('name') ?? '', '特戰隊員');
+    const resumePeerId = (url.searchParams.get('resumePeerId') ?? '').trim();
+    const resumeToken = (url.searchParams.get('resumeToken') ?? '').trim();
+
     if (this.room && this.room.phase === 'playing') {
+      const rejoinPlayer = this.room.players.find(
+        (p) =>
+          !p.isHost &&
+          ((resumePeerId.length > 0 &&
+            resumeToken.length > 0 &&
+            p.peerId === resumePeerId &&
+            this.reconnectTokens[p.peerId] === resumeToken) ||
+            (p.disconnected === true && p.name.toLowerCase() === name.toLowerCase()))
+      );
+      if (rejoinPlayer) {
+        for (const existingSock of this.ctx.getWebSockets()) {
+          const oldAtt = existingSock.deserializeAttachment() as SocketAttachment | null;
+          if (oldAtt?.peerId === rejoinPlayer.peerId && existingSock.readyState === 1) {
+            try {
+              existingSock.close(4005, 'Reconnected from another session');
+            } catch {
+              // ignore
+            }
+          }
+        }
+        rejoinPlayer.disconnected = false;
+        if (!this.reconnectTokens[rejoinPlayer.peerId]) {
+          this.reconnectTokens[rejoinPlayer.peerId] = crypto.randomUUID().replace(/-/g, '').slice(0, 20);
+        }
+        this.ctx.acceptWebSocket(server);
+        server.serializeAttachment({
+          peerId: rejoinPlayer.peerId,
+          isHost: false,
+          joinedAt: Date.now(),
+        } satisfies SocketAttachment);
+        this.room.expiresAt = Date.now() + MAX_MATCH_DURATION_MS;
+        await this.persistRoom();
+        await this.ctx.storage.setAlarm(this.room.expiresAt);
+        this.sendTo(server, {
+          type: 'welcome',
+          peerId: rejoinPlayer.peerId,
+          lobby: this.room,
+          reconnectToken: this.reconnectTokens[rejoinPlayer.peerId],
+        });
+        this.sendTo(server, {
+          type: 'match_started',
+          lobby: this.room,
+        });
+        this.broadcast({ type: 'peer_rejoined', peerId: rejoinPlayer.peerId, name: rejoinPlayer.name }, rejoinPlayer.peerId);
+        this.broadcast({ type: 'lobby_state', lobby: this.room }, rejoinPlayer.peerId);
+        return new Response(null, { status: 101, webSocket: client });
+      }
       this.ctx.acceptWebSocket(server);
       this.sendTo(server, {
         type: 'error',
@@ -167,7 +234,8 @@ export class GameRoom extends DurableObject<Env> {
     }
 
     const peerId = crypto.randomUUID().slice(0, 8);
-    const name = sanitizeNickname(url.searchParams.get('name') ?? '', '特戰隊員');
+    const reconnectToken = crypto.randomUUID().replace(/-/g, '').slice(0, 20);
+    this.reconnectTokens[peerId] = reconnectToken;
     const faction = validFaction(url.searchParams.get('faction'));
     const skinId = (url.searchParams.get('skinId') ?? 'royal_vanguard').slice(0, 48);
 
@@ -214,6 +282,7 @@ export class GameRoom extends DurableObject<Env> {
       type: 'welcome',
       peerId,
       lobby: this.room,
+      reconnectToken,
     });
     this.broadcast({ type: 'lobby_state', lobby: this.room }, peerId);
 
@@ -273,6 +342,9 @@ export class GameRoom extends DurableObject<Env> {
         target.name = sanitizeNickname(msg.name, target.name);
         target.faction = validFaction(msg.faction);
         target.skinId = String(msg.skinId || target.skinId).slice(0, 48);
+        if (msg.siegeLoadout) {
+          target.siegeLoadout = msg.siegeLoadout;
+        }
         await this.scheduleCleanupAt(Date.now() + LOBBY_IDLE_TIMEOUT_MS);
         this.broadcast({ type: 'lobby_state', lobby: this.room });
         return;
@@ -280,6 +352,12 @@ export class GameRoom extends DurableObject<Env> {
 
       case 'update_room_settings': {
         if (!attachment.isHost || this.room.phase === 'playing') return;
+        if (msg.mode !== undefined) {
+          this.room.mode = validMode(msg.mode);
+        }
+        if (msg.siegeDurationSec !== undefined) {
+          this.room.siegeDurationSec = validSiegeDuration(msg.siegeDurationSec);
+        }
         this.room.mapId = String(msg.mapId || 'tokyo_shrine').slice(0, 80);
         this.room.customMap = msg.customMap;
         this.room.difficulty = validDifficulty(msg.difficulty);
@@ -290,6 +368,12 @@ export class GameRoom extends DurableObject<Env> {
 
       case 'start_match': {
         if (!attachment.isHost) return;
+        if (msg.mode !== undefined) {
+          this.room.mode = validMode(msg.mode);
+        }
+        if (msg.siegeDurationSec !== undefined) {
+          this.room.siegeDurationSec = validSiegeDuration(msg.siegeDurationSec);
+        }
         this.room.mapId = String(msg.mapId || this.room.mapId).slice(0, 80);
         this.room.customMap = msg.customMap;
         this.room.difficulty = validDifficulty(msg.difficulty);
@@ -309,6 +393,12 @@ export class GameRoom extends DurableObject<Env> {
 
       case 'return_to_lobby': {
         if (!attachment.isHost) return;
+        for (const p of this.room.players) {
+          if (p.disconnected) {
+            delete this.reconnectTokens[p.peerId];
+          }
+        }
+        this.room.players = this.room.players.filter((p) => !p.disconnected);
         this.room.phase = 'lobby';
         await this.scheduleCleanupAt(Date.now() + LOBBY_IDLE_TIMEOUT_MS);
         this.broadcast({ type: 'lobby_state', lobby: this.room });
@@ -330,28 +420,44 @@ export class GameRoom extends DurableObject<Env> {
     const att = ws.deserializeAttachment() as SocketAttachment | null;
     if (!att) return;
 
+    const superseded = this.ctx.getWebSockets().some((s) => {
+      if (s === ws || s.readyState !== 1) return false;
+      const other = s.deserializeAttachment() as SocketAttachment | null;
+      return other?.peerId === att.peerId;
+    });
+    if (superseded) return;
+
     if (att.isHost) {
       await this.cleanupRoom(4004, '房主已離線，房間資源已即時釋放');
       return;
     }
 
     const leaving = this.room.players.find((p) => p.peerId === att.peerId);
-    this.room.players = this.room.players.filter((p) => p.peerId !== att.peerId);
-
     const remainingOpen = this.ctx.getWebSockets().filter((s) => s !== ws && s.readyState === 1);
-    if (remainingOpen.length === 0 || this.room.players.length === 0) {
+    if (remainingOpen.length === 0) {
+      await this.cleanupRoom(1000, '所有玩家已離開，房間已清除');
+      return;
+    }
+
+    if (this.room.phase === 'playing') {
+      if (leaving) {
+        leaving.disconnected = true;
+        await this.persistRoom();
+        this.broadcast({ type: 'peer_left', peerId: leaving.peerId, name: leaving.name, canRejoin: true });
+        this.broadcast({ type: 'lobby_state', lobby: this.room });
+      }
+      return;
+    }
+
+    this.room.players = this.room.players.filter((p) => p.peerId !== att.peerId);
+    delete this.reconnectTokens[att.peerId];
+    if (this.room.players.length === 0) {
       await this.cleanupRoom(1000, '所有玩家已離開，房間已清除');
       return;
     }
 
     await this.persistRoom();
-    if (this.room.phase === 'playing') {
-      if (leaving) {
-        this.broadcast({ type: 'peer_left', peerId: leaving.peerId, name: leaving.name });
-      }
-    } else {
-      this.broadcast({ type: 'lobby_state', lobby: this.room });
-    }
+    this.broadcast({ type: 'lobby_state', lobby: this.room });
   }
 
   public async alarm(): Promise<void> {

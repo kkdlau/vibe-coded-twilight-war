@@ -13,9 +13,18 @@ import {
   Wifi,
 } from 'lucide-react';
 import { CustomMapData } from '../game/customMaps';
-import { FACTIONS, FACTION_CHARACTERS, MAP_CATALOG } from '../game/data';
+import { FACTIONS, FACTION_CHARACTERS, GUNS, MAP_CATALOG, MELEES } from '../game/data';
+import {
+  SIEGE_DURATION_OPTIONS,
+  SIEGE_PASSIVES,
+  SIEGE_TACTICAL_SKILLS,
+  SIEGE_ULTIMATE_SKILLS,
+  getDefaultSiegeLoadout,
+  sanitizeSiegeLoadout,
+} from '../game/siegeData';
+import { SIEGE_MAP_ID } from '../game/siegeMap';
 import { AI_DIFFICULTY, type AiDifficulty } from '../game/tuning';
-import { FactionId } from '../game/types';
+import { FactionId, GameMode, SiegeMatchDurationSec, SiegePlayerLoadout } from '../game/types';
 import {
   MAX_ROOM_PLAYERS,
   RoomLobbyState,
@@ -28,6 +37,48 @@ import { MiniMapPreview } from './MiniMapPreview';
 import { CharacterAvatarSvg, FactionLogoSvg } from './WeaponArt';
 
 const NICKNAME_STORAGE_KEY = 'twilight_wars_mp_nickname_v1';
+const RECONNECT_STORAGE_KEY = 'twilight_wars_reconnect_v1';
+
+interface SavedReconnectSeat {
+  peerId: string;
+  token: string;
+  name: string;
+}
+
+function loadReconnectSeat(roomCode: string): SavedReconnectSeat | null {
+  try {
+    const raw = localStorage.getItem(RECONNECT_STORAGE_KEY);
+    if (!raw) return null;
+    const map = JSON.parse(raw) as Record<string, SavedReconnectSeat>;
+    return map[roomCode] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function saveReconnectSeat(roomCode: string, seat: SavedReconnectSeat) {
+  try {
+    const raw = localStorage.getItem(RECONNECT_STORAGE_KEY);
+    const map = raw ? (JSON.parse(raw) as Record<string, SavedReconnectSeat>) : {};
+    map[roomCode] = seat;
+    localStorage.setItem(RECONNECT_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
+}
+
+function clearReconnectSeat(roomCode?: string | null) {
+  if (!roomCode) return;
+  try {
+    const raw = localStorage.getItem(RECONNECT_STORAGE_KEY);
+    if (!raw) return;
+    const map = JSON.parse(raw) as Record<string, SavedReconnectSeat>;
+    delete map[roomCode];
+    localStorage.setItem(RECONNECT_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
+}
 
 export interface ActiveMultiplayerSession {
   transport: RoomTransport;
@@ -70,6 +121,11 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
 
   const [selectedFaction, setSelectedFaction] = useState<FactionId>('royal');
   const [selectedSkinId, setSelectedSkinId] = useState<string>(FACTION_CHARACTERS.royal[0].id);
+  const [selectedLoadout, setSelectedLoadout] = useState<SiegePlayerLoadout>(() =>
+    getDefaultSiegeLoadout('royal', FACTION_CHARACTERS.royal[0].id)
+  );
+  const [roomMode, setRoomMode] = useState<GameMode>('frontier');
+  const [siegeDurationSec, setSiegeDurationSec] = useState<SiegeMatchDurationSec>(1080);
   const [mapChoice, setMapChoice] = useState<string>('random');
   const [difficulty, setDifficulty] = useState<AiDifficulty>('standard');
 
@@ -82,19 +138,34 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
   const localPeerIdRef = useRef<string | null>(existingSession?.localPeerId ?? null);
   const listenerCleanupRef = useRef<(() => void) | null>(null);
   const handedOffToBattleRef = useRef<boolean>(false);
+  const autoRejoinAttemptedRef = useRef<boolean>(false);
 
   useEffect(() => {
+    let cancelled = false;
     fetch('/api/health')
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { passcodeRequired?: boolean } | null) => {
-        if (data?.passcodeRequired) {
+        if (cancelled) return;
+        const req = Boolean(data?.passcodeRequired);
+        if (req) {
           setPasscodeRequired(true);
           setShowPasscodeField(true);
+        }
+        const normalizedInit = normalizeRoomCode(initialRoomCode);
+        if (!req && normalizedInit && !existingSession && !autoRejoinAttemptedRef.current) {
+          const savedSeat = loadReconnectSeat(normalizedInit);
+          if (savedSeat) {
+            autoRejoinAttemptedRef.current = true;
+            void connectToRoom(normalizedInit, savedSeat.name);
+          }
         }
       })
       .catch(() => {
         // ignore if offline/unavailable during preview
       });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Wire listeners onto current transport (either freshly connected or returning from battle)
@@ -109,6 +180,14 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
     const offMsg = transport.onMessage((msg) => {
       if (msg.type === 'welcome') {
         localPeerIdRef.current = msg.peerId;
+        if (msg.reconnectToken) {
+          const me = msg.lobby.players.find((p) => p.peerId === msg.peerId);
+          saveReconnectSeat(msg.lobby.roomCode, {
+            peerId: msg.peerId,
+            token: msg.reconnectToken,
+            name: me?.name ?? sanitizeNickname(nickname),
+          });
+        }
         const nextSess: ActiveMultiplayerSession = {
           transport,
           lobby: msg.lobby,
@@ -144,6 +223,7 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
         onSessionUpdate(nextSess);
         targetOnStart(nextSess);
       } else if (msg.type === 'room_closed') {
+        clearReconnectSeat(session?.lobby.roomCode ?? joinCodeInput);
         setErrorMsg(msg.reason || '房間已關閉');
         setSession(null);
         onSessionUpdate(null);
@@ -186,14 +266,14 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
     };
   }, [onMatchStarted]);
 
-  const connectToRoom = async (roomCode: string) => {
+  const connectToRoom = async (roomCode: string, overrideName?: string) => {
     const normalized = normalizeRoomCode(roomCode);
     if (!normalized) {
       setErrorMsg('請輸入有效的 6 位英數字房號。');
       return;
     }
 
-    const cleanName = sanitizeNickname(nickname);
+    const cleanName = sanitizeNickname(overrideName ?? nickname);
     try {
       localStorage.setItem(NICKNAME_STORAGE_KEY, cleanName);
     } catch {
@@ -219,6 +299,7 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
       // fallback to WS attempt
     }
 
+    const savedSeat = loadReconnectSeat(normalized);
     transportRef.current?.disconnect('Switching room');
     const transport = new WebSocketRoomTransport();
     transportRef.current = transport;
@@ -229,10 +310,13 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
       faction: selectedFaction,
       skinId: selectedSkinId,
       passcode: passcode.trim() || undefined,
+      resumePeerId: savedSeat?.peerId,
+      resumeToken: savedSeat?.token,
     });
   };
 
   const handleLeaveRoom = () => {
+    clearReconnectSeat(session?.lobby.roomCode);
     transportRef.current?.disconnect('Player left lobby');
     transportRef.current = null;
     localPeerIdRef.current = null;
@@ -245,15 +329,27 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
     onBackToPortal();
   };
 
-  const pushProfileUpdate = (nextName: string, nextFaction: FactionId, nextSkinId: string) => {
+  const pushProfileUpdate = (
+    nextName: string,
+    nextFaction: FactionId,
+    nextSkinId: string,
+    nextLoadout?: SiegePlayerLoadout
+  ) => {
     setSelectedFaction(nextFaction);
     setSelectedSkinId(nextSkinId);
+    const effFac = nextFaction === 'shadow' ? 'shadow' : 'royal';
+    const resolvedLoadout = sanitizeSiegeLoadout(
+      effFac,
+      nextLoadout ?? getDefaultSiegeLoadout(effFac, nextSkinId)
+    );
+    setSelectedLoadout(resolvedLoadout);
     if (session) {
       session.transport.send({
         type: 'update_profile',
         name: sanitizeNickname(nextName),
         faction: nextFaction,
         skinId: nextSkinId,
+        siegeLoadout: resolvedLoadout,
       });
     }
   };
@@ -263,14 +359,31 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
     pushProfileUpdate(nickname, fac, firstSkin);
   };
 
-  const handleHostSettingsChange = (nextMapChoice: string, nextDiff: AiDifficulty) => {
+  const handleHostSettingsChange = (
+    nextMapChoice: string,
+    nextDiff: AiDifficulty,
+    nextMode: GameMode = roomMode,
+    nextDur: SiegeMatchDurationSec = siegeDurationSec
+  ) => {
+    setRoomMode(nextMode);
+    setSiegeDurationSec(nextDur);
     setMapChoice(nextMapChoice);
     setDifficulty(nextDiff);
+    if (nextMode === 'siege' && selectedFaction === 'mercenary') {
+      handleFactionClick('royal');
+    }
     if (!session?.isHost) return;
-    const resolvedMapId = nextMapChoice === 'random' ? MAP_CATALOG[0].id : nextMapChoice;
-    const custom = customMaps.find((m) => m.id === nextMapChoice);
+    const resolvedMapId =
+      nextMode === 'siege'
+        ? SIEGE_MAP_ID
+        : nextMapChoice === 'random'
+          ? MAP_CATALOG[0].id
+          : nextMapChoice;
+    const custom = nextMode === 'siege' ? undefined : customMaps.find((m) => m.id === nextMapChoice);
     session.transport.send({
       type: 'update_room_settings',
+      mode: nextMode,
+      siegeDurationSec: nextDur,
       mapId: resolvedMapId,
       customMap: custom,
       difficulty: nextDiff,
@@ -279,11 +392,19 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
 
   const handleStartMatch = () => {
     if (!session?.isHost) return;
+    const effectiveMode = activeLobby?.mode ?? roomMode;
+    const effectiveDur = activeLobby?.siegeDurationSec ?? siegeDurationSec;
     const finalMapId =
-      mapChoice === 'random' ? MAP_CATALOG[Math.floor(Math.random() * MAP_CATALOG.length)].id : mapChoice;
-    const custom = customMaps.find((m) => m.id === finalMapId);
+      effectiveMode === 'siege'
+        ? SIEGE_MAP_ID
+        : mapChoice === 'random'
+          ? MAP_CATALOG[Math.floor(Math.random() * MAP_CATALOG.length)].id
+          : mapChoice;
+    const custom = effectiveMode === 'siege' ? undefined : customMaps.find((m) => m.id === finalMapId);
     session.transport.send({
       type: 'start_match',
+      mode: effectiveMode,
+      siegeDurationSec: effectiveDur,
       mapId: finalMapId,
       customMap: custom,
       difficulty,
@@ -552,6 +673,11 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
                                 你
                               </span>
                             )}
+                            {pl.disconnected && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold">
+                                暫離 (AI 託管)
+                              </span>
+                            )}
                           </div>
                           <div className="text-xs text-slate-400 truncate">
                             {fac.name} · {skin.name}
@@ -566,8 +692,8 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
               {/* Local Faction & Skin Controls */}
               <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 space-y-4">
                 <h3 className="text-sm font-bold text-white">切換我的陣營與造型</h3>
-                <div className="grid grid-cols-3 gap-2.5">
-                  {(['royal', 'shadow', 'mercenary'] as FactionId[]).map((fac) => {
+                <div className={`grid gap-2.5 ${(activeLobby.mode ?? 'frontier') === 'siege' ? 'grid-cols-2' : 'grid-cols-3'}`}>
+                  {(((activeLobby.mode ?? 'frontier') === 'siege' ? ['royal', 'shadow'] : ['royal', 'shadow', 'mercenary']) as FactionId[]).map((fac) => {
                     const active = selectedFaction === fac;
                     return (
                       <button
@@ -606,6 +732,84 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
                     );
                   })}
                 </div>
+
+                {(activeLobby.mode ?? 'frontier') === 'siege' && (
+                  <div className="pt-3 border-t border-slate-800 space-y-2">
+                    <div className="text-xs font-bold text-amber-300">三路攻防配裝與技能變種</div>
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
+                      <select
+                        value={selectedLoadout.gunId}
+                        onChange={(e) =>
+                          pushProfileUpdate(nickname, selectedFaction, selectedSkinId, {
+                            ...selectedLoadout,
+                            gunId: e.target.value,
+                          })
+                        }
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-slate-100"
+                      >
+                        {GUNS.map((g) => (
+                          <option key={g.id} value={g.id}>{g.name}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={selectedLoadout.meleeId}
+                        onChange={(e) =>
+                          pushProfileUpdate(nickname, selectedFaction, selectedSkinId, {
+                            ...selectedLoadout,
+                            meleeId: e.target.value,
+                          })
+                        }
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-slate-100"
+                      >
+                        {MELEES.map((m) => (
+                          <option key={m.id} value={m.id}>{m.name}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={selectedLoadout.tacticalId}
+                        onChange={(e) =>
+                          pushProfileUpdate(nickname, selectedFaction, selectedSkinId, {
+                            ...selectedLoadout,
+                            tacticalId: e.target.value as SiegePlayerLoadout['tacticalId'],
+                          })
+                        }
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-slate-100"
+                      >
+                        {SIEGE_TACTICAL_SKILLS.filter((s) => s.faction === (selectedFaction === 'shadow' ? 'shadow' : 'royal')).map((s) => (
+                          <option key={s.id} value={s.id}>{s.name}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={selectedLoadout.ultimateId}
+                        onChange={(e) =>
+                          pushProfileUpdate(nickname, selectedFaction, selectedSkinId, {
+                            ...selectedLoadout,
+                            ultimateId: e.target.value as SiegePlayerLoadout['ultimateId'],
+                          })
+                        }
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-slate-100"
+                      >
+                        {SIEGE_ULTIMATE_SKILLS.filter((s) => s.faction === (selectedFaction === 'shadow' ? 'shadow' : 'royal')).map((s) => (
+                          <option key={s.id} value={s.id}>{s.name}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={selectedLoadout.passiveId}
+                        onChange={(e) =>
+                          pushProfileUpdate(nickname, selectedFaction, selectedSkinId, {
+                            ...selectedLoadout,
+                            passiveId: e.target.value as SiegePlayerLoadout['passiveId'],
+                          })
+                        }
+                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-slate-100"
+                      >
+                        {SIEGE_PASSIVES.filter((s) => s.faction === (selectedFaction === 'shadow' ? 'shadow' : 'royal')).map((s) => (
+                          <option key={s.id} value={s.id}>{s.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -618,7 +822,9 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
                 </span>
               </div>
 
-              {activeLobby.customMap ? (
+              {(activeLobby.mode ?? roomMode) === 'siege' ? (
+                <MiniMapPreview mapId={SIEGE_MAP_ID} className="h-44 w-full" />
+              ) : activeLobby.customMap ? (
                 <div className="rounded-xl border border-slate-700 bg-slate-950 p-4 text-center space-y-1">
                   <div className="text-sm font-bold text-amber-300">自創地圖：{activeLobby.customMap.name}</div>
                   <div className="text-xs text-slate-400">
@@ -632,25 +838,68 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
               {session?.isHost ? (
                 <>
                   <div className="space-y-1.5">
-                    <label className="text-xs font-bold text-slate-300">選擇地圖</label>
-                    <select
-                      value={mapChoice}
-                      onChange={(e) => handleHostSettingsChange(e.target.value, difficulty)}
-                      className="w-full rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-xs text-white"
-                    >
-                      <option value="random">隨機地圖</option>
-                      {MAP_CATALOG.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.name}（{m.environment}）
-                        </option>
+                    <label className="text-xs font-bold text-slate-300">遊戲模式</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {([
+                        { id: 'frontier' as GameMode, label: '經典混戰' },
+                        { id: 'siege' as GameMode, label: '三路塔防 MOBA' },
+                      ]).map((m) => (
+                        <button
+                          key={m.id}
+                          onClick={() => handleHostSettingsChange(mapChoice, difficulty, m.id, siegeDurationSec)}
+                          className={`py-2 rounded-lg text-xs font-bold border cursor-pointer ${
+                            roomMode === m.id
+                              ? 'bg-sky-500 text-slate-950 border-sky-400'
+                              : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600'
+                          }`}
+                        >
+                          {m.label}
+                        </button>
                       ))}
-                      {customMaps.map((cm) => (
-                        <option key={cm.id} value={cm.id}>
-                          自創：{cm.name}
-                        </option>
-                      ))}
-                    </select>
+                    </div>
                   </div>
+
+                  {roomMode === 'siege' ? (
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-slate-300">對戰時長（光暈裂谷 5v5）</label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {SIEGE_DURATION_OPTIONS.map((opt) => (
+                          <button
+                            key={opt.sec}
+                            onClick={() => handleHostSettingsChange(mapChoice, difficulty, 'siege', opt.sec)}
+                            className={`py-2 rounded-lg text-xs font-bold border cursor-pointer ${
+                              siegeDurationSec === opt.sec
+                                ? 'bg-amber-500 text-slate-950 border-amber-400'
+                                : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600'
+                            }`}
+                          >
+                            {opt.sec / 60} 分鐘
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-slate-300">選擇地圖</label>
+                      <select
+                        value={mapChoice}
+                        onChange={(e) => handleHostSettingsChange(e.target.value, difficulty)}
+                        className="w-full rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-xs text-white"
+                      >
+                        <option value="random">隨機地圖</option>
+                        {MAP_CATALOG.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.name}（{m.environment}）
+                          </option>
+                        ))}
+                        {customMaps.map((cm) => (
+                          <option key={cm.id} value={cm.id}>
+                            自創：{cm.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-slate-300">AI 補位強度</label>

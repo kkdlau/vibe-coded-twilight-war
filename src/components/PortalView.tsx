@@ -20,6 +20,7 @@ interface PortalViewProps {
   reputations: Record<FactionId, number>;
   customMapCount: number;
   onSelectFaction: (faction: FactionId, preselectedMapId?: MapId) => void;
+  onOpenSiegeMode: () => void;
   onOpenMapEditor: () => void;
   onOpenMultiplayer: () => void;
   onClearRecords: () => void;
@@ -394,6 +395,7 @@ export const PortalView: React.FC<PortalViewProps> = ({
   reputations,
   customMapCount,
   onSelectFaction,
+  onOpenSiegeMode,
   onOpenMapEditor,
   onOpenMultiplayer,
   onClearRecords,
@@ -421,7 +423,7 @@ export const PortalView: React.FC<PortalViewProps> = ({
         <line x1="840" y1="130" x2="500" y2="575" stroke="#A21CAF" strokeWidth="1.5" strokeDasharray="6 8" />
       </svg>
 
-      {/* Center Minimal Title */}
+      {/* Center Minimal Title + New Siege MOBA Mode CTA */}
       <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-6 text-center -translate-y-6">
         <div className="text-[11px] tracking-[0.35em] text-amber-400/90 uppercase font-semibold mb-2">
           TWILIGHT WARS
@@ -430,8 +432,15 @@ export const PortalView: React.FC<PortalViewProps> = ({
           光暈戰記
         </h1>
         <p className="mt-3 text-xs sm:text-sm text-slate-400">
-          點擊任一陣營徽章進入整備室出戰
+          點擊任一陣營徽章進入經典對戰，或遊玩全新 5v5 推塔模式
         </p>
+        <button
+          onClick={onOpenSiegeMode}
+          className="pointer-events-auto mt-5 flex items-center gap-2.5 px-6 py-3 rounded-2xl bg-gradient-to-r from-sky-500 via-indigo-500 to-fuchsia-600 hover:brightness-110 text-white font-extrabold text-sm sm:text-base shadow-[0_6px_28px_rgba(99,102,241,0.45)] border border-white/25 transition-all cursor-pointer"
+        >
+          <Shield className="w-5 h-5" />
+          <span>三路城堡攻防戰（塔防 MOBA）</span>
+        </button>
       </div>
 
       {/* TOP-LEFT: Royal Crest Logo */}
@@ -982,6 +991,16 @@ export const PortalView: React.FC<PortalViewProps> = ({
                       </p>
                       <p className="text-slate-300">
                         • 皇家擊殺天影：皇家 +1、天影 -1（天影殺皇家亦同）；擊殺第三勢力只加己方聲望不扣第三聲望；第三勢力擊殺皇家/天影會扣該陣營聲望。
+                      </p>
+                    </div>
+
+                    <div className="md:col-span-2 bg-slate-900/80 border border-indigo-500/35 rounded-xl p-4 space-y-1.5">
+                      <div className="text-sm font-bold text-indigo-300">新模式：三路城堡攻防戰（5v5 塔防 MOBA）</div>
+                      <p className="text-slate-300">
+                        • <strong>皇家 vs 天影 5v5 無限復活</strong>：摧毀敵方「外塔 → 高地塔 → 主城堡」即勝利；取消地上撿武器，改用<strong>自訂雙手武裝 ＋ 陣營技能變種配置</strong>（按 <strong>E / 右鍵</strong>放戰術技、<strong>F / 滿氣</strong>放大招、<strong>B</strong> 回城、<strong>3–6</strong> 於泉水升級）。
+                      </p>
+                      <p className="text-slate-300">
+                        • <strong>第三勢力野區與雙 Boss</strong>：3 分鐘下河道「幻沙先鋒（召喚中路攻城車）」、8 分鐘上河道「狂戰巨神（全隊 90s 吸血攻城 Buff）」；最後 3 分鐘進入雙倍兵線總攻時刻。
                       </p>
                     </div>
                   </div>
