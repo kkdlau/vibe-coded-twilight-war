@@ -39,6 +39,7 @@ import {
   createHeroSiegeState,
   createSiegeRuntime,
   getBossDisplayName,
+  getSiegeGunProfile,
   grantSiegeXpAndGold,
   pickSiegeAiHeroTemplate,
   refreshStructureInvulnerability,
@@ -168,6 +169,7 @@ interface RemoteHumanRuntime {
   respawnTimer: number;
   rifleRecoilAngle: number;
   chargeSessionAllowed: boolean;
+  qiFastRefund?: boolean;
   meleeHeldSeconds: number;
   lastAttackAt: number;
   delayCancelReady: boolean;
@@ -300,6 +302,7 @@ export class TwilightEngine {
   private mouseScreen = { x: 640, y: 360 };
   private mouseDown = false;
   private chargeSessionAllowed = false;
+  private qiFastRefund = false;
   private meleeHeldSeconds = 0;
   private crosshairBloom = 0;
   private crosshairBloomDelay = 0;
@@ -1530,10 +1533,13 @@ export class TwilightEngine {
   public clearInputs() {
     this.keys.clear();
     this.mouseDown = false;
-    this.cancelMeleeCharge();
+    this.cancelMeleeCharge(false);
   }
 
-  private cancelMeleeCharge() {
+  private cancelMeleeCharge(refundAbortedQi = true) {
+    if (refundAbortedQi && this.player.chargingMelee && !this.player.chargeReady && this.player.freezeTimer <= 0) {
+      this.qiFastRefund = true;
+    }
     this.player.chargingMelee = false;
     this.player.chargeReady = false;
     this.chargeSessionAllowed = false;
@@ -1641,10 +1647,11 @@ export class TwilightEngine {
       }
     } else if (!down && this.mouseDown) {
       this.mouseDown = false;
-      if (weapon.type === 'melee' && this.player.chargeReady) {
+      const dischargedReadyUlt = weapon.type === 'melee' && this.player.chargeReady;
+      if (dischargedReadyUlt) {
         this.performMeleeAttack();
       }
-      this.cancelMeleeCharge();
+      this.cancelMeleeCharge(!dischargedReadyUlt);
     }
   }
 
@@ -1834,9 +1841,10 @@ export class TwilightEngine {
     let reloadMult = 1;
     if (this.siege) {
       const ps = this.siege.playerState;
-      reloadMult -= (ps.upgrades.firepower ?? 0) * 0.08;
+      reloadMult = getSiegeGunProfile(weapon.def.kind).reloadMult;
+      reloadMult -= (ps.upgrades.firepower ?? 0) * 0.06;
       if (ps.loadout.passiveId === 'royal_steady_aim') reloadMult -= 0.15;
-      reloadMult = Math.max(0.55, reloadMult);
+      reloadMult = Math.max(0.45, reloadMult);
     }
     weapon.reloadTimer = weapon.def.reloadTime * reloadMult;
     sfx.reload(weapon.def.kind, 'start');
@@ -1946,9 +1954,10 @@ export class TwilightEngine {
       }
 
       const gun = weapon.def;
+      const gunProfile = this.siege ? getSiegeGunProfile(gun.kind) : null;
       const pelletsToFire = gun.kind === 'shotgun' ? Math.max(1, Math.min(gun.pellets, weapon.ammoInMag)) : gun.pellets;
       const ammoCost = gun.kind === 'shotgun' ? pelletsToFire : 1;
-      p.attackCooldown = 1 / gun.fireRate;
+      p.attackCooldown = 1 / (gun.fireRate * (gunProfile?.fireRateMult ?? 1));
       p.gunfireTimer = GUNFIRE_ANIMATION_SECONDS;
       p.lastAttackAt = this.time;
       p.delayCancelReady = true;
@@ -2003,18 +2012,27 @@ export class TwilightEngine {
         if (candidates.length > 0) {
           const hitInfo = candidates[0];
           const hitDist = dist(fullSeg.x1, fullSeg.y1, hitInfo.hitX, hitInfo.hitY);
-          const firepowerMult = this.siege ? 1 + (this.siege.playerState.upgrades.firepower ?? 0) * 0.14 : 1;
+          const firepowerMult = this.siege ? 1 + (this.siege.playerState.upgrades.firepower ?? 0) * 0.12 : 1;
+          const rangeMult = this.siege ? 1 + (this.siege.playerState.upgrades.firepower ?? 0) * 0.08 : 1;
           const levelMult = this.siege ? computeSiegeLevelAttackMult(this.siege.playerState.level) : 1;
-          const falloffMult = this.siege ? computeSiegeGunFalloffMult(gun.kind, hitDist) : 1;
+          const falloffMult = this.siege ? computeSiegeGunFalloffMult(gun.kind, hitDist, rangeMult) : 1;
+          const profileDmgMult = gunProfile?.damageMult ?? 1;
           if (hitInfo.kind === 'structure') {
-            const maxShotDmg = gun.damage * comboMult * firepowerMult * levelMult * falloffMult;
+            const maxShotDmg =
+              gun.damage *
+              comboMult *
+              firepowerMult *
+              levelMult *
+              falloffMult *
+              profileDmgMult *
+              (gunProfile?.structureBonusMult ?? 1);
             this.damageSiegeStructure(hitInfo.structure, Math.max(1, Math.round(maxShotDmg)), 'player', p.faction);
             segEndX = hitInfo.hitX;
             segEndY = hitInfo.hitY;
           } else {
             const centerAccuracy = clamp(1 - hitInfo.perpDist / hitInfo.enemy.radius, 0, 1);
             const accuracyFactor = 0.28 + 0.72 * centerAccuracy;
-            const maxShotDmg = gun.damage * comboMult * firepowerMult * levelMult * falloffMult;
+            const maxShotDmg = gun.damage * comboMult * firepowerMult * levelMult * falloffMult * profileDmgMult;
             const actualDmg = Math.max(1, Math.round(maxShotDmg * accuracyFactor));
 
             if (hitInfo.enemy.royalShieldTimer > 0) {
@@ -2031,7 +2049,8 @@ export class TwilightEngine {
                 'player',
                 p.faction,
                 p.x,
-                p.y
+                p.y,
+                gunProfile?.defensePenetration ?? 0
               );
             }
 
@@ -2116,7 +2135,7 @@ export class TwilightEngine {
     }
     this.emitNetSfx('melee', p.x, p.y, melee.kind);
     const giantMult = p.giantTimer > 0 ? 1.3 : 1.0;
-    const bladeMult = this.siege ? 1 + (this.siege.playerState.upgrades.blade ?? 0) * 0.16 : 1.0;
+    const bladeMult = this.siege ? 1 + (this.siege.playerState.upgrades.blade ?? 0) * 0.14 : 1.0;
     const levelMult = this.siege ? computeSiegeLevelAttackMult(this.siege.playerState.level) : 1.0;
     const dmg = Math.round(melee.damage * comboMult * giantMult * bladeMult * levelMult);
     if (this.siege) {
@@ -2554,7 +2573,8 @@ export class TwilightEngine {
     attackerId: string,
     attackerFaction: FactionId,
     hitOriginX?: number,
-    hitOriginY?: number
+    hitOriginY?: number,
+    defensePenetration = 0
   ) {
     if ((enemy.invulnTimer ?? 0) > 0) return;
     const p = this.player;
@@ -2639,7 +2659,7 @@ export class TwilightEngine {
             })
           : 0;
       if (victimDef > 0) {
-        dmg = applySiegeDefenseReduction(dmg, victimDef);
+        dmg = applySiegeDefenseReduction(dmg, victimDef, defensePenetration);
       }
     }
 
@@ -2862,7 +2882,8 @@ export class TwilightEngine {
     attackerId?: string,
     hitOriginX?: number,
     hitOriginY?: number,
-    isFriendlyFire = false
+    isFriendlyFire = false,
+    defensePenetration = 0
   ) {
     const p = this.player;
     if (p.hp <= 0 || p.invulnTimer > 0) return;
@@ -2934,7 +2955,7 @@ export class TwilightEngine {
           }
         }
       }
-      dmg = applySiegeDefenseReduction(dmg, computeSiegeDefense(ps));
+      dmg = applySiegeDefenseReduction(dmg, computeSiegeDefense(ps), defensePenetration);
     }
 
     let finalDmg = rawDmg <= 0 ? 0 : Math.max(2, Math.round(dmg));
@@ -3472,9 +3493,15 @@ export class TwilightEngine {
   private updatePlayerQi(dt: number, repSpeedMult: number) {
     const p = this.player;
     if (!this.chargeSessionAllowed) {
-      p.qi = Math.min(p.maxQi, p.qi + QI_RATE.recover * repSpeedMult * dt);
+      const rate = this.qiFastRefund ? 360 : QI_RATE.recover * repSpeedMult;
+      p.qi = Math.min(p.maxQi, p.qi + rate * dt);
+      if (this.qiFastRefund && p.qi >= p.maxQi - 0.01) {
+        p.qi = p.maxQi;
+        this.qiFastRefund = false;
+      }
       return;
     }
+    this.qiFastRefund = false;
     if (p.chargeReady) return;
 
     let chargeDt = dt;
@@ -3553,7 +3580,7 @@ export class TwilightEngine {
         unit.freezeTimer = 5.0;
         this.clearTimedSkillsOnFreeze(unit);
         if (isPlayer) {
-          this.cancelMeleeCharge();
+          this.cancelMeleeCharge(false);
           if (!wasFrozen) {
             this.spawnText(unit.x, unit.y - 38, '冰凍 5s', '#38BDF8', 1.15);
             this.emitHud();
@@ -3591,7 +3618,7 @@ export class TwilightEngine {
 
     if (p.freezeTimer > 0) {
       this.clearTimedSkillsOnFreeze(p);
-      this.cancelMeleeCharge();
+      this.cancelMeleeCharge(false);
     }
 
     p.sizeScale = p.shrinkTimer > 0 ? 0.62 : p.giantTimer > 0 ? 1.32 : 1.0;
@@ -3606,10 +3633,10 @@ export class TwilightEngine {
     let repSpeedMult = getReputationQiMultiplier(activeRep);
     if (this.siege) {
       const ps = this.siege.playerState;
-      repSpeedMult *= 1 + (ps.upgrades.core ?? 0) * 0.18 + (ps.loadout.passiveId === 'shadow_swift_foot' ? 0.25 : 0);
+      repSpeedMult *= 1 + (ps.upgrades.core ?? 0) * 0.14 + (ps.loadout.passiveId === 'shadow_swift_foot' ? 0.25 : 0);
     }
     if (p.freezeTimer > 0) {
-      this.cancelMeleeCharge();
+      this.cancelMeleeCharge(false);
     } else {
       this.updatePlayerQi(dt, repSpeedMult);
     }
@@ -3640,7 +3667,10 @@ export class TwilightEngine {
         dirY: mv.y,
       });
     }
-    const weaponSpeedMult = weapon.def.moveSpeedMult;
+    const weaponSpeedMult =
+      this.siege && weapon.type === 'gun'
+        ? getSiegeGunProfile(weapon.def.kind).moveSpeedMult
+        : weapon.def.moveSpeedMult;
     const freezeSpeedMult = p.freezeTimer > 0 ? 0.9 : 1.0;
     const siegeSpeedMult = this.siege ? computeSiegeMoveSpeedMult(this.siege.playerState) : 1.0;
     const baseSpeed = PLAYER_MOVEMENT.speed * weaponSpeedMult * freezeSpeedMult * siegeSpeedMult;
@@ -4563,36 +4593,45 @@ export class TwilightEngine {
       if (candidates.length > 0) {
         const firstHit = candidates[0];
         const hitDist = dist(fullSeg.x1, fullSeg.y1, firstHit.hitX, firstHit.hitY);
+        const gunProfile = this.siege ? getSiegeGunProfile(gunDef.kind) : null;
         segEndX = firstHit.hitX;
         segEndY = firstHit.hitY;
 
         if (firstHit.kind === 'structure') {
           const heroState = this.getSiegeHeroState(e.id);
-          const fpMult = heroState ? 1 + (heroState.upgrades.firepower ?? 0) * 0.14 : 1;
+          const fpMult = heroState ? 1 + (heroState.upgrades.firepower ?? 0) * 0.12 : 1;
+          const rangeMult = heroState ? 1 + (heroState.upgrades.firepower ?? 0) * 0.08 : 1;
           const levelMult = this.siege && e.siegeUnitKind === 'hero'
             ? computeSiegeLevelAttackMult(heroState?.level ?? e.siegeLevel ?? 1)
             : 1;
-          const falloffMult = this.siege ? computeSiegeGunFalloffMult(gunDef.kind, hitDist) : 1;
+          const falloffMult = this.siege ? computeSiegeGunFalloffMult(gunDef.kind, hitDist, rangeMult) : 1;
           const auraMult =
             e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion'
               ? this.getSiegeMinionDamageMult(e)
               : 1;
-          const stDmg = Math.max(2, Math.round(gunDef.damage * 0.72 * fpMult * levelMult * falloffMult * auraMult));
+          const profileMult = (gunProfile?.damageMult ?? 1) * (gunProfile?.structureBonusMult ?? 1);
+          const stDmg = Math.max(2, Math.round(gunDef.damage * 0.72 * fpMult * levelMult * falloffMult * auraMult * profileMult));
           this.damageSiegeStructure(firstHit.structure, stDmg, e.id, e.faction);
         } else {
           const targetRadius = firstHit.kind === 'player' ? p.radius : firstHit.enemy.radius;
           const centerAccuracy = clamp(1 - firstHit.perpDist / targetRadius, 0, 1);
           const heroState = this.getSiegeHeroState(e.id);
-          const fpMult = heroState ? 1 + (heroState.upgrades.firepower ?? 0) * 0.14 : 1;
+          const fpMult = heroState ? 1 + (heroState.upgrades.firepower ?? 0) * 0.12 : 1;
+          const rangeMult = heroState ? 1 + (heroState.upgrades.firepower ?? 0) * 0.08 : 1;
           const levelMult = this.siege && e.siegeUnitKind === 'hero'
             ? computeSiegeLevelAttackMult(heroState?.level ?? e.siegeLevel ?? 1)
             : 1;
-          const falloffMult = this.siege ? computeSiegeGunFalloffMult(gunDef.kind, hitDist) : 1;
+          const falloffMult = this.siege ? computeSiegeGunFalloffMult(gunDef.kind, hitDist, rangeMult) : 1;
           const auraMult =
             e.siegeUnitKind === 'minion' || e.siegeUnitKind === 'super_minion'
               ? this.getSiegeMinionDamageMult(e)
               : 1;
-          const scaledDmg = Math.max(2, Math.round(gunDef.damage * (0.4 + 0.6 * centerAccuracy) * fpMult * levelMult * falloffMult * auraMult));
+          const profileMult = gunProfile?.damageMult ?? 1;
+          const defPen = gunProfile?.defensePenetration ?? 0;
+          const scaledDmg = Math.max(
+            2,
+            Math.round(gunDef.damage * (0.4 + 0.6 * centerAccuracy) * fpMult * levelMult * falloffMult * auraMult * profileMult)
+          );
 
           const target = firstHit.kind === 'player' ? p : firstHit.enemy;
           if (target.royalShieldTimer > 0) {
@@ -4600,9 +4639,9 @@ export class TwilightEngine {
           } else if (firstHit.kind === 'player') {
             const isHostileToPlayer = areHostile(e.faction, e.id, p.faction, 'player');
             if (isHostileToPlayer) {
-              this.damagePlayer(scaledDmg, false, e.id, e.x, e.y);
+              this.damagePlayer(scaledDmg, false, e.id, e.x, e.y, false, defPen);
             } else {
-              this.damagePlayer(Math.max(1, Math.round(scaledDmg * 0.5)), false, e.id, e.x, e.y, true);
+              this.damagePlayer(Math.max(1, Math.round(scaledDmg * 0.5)), false, e.id, e.x, e.y, true, defPen);
             }
           } else {
             this.damageEnemy(
@@ -4616,7 +4655,8 @@ export class TwilightEngine {
               e.id,
               e.faction,
               e.x,
-              e.y
+              e.y,
+              defPen
             );
           }
         }
@@ -5824,12 +5864,13 @@ export class TwilightEngine {
         }
 
         if (dealDamage && proj.healAllies) {
+          const healAmt = Math.max(35, Math.round(proj.damage * 1.1));
           if (p.hp > 0 && !proj.hitIds.has('player') && !areHostile(proj.ownerFaction, proj.ownerId, p.faction, 'player')) {
             const hit = segmentCircleHit(proj.prevX, proj.prevY, proj.x, proj.y, p.x, p.y, p.radius + proj.radius * 0.7);
             if (hit.hit) {
               proj.hitIds.add('player');
-              p.hp = Math.min(p.maxHp, p.hp + 35);
-              this.spawnText(p.x, p.y - 30, '+35', '#4ADE80', 0.95, true);
+              p.hp = Math.min(p.maxHp, p.hp + healAmt);
+              this.spawnText(p.x, p.y - 30, `+${healAmt}`, '#4ADE80', 0.95, true);
             }
           }
           for (const ally of this.enemies) {
@@ -5838,8 +5879,8 @@ export class TwilightEngine {
             const hit = segmentCircleHit(proj.prevX, proj.prevY, proj.x, proj.y, ally.x, ally.y, ally.radius + proj.radius * 0.7);
             if (hit.hit) {
               proj.hitIds.add(ally.id);
-              ally.hp = Math.min(ally.maxHp, ally.hp + 35);
-              this.spawnText(ally.x, ally.y - 26, '+35', '#4ADE80', 0.85, true);
+              ally.hp = Math.min(ally.maxHp, ally.hp + healAmt);
+              this.spawnText(ally.x, ally.y - 26, `+${healAmt}`, '#4ADE80', 0.85, true);
             }
           }
         }
@@ -6640,9 +6681,10 @@ export class TwilightEngine {
   private remoteHumanFireGun(e: EnemyEntity, rt: RemoteHumanRuntime, weapon: Extract<EquippedWeapon, { type: 'gun' }>) {
     if (e.attackCooldown > 0 || e.swapTimer > 0 || weapon.reloadTimer > 0 || weapon.ammoInMag <= 0) return;
     const gun = weapon.def;
+    const gunProfile = this.siege ? getSiegeGunProfile(gun.kind) : null;
     const pelletsToFire = gun.kind === 'shotgun' ? Math.max(1, Math.min(gun.pellets, weapon.ammoInMag)) : gun.pellets;
     const ammoCost = gun.kind === 'shotgun' ? pelletsToFire : 1;
-    e.attackCooldown = 1 / gun.fireRate;
+    e.attackCooldown = 1 / (gun.fireRate * (gunProfile?.fireRateMult ?? 1));
     rt.lastAttackAt = this.time;
     rt.delayCancelReady = true;
     weapon.ammoInMag = Math.max(0, weapon.ammoInMag - ammoCost);
@@ -6719,11 +6761,21 @@ export class TwilightEngine {
       }
     }
 
-    const repMult = getReputationQiMultiplier((rt.startingReputation ?? 0) + rt.reputationChanges[rt.faction]);
+    let repMult = getReputationQiMultiplier((rt.startingReputation ?? 0) + rt.reputationChanges[rt.faction]);
+    const rSiege = this.siege?.remoteStates.get(rt.peerId);
+    if (rSiege) {
+      repMult *= 1 + (rSiege.upgrades.core ?? 0) * 0.14 + (rSiege.loadout.passiveId === 'shadow_swift_foot' ? 0.25 : 0);
+    }
     if (e.freezeTimer <= 0) {
       if (!rt.chargeSessionAllowed) {
-        e.qi = Math.min(e.maxQi, e.qi + QI_RATE.recover * repMult * dt);
+        const rate = rt.qiFastRefund ? 360 : QI_RATE.recover * repMult;
+        e.qi = Math.min(e.maxQi, e.qi + rate * dt);
+        if (rt.qiFastRefund && e.qi >= e.maxQi - 0.01) {
+          e.qi = e.maxQi;
+          rt.qiFastRefund = false;
+        }
       } else if (!e.chargeReady) {
+        rt.qiFastRefund = false;
         let chargeDt = dt;
         if (!e.chargingMelee) {
           rt.meleeHeldSeconds += dt;
@@ -6785,7 +6837,15 @@ export class TwilightEngine {
       rt.lastReloadSeq = inp.reloadSeq;
       const w = e.weapons[e.activeHand];
       if (w.type === 'gun' && w.reloadTimer <= 0 && w.ammoInMag < w.def.magSize && rt.reserveAmmo > 0) {
-        w.reloadTimer = w.def.reloadTime;
+        let rMult = 1;
+        const rSiege = this.siege?.remoteStates.get(rt.peerId);
+        if (rSiege) {
+          rMult = getSiegeGunProfile(w.def.kind).reloadMult;
+          rMult -= (rSiege.upgrades.firepower ?? 0) * 0.06;
+          if (rSiege.loadout.passiveId === 'royal_steady_aim') rMult -= 0.15;
+          rMult = Math.max(0.45, rMult);
+        }
+        w.reloadTimer = w.def.reloadTime * rMult;
         this.emitNetSfx('reload', e.x, e.y, w.def.kind, false);
       }
     }
@@ -6831,7 +6891,7 @@ export class TwilightEngine {
             const res = tryPurchaseSiegeUpgrade(rState, inp.upgradeTrack);
             if (res.ok && inp.upgradeTrack === 'armor') {
               e.maxHp = computeSiegeMaxHp(rState);
-              e.hp = Math.min(e.maxHp, e.hp + 30);
+              e.hp = Math.min(e.maxHp, e.hp + 32);
             }
           }
         }
@@ -6859,8 +6919,12 @@ export class TwilightEngine {
 
     const remoteSiegeState = this.siege?.remoteStates.get(rt.peerId);
     const siegeSpeedMult = remoteSiegeState ? computeSiegeMoveSpeedMult(remoteSiegeState) : 1.0;
+    const remoteWeaponSpeed =
+      this.siege && activeWeapon.type === 'gun'
+        ? getSiegeGunProfile(activeWeapon.def.kind).moveSpeedMult
+        : activeWeapon.def.moveSpeedMult;
     const moveSpeed =
-      PLAYER_MOVEMENT.speed * activeWeapon.def.moveSpeedMult * (e.freezeTimer > 0 ? 0.9 : 1.0) * siegeSpeedMult;
+      PLAYER_MOVEMENT.speed * remoteWeaponSpeed * (e.freezeTimer > 0 ? 0.9 : 1.0) * siegeSpeedMult;
     const prevX = e.x;
     const prevY = e.y;
     const moved = this.moveCharacterWithElevation(e.x, e.y, e.elevation, mvX * moveSpeed * dt, mvY * moveSpeed * dt, e.radius);
@@ -6986,7 +7050,9 @@ export class TwilightEngine {
         }
       }
       if (released) {
+        let firedUlt = false;
         if (e.chargeReady && e.freezeTimer <= 0) {
+          firedUlt = true;
           e.chargeReady = false;
           e.attackCooldown = 0.25;
           rt.lastAttackAt = this.time;
@@ -6996,6 +7062,8 @@ export class TwilightEngine {
           e.attackAnimKind = activeWeapon.def.kind;
           this.emitNetSfx('skill', e.x, e.y);
           this.executeEnemyFactionSkill(e, activeWeapon, e.angle);
+        } else if (!firedUlt && e.chargingMelee && !e.chargeReady && e.freezeTimer <= 0) {
+          rt.qiFastRefund = true;
         }
         rt.chargeSessionAllowed = false;
         rt.meleeHeldSeconds = 0;
@@ -8526,7 +8594,7 @@ export class TwilightEngine {
     }
     if (track === 'armor') {
       p.maxHp = computeSiegeMaxHp(ps);
-      if (p.hp > 0) p.hp = Math.min(p.maxHp, p.hp + 30);
+      if (p.hp > 0) p.hp = Math.min(p.maxHp, p.hp + 32);
     }
     sfx.pickup();
     const meta = SIEGE_UPGRADES.find((u) => u.track === track);
@@ -8546,24 +8614,28 @@ export class TwilightEngine {
     const fac: SiegeFactionId = caster.faction === 'shadow' ? 'shadow' : 'royal';
     const meta = getTacticalMeta(loadout.tacticalId);
     const heroState = this.getSiegeHeroState(casterId);
-    const bladeMult = heroState ? 1 + (heroState.upgrades.blade ?? 0) * 0.15 : 1;
-    this.spawnText(caster.x, caster.y - 40, meta.name, meta.color, 1.15);
+    const tacRank = heroState?.upgrades.blade ?? ('siegeUpgrades' in caster ? caster.siegeUpgrades?.blade ?? 0 : 0);
+    const tacMult = 1 + tacRank * 0.25;
+    const rangeMult = 1 + tacRank * 0.08;
+    this.spawnText(caster.x, caster.y - 40, tacRank > 0 ? `${meta.name} +${tacRank}` : meta.name, meta.color, 1.15);
     sfx.ultimate();
     this.emitNetSfx('skill', caster.x, caster.y);
 
     if (loadout.tacticalId === 'royal_aegis_reflect') {
+      const dur = 3.5 + tacRank * 0.45;
       if (casterId === 'player') {
-        this.siege.playerState.aegisReflectTimer = 3.5;
+        this.siege.playerState.aegisReflectTimer = dur;
       } else if ('siegeAegisReflectTimer' in caster) {
-        caster.siegeAegisReflectTimer = 3.5;
+        caster.siegeAegisReflectTimer = dur;
         const rState = caster.peerId ? this.siege.remoteStates.get(caster.peerId) : undefined;
-        if (rState) rState.aegisReflectTimer = 3.5;
+        if (rState) rState.aegisReflectTimer = dur;
       }
       this.spawnBurst(caster.x, caster.y, '#38BDF8', 14);
       return;
     }
 
     if (loadout.tacticalId === 'royal_sanctuary_zone') {
+      const life = 4.5 + tacRank * 0.4;
       this.siege.zones.push({
         id: uid('zone'),
         kind: 'sanctuary',
@@ -8571,18 +8643,19 @@ export class TwilightEngine {
         ownerId: casterId,
         x: caster.x,
         y: caster.y,
-        radius: 160,
-        life: 4.5,
-        maxLife: 4.5,
+        radius: Math.round(160 * rangeMult),
+        life,
+        maxLife: life,
         tickTimer: 0.2,
-        heal: 7,
+        heal: Math.round(7 * tacMult),
       });
       return;
     }
 
     if (loadout.tacticalId === 'royal_dash_bash') {
       const ang = Math.atan2(aimY - caster.y, aimX - caster.x);
-      const d = Math.min(190, Math.max(40, dist(caster.x, caster.y, aimX, aimY)));
+      const maxDash = Math.round(190 * rangeMult);
+      const d = Math.min(maxDash, Math.max(40, dist(caster.x, caster.y, aimX, aimY)));
       const spot = this.findSafeTeleportSpot(
         caster.x + Math.cos(ang) * d,
         caster.y + Math.sin(ang) * d,
@@ -8596,30 +8669,32 @@ export class TwilightEngine {
       caster.x = spot.x;
       caster.y = spot.y;
       caster.elevation = this.getWalkableElevation(caster.x, caster.y);
+      const bashRadius = Math.round(115 * rangeMult);
       this.pushSlash({
         x: caster.x,
         y: caster.y,
         angle: ang,
         arc: Math.PI * 2,
-        reach: 115,
+        reach: bashRadius,
         color: '#60A5FA',
         life: 0.24,
         maxLife: 0.24,
         isUltimate: true,
         style: 'sweep',
       });
-      const bashDmg = Math.round(25 * bladeMult);
+      const bashDmg = Math.round(25 * tacMult);
+      const stunDur = 0.8 + tacRank * 0.1;
       if (casterId !== 'player' && this.player.hp > 0 && areHostile(fac, casterId, this.player.faction, 'player')) {
-        if (dist(caster.x, caster.y, this.player.x, this.player.y) <= 115 + this.player.radius) {
+        if (dist(caster.x, caster.y, this.player.x, this.player.y) <= bashRadius + this.player.radius) {
           this.damagePlayer(bashDmg, true, casterId, caster.x, caster.y);
         }
       }
       for (const e of [...this.enemies]) {
         if (e.id === casterId || !areHostile(fac, casterId, e.faction, e.id)) continue;
-        if (dist(caster.x, caster.y, e.x, e.y) <= 115 + e.radius) {
+        if (dist(caster.x, caster.y, e.x, e.y) <= bashRadius + e.radius) {
           const pushA = Math.atan2(e.y - caster.y, e.x - caster.x);
           this.damageEnemy(e, bashDmg, true, Math.cos(pushA) * 520, Math.sin(pushA) * 520, false, true, casterId, fac, caster.x, caster.y);
-          if (e.hp > 0) e.stunTimer = Math.max(e.stunTimer, 0.8);
+          if (e.hp > 0) e.stunTimer = Math.max(e.stunTimer, stunDur);
         }
       }
       return;
@@ -8633,14 +8708,15 @@ export class TwilightEngine {
         ownerId: casterId,
         x: caster.x,
         y: caster.y,
-        radius: 110,
+        radius: Math.round(110 * rangeMult),
         life: 1.4,
         maxLife: 1.4,
         tickTimer: 99,
-        damage: Math.round(38 * bladeMult),
+        damage: Math.round(38 * tacMult),
       });
       const ang = Math.atan2(aimY - caster.y, aimX - caster.x);
-      const d = Math.min(190, Math.max(50, dist(caster.x, caster.y, aimX, aimY)));
+      const maxDash = Math.round(190 * rangeMult);
+      const d = Math.min(maxDash, Math.max(50, dist(caster.x, caster.y, aimX, aimY)));
       const spot = this.findSafeTeleportSpot(
         caster.x + Math.cos(ang) * d,
         caster.y + Math.sin(ang) * d,
@@ -8658,11 +8734,13 @@ export class TwilightEngine {
     }
 
     if (loadout.tacticalId === 'shadow_hunter_mark') {
-      caster.eagleEyeTimer = Math.max(caster.eagleEyeTimer, 4.5);
+      caster.eagleEyeTimer = Math.max(caster.eagleEyeTimer, 4.5 + tacRank * 0.5);
+      const markDur = 5.0 + tacRank * 0.6;
+      const maxMarks = tacRank >= 3 ? 3 : 2;
       let markedCount = 0;
       if (casterId !== 'player' && this.player.hp > 0 && areHostile(fac, casterId, this.player.faction, 'player')) {
         if (dist(caster.x, caster.y, this.player.x, this.player.y) <= 480) {
-          this.siege.playerState.markedTimer = 5.0;
+          this.siege.playerState.markedTimer = markDur;
           this.spawnText(this.player.x, this.player.y - 36, '被獵殺標記!', '#FB7185', 1.0);
           markedCount += 1;
         }
@@ -8671,8 +8749,8 @@ export class TwilightEngine {
         .filter((e) => areHostile(fac, casterId, e.faction, e.id) && dist(caster.x, caster.y, e.x, e.y) <= 480)
         .sort((a, b) => dist(caster.x, caster.y, a.x, a.y) - dist(caster.x, caster.y, b.x, b.y));
       for (const target of nearEnemies) {
-        if (markedCount >= 2) break;
-        target.siegeMarkedTimer = 5.0;
+        if (markedCount >= maxMarks) break;
+        target.siegeMarkedTimer = markDur;
         this.spawnText(target.x, target.y - 34, '獵殺標記 +22%傷', '#FB7185', 0.95);
         markedCount += 1;
       }
@@ -8680,12 +8758,13 @@ export class TwilightEngine {
     }
 
     // shadow_smoke_shroud
-    caster.shadowCloneTimer = Math.max(caster.shadowCloneTimer, 3.5);
+    const shroudDur = 3.5 + tacRank * 0.45;
+    caster.shadowCloneTimer = Math.max(caster.shadowCloneTimer, shroudDur);
     if (casterId === 'player') {
-      this.siege.playerState.smokeSpeedTimer = 3.5;
+      this.siege.playerState.smokeSpeedTimer = shroudDur;
     } else if ('peerId' in caster && caster.peerId) {
       const rState = this.siege.remoteStates.get(caster.peerId);
-      if (rState) rState.smokeSpeedTimer = 3.5;
+      if (rState) rState.smokeSpeedTimer = shroudDur;
     }
     this.spawnBurst(caster.x, caster.y, '#A855F7', 12);
   }
@@ -8700,12 +8779,20 @@ export class TwilightEngine {
     if (!this.siege) return;
     const fac: SiegeFactionId = caster.faction === 'shadow' ? 'shadow' : 'royal';
     const heroState = this.getSiegeHeroState(casterId);
-    const bladeMult = (heroState ? 1 + (heroState.upgrades.blade ?? 0) * 0.16 : 1) * comboMult;
+    const ultRank = heroState?.upgrades.core ?? ('siegeUpgrades' in caster ? caster.siegeUpgrades?.core ?? 0 : 0);
+    const ultMult = (1 + ultRank * 0.25) * comboMult;
+    const evolved = ultRank >= 3;
     const ultMeta = getUltimateMeta(ultId);
-    this.spawnText(caster.x, caster.y - 44, `${ultMeta.name}!`, ultMeta.color, 1.3);
+    this.spawnText(
+      caster.x,
+      caster.y - 44,
+      evolved ? `${ultMeta.name}・覺醒!` : ultRank > 0 ? `${ultMeta.name} Lv.${ultRank}!` : `${ultMeta.name}!`,
+      ultMeta.color,
+      1.3
+    );
 
     if (ultId === 'royal_judgment_beam') {
-      const range = 760;
+      const range = 760 + ultRank * 55;
       const wallSeg = this.traceBulletSegment(caster.x, caster.y, aimAngle, range, caster.elevation, false);
       const endX = wallSeg.x2;
       const endY = wallSeg.y2;
@@ -8717,10 +8804,10 @@ export class TwilightEngine {
         color: '#FDE047',
         life: 0.34,
         maxLife: 0.34,
-        width: 14,
+        width: 14 + ultRank * 2.5,
       });
-      const unitDmg = Math.round(75 * bladeMult);
-      const structDmg = Math.round(180 * bladeMult);
+      const unitDmg = Math.round(75 * ultMult);
+      const structDmg = Math.round(180 * ultMult);
       if (casterId !== 'player' && this.player.hp > 0 && areHostile(fac, casterId, this.player.faction, 'player')) {
         const hit = segmentCircleHit(caster.x, caster.y, endX, endY, this.player.x, this.player.y, this.player.radius + 14);
         if (hit.hit) this.damagePlayer(unitDmg, false, casterId, caster.x, caster.y);
@@ -8746,9 +8833,13 @@ export class TwilightEngine {
     if (ultId === 'royal_light_rain' || ultId === 'royal_healing_salvo') {
       const isHeal = ultId === 'royal_healing_salvo';
       const spreadAngles = isHeal
-        ? [-0.3, -0.15, 0, 0.15, 0.3]
-        : [-0.48, -0.36, -0.24, -0.12, 0, 0.12, 0.24, 0.36, 0.48];
-      const dmg = Math.round((isHeal ? 32 : 28) * bladeMult);
+        ? evolved
+          ? [-0.42, -0.28, -0.14, 0, 0.14, 0.28, 0.42]
+          : [-0.3, -0.15, 0, 0.15, 0.3]
+        : evolved
+          ? [-0.55, -0.44, -0.33, -0.22, -0.11, 0, 0.11, 0.22, 0.33, 0.44, 0.55]
+          : [-0.48, -0.36, -0.24, -0.12, 0, 0.12, 0.24, 0.36, 0.48];
+      const dmg = Math.round((isHeal ? 32 : 28) * ultMult);
       for (const off of spreadAngles) {
         const a = aimAngle + off;
         this.projectiles.push({
@@ -8781,9 +8872,10 @@ export class TwilightEngine {
     }
 
     if (ultId === 'shadow_twin_dragons') {
-      const headDmg = Math.round(24 * bladeMult);
-      const bodyDmg = Math.round(16 * bladeMult);
-      for (const off of [-0.14, 0.14]) {
+      const headDmg = Math.round(24 * ultMult);
+      const bodyDmg = Math.round(16 * ultMult);
+      const dragonAngles = evolved ? [-0.18, 0, 0.18] : [-0.14, 0.14];
+      for (const off of dragonAngles) {
         const a = aimAngle + off;
         const startX = caster.x + Math.cos(a) * 26;
         const startY = caster.y + Math.sin(a) * 26;
@@ -8824,8 +8916,9 @@ export class TwilightEngine {
     }
 
     if (ultId === 'shadow_pierce_dragon') {
-      const headDmg = Math.round(55 * bladeMult);
-      const bodyDmg = Math.round(38 * bladeMult);
+      const headDmg = Math.round(55 * ultMult);
+      const bodyDmg = Math.round(38 * ultMult);
+      const speed = 640 + ultRank * 35;
       const startX = caster.x + Math.cos(aimAngle) * 28;
       const startY = caster.y + Math.sin(aimAngle) * 28;
       this.projectiles.push({
@@ -8834,9 +8927,9 @@ export class TwilightEngine {
         y: startY,
         prevX: caster.x,
         prevY: caster.y,
-        vx: Math.cos(aimAngle) * 640,
-        vy: Math.sin(aimAngle) * 640,
-        radius: 22,
+        vx: Math.cos(aimAngle) * speed,
+        vy: Math.sin(aimAngle) * speed,
+        radius: 22 + ultRank * 2,
         damage: headDmg,
         headDamage: headDmg,
         bodyDamage: bodyDmg,
@@ -8869,6 +8962,7 @@ export class TwilightEngine {
     const travel = clamp(dist(caster.x, caster.y, ptr.x, ptr.y), 90, 380);
     const tx = clamp(caster.x + Math.cos(aimAngle) * travel, TILE, this.map.width - TILE);
     const ty = clamp(caster.y + Math.sin(aimAngle) * travel, TILE, this.map.height - TILE);
+    const vortexLife = 3.5 + ultRank * 0.35;
     this.addSkillTrace('blink', caster, { x: tx, y: ty }, 0.45);
     this.siege.zones.push({
       id: uid('vortex'),
@@ -8877,11 +8971,11 @@ export class TwilightEngine {
       ownerId: casterId,
       x: tx,
       y: ty,
-      radius: 135,
-      life: 3.5,
-      maxLife: 3.5,
+      radius: 135 + ultRank * 14,
+      life: vortexLife,
+      maxLife: vortexLife,
       tickTimer: 0.1,
-      damage: Math.round(16 * bladeMult),
+      damage: Math.round(16 * ultMult),
     });
   }
 
@@ -9280,7 +9374,7 @@ export class TwilightEngine {
           for (const tr of tracks) {
             const cur = upg[tr] ?? 0;
             const cost = SIEGE_UPGRADES.find((u) => u.track === tr)?.costs[cur];
-            if (cur < 3 && cost !== undefined && gold >= cost) {
+            if (cur < 5 && cost !== undefined && gold >= cost) {
               e.siegeGold = gold - cost;
               upg[tr] = cur + 1;
               e.siegeUpgrades = upg;
@@ -9290,7 +9384,7 @@ export class TwilightEngine {
                   upgrades: upg,
                   loadout: e.siegeLoadout ?? getDefaultSiegeLoadout(eFac, e.characterSkin.id),
                 });
-                const gain = Math.max(30, nextMax - e.maxHp);
+                const gain = Math.max(32, nextMax - e.maxHp);
                 e.maxHp = nextMax;
                 e.hp = Math.min(e.maxHp, e.hp + gain);
               }

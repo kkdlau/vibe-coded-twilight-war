@@ -324,7 +324,7 @@ export interface SiegeUpgradeMeta {
   name: string;
   shortName: string;
   maxLevel: number;
-  costs: readonly [number, number, number];
+  costs: readonly number[];
   bonusText: string;
   color: string;
 }
@@ -335,19 +335,19 @@ export const SIEGE_UPGRADES: SiegeUpgradeMeta[] = [
     keyHint: '3',
     name: '槍械改造',
     shortName: '槍械',
-    maxLevel: 3,
-    costs: [100, 200, 320],
-    bonusText: '每級：槍傷 +14% · 建築/Boss 傷 +15% · 換彈加快 8%',
+    maxLevel: 5,
+    costs: [120, 240, 400, 600, 850] as const,
+    bonusText: '每級：槍傷 +12% · 有效射程 +8% · 建築/Boss +12% · 換彈加快 6%',
     color: '#F59E0B',
   },
   {
     track: 'blade',
     keyHint: '4',
-    name: '近武鍛造',
-    shortName: '技刃',
-    maxLevel: 3,
-    costs: [100, 200, 320],
-    bonusText: '每級：近戰與大招傷害 +16% · 戰術技傷害 +15%',
+    name: '戰技強化',
+    shortName: '戰技',
+    maxLevel: 5,
+    costs: [120, 240, 400, 600, 850] as const,
+    bonusText: '每級：戰術技傷害/治療/時長 +25% · 範圍/位移 +8% · CD -8% · 近戰 +14%',
     color: '#FB7185',
   },
   {
@@ -355,19 +355,19 @@ export const SIEGE_UPGRADES: SiegeUpgradeMeta[] = [
     keyHint: '5',
     name: '重甲護體',
     shortName: '重甲',
-    maxLevel: 3,
-    costs: [100, 200, 320],
-    bonusText: '每級：最大血量 +30 · 防禦 +3 · 移動速度 +5%',
+    maxLevel: 5,
+    costs: [120, 240, 400, 600, 850] as const,
+    bonusText: '每級：最大血量 +32 · 防禦 +3 · 移動速度 +4%',
     color: '#38BDF8',
   },
   {
     track: 'core',
     keyHint: '6',
-    name: '光暈核心',
-    shortName: '核心',
-    maxLevel: 3,
-    costs: [100, 200, 320],
-    bonusText: '每級：回氣速度 +18% · 戰術技 CD 縮短 10%',
+    name: '終極秘技',
+    shortName: '大招',
+    maxLevel: 5,
+    costs: [120, 240, 400, 600, 850] as const,
+    bonusText: '每級：大招傷害/治療 +25% · 集氣/回氣 +14% · Lv.3 解鎖進階強化型態',
     color: '#A855F7',
   },
 ];
@@ -402,7 +402,7 @@ export const SIEGE_CONFIG = {
   backdoorRadiusPx: 310,
   backdoorDamageMult: 0.35,
   suddenDeathStructureDmgMult: 1.35,
-  passiveGoldPerSec: 3,
+  passiveGoldPerSec: 2,
 } as const;
 
 const TACTICAL_IDS = new Set<string>(SIEGE_TACTICAL_SKILLS.map((s) => s.id));

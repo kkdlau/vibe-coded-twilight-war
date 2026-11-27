@@ -618,8 +618,8 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
                 </span>
                 <div className="flex items-center gap-0.5 mt-1">
                   {hud.mode === 'siege' ? (
-                    <span className="text-[11px] font-mono-num font-black text-sky-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)]">
-                      ∞ 無限復活
+                    <span className="text-[10px] font-mono-num font-black text-sky-200 drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)]">
+                      {Math.round(p.hp)}/{Math.round(p.maxHp)}
                     </span>
                   ) : (
                     Array.from({ length: p.maxLives }).map((_, i) => (
@@ -762,11 +762,24 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
       )}
 
       {/* BOTTOM-CENTER: Siege MOBA Skills & Upgrade Shop Bar */}
-      {hud && p && hud.mode === 'siege' && hud.siege && (
+      {hud && p && hud.mode === 'siege' && hud.siege && (() => {
+        const hasAffordableUpgrade = SIEGE_UPGRADES.some((u) => {
+          const lv = hud.siege!.upgrades[u.track] ?? 0;
+          return lv < u.maxLevel && hud.siege!.playerGold >= u.costs[lv];
+        });
+        return (
         <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 max-w-[calc(100vw-24px)]">
           {!hud.siege.canShop && hud.siege.recallTimer <= 0 && (
-            <div className="pointer-events-none bg-slate-950/75 border border-slate-800/80 rounded-md px-2.5 py-0.5 text-[10px] text-slate-300">
-              回泉水 [B] 或復活時按 [3-6] 升級屬性
+            <div
+              className={`pointer-events-none rounded-md px-2.5 py-0.5 text-[10px] border ${
+                hasAffordableUpgrade
+                  ? 'bg-amber-950/90 border-amber-400/70 text-amber-200 font-bold'
+                  : 'bg-slate-950/75 border-slate-800/80 text-slate-300'
+              }`}
+            >
+              {hasAffordableUpgrade
+                ? '⚡ 軍功充足！按 [B] 回城或復活時按 [3-6] 升級技能與裝備'
+                : '回泉水 [B] 或復活時按 [3-6] 升級技能與裝備'}
             </div>
           )}
           {hud.siege.recallTimer > 0 && (
@@ -891,7 +904,8 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
             })}
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* BOTTOM-RIGHT: Siege Minimap + Multiplayer Room Indicator */}
       {hud && p && hud.mode === 'siege' && hud.siege && (

@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { FACTION_CHARACTERS } from './data';
 import { TwilightEngine } from './engine';
 import { TILE } from './maps';
-import { SIEGE_PASSIVES, SIEGE_TACTICAL_SKILLS, SIEGE_ULTIMATE_SKILLS, getDefaultSiegeLoadout } from './siegeData';
-import { applySiegeDefenseReduction, computeSiegeDefense, computeSiegeGunFalloffMult, computeSiegeMaxHp, computeSiegeMoveSpeedMult, grantSiegeXpAndGold } from './siegeHelpers';
+import { SIEGE_PASSIVES, SIEGE_TACTICAL_SKILLS, SIEGE_ULTIMATE_SKILLS, SIEGE_UPGRADES, getDefaultSiegeLoadout } from './siegeData';
+import { applySiegeDefenseReduction, computeSiegeDefense, computeSiegeGunFalloffMult, computeSiegeMaxHp, computeSiegeMoveSpeedMult, getSiegeGunProfile, grantSiegeXpAndGold } from './siegeHelpers';
 import { SIEGE_MAP_ID, createSiegeMapSpec } from './siegeMap';
 import { HudSnapshot, SiegeFactionId, SiegePlayerLoadout } from './types';
 
@@ -220,8 +220,9 @@ describe('3-Lane Castle Siege / MOBA Mode (siege)', () => {
     expect(sg.playerState.gold).toBe(120);
     expect(engine.buySiegeUpgrade('armor')).toBe(true);
     expect(sg.playerState.upgrades.armor).toBe(1);
+    expect(engine.player.maxHp).toBe(132);
+    expect(engine.buySiegeUpgrade('firepower')).toBe(false);
     // Moving outside fountain prevents shopping while alive
-    expect(engine.player.maxHp).toBe(130);
     sg.playerState.gold = 500;
     engine.player.x = 27 * TILE;
     engine.player.y = 27 * TILE;
@@ -404,7 +405,7 @@ describe('3-Lane Castle Siege / MOBA Mode (siege)', () => {
     }
   });
 
-  it('scales HP, Defense, and Move Speed on level-up, applies gun distance falloff, and keeps HUD ammo integer', () => {
+  it('scales HP (+22/lvl), Defense, and Move Speed on level-up, applies gun roles/falloff, and keeps HUD ammo integer', () => {
     const { engine, getHud } = createSiegeEngine('royal', { gunId: 'rifle' });
     const ps = engine.siege!.playerState;
 
@@ -414,33 +415,99 @@ describe('3-Lane Castle Siege / MOBA Mode (siege)', () => {
     expect(baseHp).toBe(100);
     expect(baseDef).toBe(0);
 
-    // Grant XP to level up from Lv.1 to Lv.3
-    const lvRes = grantSiegeXpAndGold(ps, 0, 220);
-    expect(lvRes.newLevel).toBeGreaterThanOrEqual(3);
-    expect(computeSiegeMaxHp(ps)).toBeGreaterThanOrEqual(baseHp + 36);
+    // Grant XP to level up from Lv.1 to Lv.3 via awardSiegeHeroKill so engine player maxHp & HUD update live
+    const awardFn = (engine as unknown as {
+      awardSiegeHeroKill: (id: string, gold: number, xp: number, isHero: boolean) => void;
+    }).awardSiegeHeroKill.bind(engine);
+    awardFn('player', 100, 220, true);
+    expect(ps.level).toBeGreaterThanOrEqual(3);
+    expect(engine.player.maxHp).toBe(144);
     expect(computeSiegeDefense(ps)).toBeGreaterThan(baseDef);
     expect(computeSiegeMoveSpeedMult(ps)).toBeGreaterThan(baseSpd);
 
-    // Defense meaningfully reduces incoming damage (never to zero)
+    // Defense meaningfully reduces incoming damage (never to zero), while armor-piercing guns bypass part of it
     const unmitigated = 25;
-    const mitigated = applySiegeDefenseReduction(unmitigated, computeSiegeDefense(ps) + 6);
+    const def = computeSiegeDefense(ps) + 6;
+    const mitigated = applySiegeDefenseReduction(unmitigated, def, 0);
+    const pierced = applySiegeDefenseReduction(unmitigated, def, getSiegeGunProfile('shotgun').defensePenetration);
     expect(mitigated).toBeLessThan(unmitigated);
     expect(mitigated).toBeGreaterThanOrEqual(2);
+    expect(pierced).toBeGreaterThan(mitigated);
 
-    // Gun distance falloff drops long-range damage noticeably while remaining full at close range
+    // Gun role profiles & distance falloff balance rifle vs shotgun / sniper / pistol
+    expect(getSiegeGunProfile('rifle').damageMult).toBeLessThan(0.8);
+    expect(getSiegeGunProfile('shotgun').defensePenetration).toBeGreaterThan(0.5);
+    expect(getSiegeGunProfile('sniper').defensePenetration).toBeGreaterThan(0.5);
+    expect(getSiegeGunProfile('pistol').moveSpeedMult).toBeGreaterThanOrEqual(1.0);
     expect(computeSiegeGunFalloffMult('rifle', 180)).toBe(1);
     expect(computeSiegeGunFalloffMult('rifle', 700)).toBeLessThanOrEqual(0.35);
     expect(computeSiegeGunFalloffMult('sniper', 250)).toBe(1);
-    expect(computeSiegeGunFalloffMult('sniper', 900)).toBeLessThan(0.5);
+    expect(computeSiegeGunFalloffMult('sniper', 920)).toBeGreaterThan(0.5);
 
-    // Out-of-combat reserve ammo recharges over time and HUD always outputs whole integers
+    // Out-of-combat reserve ammo recharges over time and HUD always outputs whole integers and updated maxHp
     engine.player.reserveAmmo = 10;
     engine.enemies = [];
     for (let i = 0; i < 65; i++) {
       engine.update(0.05, 1280, 720);
     }
     const hud = getHud()!;
+    expect(hud.player.maxHp).toBe(144);
     expect(hud.player.reserveAmmo).toBeGreaterThan(10);
     expect(Number.isInteger(hud.player.reserveAmmo)).toBe(true);
+  });
+
+  it('refunds qi rapidly on aborted melee charge and evolves Siege skills with 5-rank Gold upgrades', () => {
+    // 1. Aborted melee charge snaps qi back nearly immediately
+    const { engine } = createSiegeEngine('royal', { ultimateId: 'royal_light_rain', meleeId: 'knife' });
+    engine.enemies = [];
+    engine.siege!.playerState.level = 4;
+    engine.switchWeapon();
+    for (let i = 0; i < 10; i++) engine.update(0.05, 1280, 720);
+    engine.player.qi = 100;
+    engine.setMouseDown(true);
+    for (let i = 0; i < 20; i++) engine.update(0.05, 1280, 720);
+    expect(engine.player.chargingMelee).toBe(true);
+    expect(engine.player.chargeReady).toBe(false);
+    expect(engine.player.qi).toBeLessThan(80);
+
+    // Release mouse early -> abort charge and verify qi returns to 100 within 0.35s
+    engine.setMouseDown(false);
+    for (let i = 0; i < 7; i++) engine.update(0.05, 1280, 720);
+    expect(engine.player.qi).toBeCloseTo(100, 1);
+
+    // 2. All 4 Siege upgrades support 5 levels and skill ranks evolve/buff tactical & ultimate skills
+    expect(SIEGE_UPGRADES.every((u) => u.maxLevel === 5 && u.costs.length === 5)).toBe(true);
+    engine.siege!.playerState.level = 5;
+    engine.siege!.playerState.gold = 3000;
+    expect(engine.buySiegeUpgrade('blade')).toBe(true);
+    expect(engine.buySiegeUpgrade('core')).toBe(true);
+    expect(engine.buySiegeUpgrade('core')).toBe(true);
+    expect(engine.buySiegeUpgrade('core')).toBe(true);
+    expect(engine.siege!.playerState.upgrades.core).toBe(3);
+
+    // Rank-3 Royal Light Rain evolves from 9 -> 11 orbs
+    engine.player.qi = 100;
+    engine.setMouseDown(true);
+    for (let i = 0; i < 60 && !engine.player.chargeReady; i++) engine.update(0.05, 1280, 720);
+    engine.setMouseDown(false);
+    expect(engine.projectiles.length).toBe(11);
+
+    // Rank-3 Shadow Twin Dragons evolves from 2 -> 3 dragons
+    const { engine: shadowEng } = createSiegeEngine('shadow', { ultimateId: 'shadow_twin_dragons', meleeId: 'knife' });
+    shadowEng.enemies = [];
+    shadowEng.siege!.playerState.level = 5;
+    shadowEng.siege!.playerState.upgrades.core = 3;
+    shadowEng.switchWeapon();
+    for (let i = 0; i < 10; i++) shadowEng.update(0.05, 1280, 720);
+    shadowEng.player.qi = 100;
+    shadowEng.setMouseDown(true);
+    for (let i = 0; i < 60 && !shadowEng.player.chargeReady; i++) shadowEng.update(0.05, 1280, 720);
+    shadowEng.setMouseDown(false);
+    expect(shadowEng.projectiles.length).toBe(3);
+
+    // Tactical skill cooldown scales down with blade upgrade
+    shadowEng.siege!.playerState.upgrades.blade = 3;
+    shadowEng.triggerSiegeTactical();
+    expect(shadowEng.siege!.playerState.tacticalCd).toBeLessThan(10);
   });
 });

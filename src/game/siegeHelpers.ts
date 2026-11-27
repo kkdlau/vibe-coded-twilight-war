@@ -166,8 +166,8 @@ export function refreshStructureInvulnerability(structures: SiegeStructure[]) {
 
 export function computeSiegeMaxHp(state: Pick<SiegeHeroState, 'level' | 'upgrades' | 'loadout'>): number {
   const passiveHp = state.loadout.passiveId === 'royal_fortitude' ? 25 : 0;
-  const armorHp = (state.upgrades.armor ?? 0) * 30;
-  const levelHp = Math.max(0, state.level - 1) * 18;
+  const armorHp = (state.upgrades.armor ?? 0) * 32;
+  const levelHp = Math.max(0, state.level - 1) * 22;
   return 100 + passiveHp + armorHp + levelHp;
 }
 
@@ -175,15 +175,17 @@ export function computeSiegeDefense(state: Pick<SiegeHeroState, 'level' | 'upgra
   return Math.floor(Math.max(0, state.level - 1) * 1.5) + (state.upgrades.armor ?? 0) * 3;
 }
 
-export function applySiegeDefenseReduction(rawDmg: number, defense: number): number {
-  if (rawDmg <= 0 || defense <= 0) return rawDmg;
-  return Math.max(Math.max(2, Math.round(rawDmg * 0.25)), rawDmg - defense);
+export function applySiegeDefenseReduction(rawDmg: number, defense: number, defensePenetration = 0): number {
+  if (rawDmg <= 0) return rawDmg;
+  const effDef = Math.max(0, Math.round(defense * (1 - Math.max(0, Math.min(1, defensePenetration)))));
+  if (effDef <= 0) return rawDmg;
+  return Math.max(Math.max(2, Math.round(rawDmg * 0.25)), rawDmg - effDef);
 }
 
 export function computeSiegeMoveSpeedMult(
   state: Pick<SiegeHeroState, 'level' | 'upgrades' | 'loadout' | 'smokeSpeedTimer'>
 ): number {
-  let mult = 1 + Math.max(0, state.level - 1) * 0.025 + (state.upgrades.armor ?? 0) * 0.05;
+  let mult = 1 + Math.max(0, state.level - 1) * 0.025 + (state.upgrades.armor ?? 0) * 0.04;
   if (state.loadout.passiveId === 'royal_vanguard_aura') mult += 0.1;
   if (state.loadout.passiveId === 'shadow_swift_foot') mult += 0.12;
   if (state.smokeSpeedTimer > 0) mult += 0.22;
@@ -194,23 +196,87 @@ export function computeSiegeLevelAttackMult(level: number): number {
   return 1 + Math.max(0, level - 1) * 0.04;
 }
 
-export function computeSiegeGunFalloffMult(gunKind: GunKind, distPx: number): number {
-  const bands: Record<GunKind, { full: number; far: number; min: number }> = {
-    shotgun: { full: 170, far: 400, min: 0.22 },
-    pistol: { full: 230, far: 520, min: 0.3 },
-    rifle: { full: 260, far: 580, min: 0.28 },
-    sniper: { full: 420, far: 840, min: 0.42 },
-  };
-  const band = bands[gunKind];
-  if (distPx <= band.full) return 1;
-  if (distPx >= band.far) return band.min;
-  const t = (distPx - band.full) / Math.max(1, band.far - band.full);
-  return 1 - t * (1 - band.min);
+export interface SiegeGunProfile {
+  damageMult: number;
+  fireRateMult: number;
+  reloadMult: number;
+  moveSpeedMult: number;
+  defensePenetration: number;
+  structureBonusMult: number;
+  fullRange: number;
+  farRange: number;
+  minFalloff: number;
+  roleTag: string;
+}
+
+const SIEGE_GUN_PROFILES: Record<GunKind, SiegeGunProfile> = {
+  rifle: {
+    damageMult: 0.72,
+    fireRateMult: 0.92,
+    reloadMult: 1.0,
+    moveSpeedMult: 0.84,
+    defensePenetration: 0,
+    structureBonusMult: 1.0,
+    fullRange: 230,
+    farRange: 520,
+    minFalloff: 0.25,
+    roleTag: '中距穩定壓制',
+  },
+  shotgun: {
+    damageMult: 1.18,
+    fireRateMult: 1.0,
+    reloadMult: 0.78,
+    moveSpeedMult: 0.88,
+    defensePenetration: 0.65,
+    structureBonusMult: 1.25,
+    fullRange: 185,
+    farRange: 410,
+    minFalloff: 0.22,
+    roleTag: '近距破甲爆發',
+  },
+  sniper: {
+    damageMult: 1.15,
+    fireRateMult: 1.0,
+    reloadMult: 0.78,
+    moveSpeedMult: 0.74,
+    defensePenetration: 0.6,
+    structureBonusMult: 1.15,
+    fullRange: 480,
+    farRange: 920,
+    minFalloff: 0.58,
+    roleTag: '超遠穿甲狙殺',
+  },
+  pistol: {
+    damageMult: 1.2,
+    fireRateMult: 1.25,
+    reloadMult: 0.85,
+    moveSpeedMult: 1.02,
+    defensePenetration: 0.2,
+    structureBonusMult: 1.05,
+    fullRange: 250,
+    farRange: 550,
+    minFalloff: 0.34,
+    roleTag: '高機動游擊拉打',
+  },
+};
+
+export function getSiegeGunProfile(gunKind: GunKind): SiegeGunProfile {
+  return SIEGE_GUN_PROFILES[gunKind];
+}
+
+export function computeSiegeGunFalloffMult(gunKind: GunKind, distPx: number, rangeMult = 1): number {
+  const band = SIEGE_GUN_PROFILES[gunKind];
+  const full = band.fullRange * rangeMult;
+  const far = band.farRange * rangeMult;
+  if (distPx <= full) return 1;
+  if (distPx >= far) return band.minFalloff;
+  const t = (distPx - full) / Math.max(1, far - full);
+  return 1 - t * (1 - band.minFalloff);
 }
 
 export function computeSiegeTacticalCooldown(state: Pick<SiegeHeroState, 'upgrades' | 'loadout'>): number {
   const baseCd = getTacticalMeta(state.loadout.tacticalId).cooldownSec ?? 12;
-  const reduction = (state.upgrades.core ?? 0) * 0.1;
+  const reduction = (state.upgrades.blade ?? 0) * 0.08;
   return Math.max(4, Number((baseCd * (1 - reduction)).toFixed(2)));
 }
 
@@ -230,7 +296,7 @@ export function grantSiegeXpAndGold(
     state.level += 1;
     state.xpToNext = Math.round(80 + (state.level - 1) * 45);
     leveledUp = true;
-    hpGain += 18;
+    hpGain += 22;
   }
   const newDef = computeSiegeDefense(state);
   return {

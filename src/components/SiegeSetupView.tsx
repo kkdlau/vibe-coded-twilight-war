@@ -23,6 +23,7 @@ import {
   getTacticalMeta,
   getUltimateMeta,
 } from '../game/siegeData';
+import { getSiegeGunProfile } from '../game/siegeHelpers';
 import { SIEGE_MAP_ID } from '../game/siegeMap';
 import { AI_DIFFICULTY, type AiDifficulty } from '../game/tuning';
 import {
@@ -241,6 +242,8 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {GUNS.map((g) => {
                     const active = loadout.gunId === g.id;
+                    const profile = getSiegeGunProfile(g.kind);
+                    const effDmg = Math.round(g.damage * profile.damageMult);
                     return (
                       <button
                         key={g.id}
@@ -257,7 +260,12 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm font-bold text-white">{g.name}</span>
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-sm font-bold text-white truncate">{g.name}</span>
+                              <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-bold text-sky-300 shrink-0">
+                                {profile.roleTag}
+                              </span>
+                            </div>
                             {active && (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-xs font-bold shrink-0">
                                 <Check className="w-3 h-3" />
@@ -267,8 +275,10 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
                           </div>
                           <div className="text-xs text-slate-300 mt-1">
                             {g.kind === 'shotgun'
-                              ? `單彈丸 ${g.damage}×${g.pellets} · 彈匣 ${g.magSize} 發`
-                              : `中心傷害 ${g.damage} · 彈匣 ${g.magSize} 發 · 射速 ${g.fireRate}/s`}
+                              ? `單丸 ${effDmg}×${g.pellets} · 破甲 ${Math.round(profile.defensePenetration * 100)}%`
+                              : profile.defensePenetration > 0
+                                ? `傷害 ${effDmg} · 破甲 ${Math.round(profile.defensePenetration * 100)}% · ${g.magSize} 發`
+                                : `傷害 ${effDmg} · 彈匣 ${g.magSize} 發 · 射速 ${(g.fireRate * profile.fireRateMult).toFixed(1)}/s`}
                           </div>
                         </div>
                       </button>
@@ -579,9 +589,9 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
           {/* Rule Summary */}
           <div className="rounded-xl bg-slate-950/80 border border-slate-800 p-3.5 text-xs text-slate-300 space-y-1.5 leading-relaxed">
             <div className="font-bold text-amber-300">模式規則摘要</div>
-            <p>• 無限生命復活，摧毀敵方「外塔 → 高地塔 → 主城堡」即獲勝；地圖多處石牆／木箱可供躲避砲火。</p>
-            <p>• 升級大幅強化血量 (+18)、防禦與跑速；Lv.2 解鎖戰術技 [E]、Lv.4 解鎖近戰集氣大招！</p>
-            <p>• 小兵改為純近戰步兵（小刀兵 + 重甲大刀兵）；遠程槍械過遠會衰減傷害，有利拉扯逃脫。</p>
+            <p>• 升級大幅提升最大血量 (+22)、防禦與跑速；Lv.2 解鎖戰術技 [E]、Lv.4 解鎖近戰集氣大招！</p>
+            <p>• 軍功可於泉水／復活時升級 5 階裝備與技能：[3] 槍械 · [4] 戰技 · [5] 重甲 · [6] 大招（3 階覺醒進階型態）。</p>
+            <p>• 步槍／手槍／散彈（近距破甲）／狙擊（超遠穿甲）各有定位；小兵採純近戰步兵與大刀重兵。</p>
           </div>
 
           {/* Launch Button */}
