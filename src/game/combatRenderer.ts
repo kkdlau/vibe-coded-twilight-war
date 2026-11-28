@@ -347,55 +347,51 @@ export function drawPickup(ctx: CanvasRenderingContext2D, pk: PickupItem) {
         ctx.restore();
       }
     } else if (mk === 'greatsword') {
-      // 重型戰場大刀（寬闊暗鋼刀背＋雪亮斜切雙刃＋金色護手寶石＋雙手金紋柄與圓球配重）
-      ctx.rotate(-0.38);
+      // 修長光暈武士大刀（雙色銀鋼斜刃＋細金圓鍔＋金紋柄＋圓金球首）
+      ctx.rotate(-0.42);
+      // 暗鋼刀背＋雪亮斜切雙刃
       ctx.beginPath();
-      ctx.moveTo(-2, -4.6);
-      ctx.quadraticCurveTo(10, -5.4, 22.5, 0.2);
-      ctx.quadraticCurveTo(11, 5.2, -2, 3.8);
+      ctx.moveTo(-2, -2.2);
+      ctx.quadraticCurveTo(14, -3.4, 30, -1.6);
+      ctx.lineTo(26.5, 2.2);
+      ctx.quadraticCurveTo(12, 1.5, -2, 2.2);
       ctx.closePath();
-      ctx.fillStyle = '#E2E8F0';
+      ctx.fillStyle = '#F8FAFC';
       ctx.fill();
       ctx.strokeStyle = '#020617';
       ctx.lineWidth = 1.8;
+      ctx.lineJoin = 'round';
       ctx.stroke();
-      // 暗鋼刀背與血槽
+
       ctx.beginPath();
-      ctx.moveTo(-1.5, -4.2);
-      ctx.quadraticCurveTo(10, -4.8, 21.5, 0);
-      ctx.quadraticCurveTo(10, -1.6, -1.5, -1.4);
+      ctx.moveTo(-1.5, -2.0);
+      ctx.quadraticCurveTo(14, -3.1, 29, -1.5);
+      ctx.lineTo(27.2, 0.2);
+      ctx.quadraticCurveTo(13, -1.0, -1.5, 0);
       ctx.closePath();
-      ctx.fillStyle = '#334155';
+      ctx.fillStyle = '#475569';
       ctx.fill();
-      ctx.strokeStyle = '#F8FAFC';
-      ctx.lineWidth = 1.0;
-      ctx.beginPath();
-      ctx.moveTo(0, 2.7);
-      ctx.quadraticCurveTo(11, 4.0, 20.8, 0.4);
-      ctx.stroke();
-      // 金色翼狀護手與青藍寶石
-      ctx.fillStyle = '#F59E0B';
+
+      // 細長金色護手鍔
+      ctx.fillStyle = '#EAB308';
       ctx.strokeStyle = '#020617';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.roundRect(-4.5, -6.5, 3.5, 13, 1.2);
+      ctx.roundRect(-5, -4.8, 3, 9.5, 1.1);
       ctx.fill();
       ctx.stroke();
-      ctx.fillStyle = '#38BDF8';
-      ctx.beginPath();
-      ctx.arc(-2.8, 0, 1.5, 0, Math.PI * 2);
-      ctx.fill();
-      // 雙手深藍金菱紋柄＋圓金球首
+
+      // 深藍金菱紋柄＋圓金球首
       ctx.fillStyle = '#0F172A';
-      ctx.fillRect(-16.5, -2.5, 12, 5);
-      ctx.strokeRect(-16.5, -2.5, 12, 5);
+      ctx.fillRect(-17, -2.1, 12, 4.2);
+      ctx.strokeRect(-17, -2.1, 12, 4.2);
       ctx.fillStyle = '#FACC15';
-      for (const dx of [-14, -10.5, -7]) {
-        ctx.fillRect(dx, -1, 2, 2);
+      for (const dx of [-14.5, -11, -7.5]) {
+        ctx.fillRect(dx, -0.9, 1.8, 1.8);
       }
-      ctx.fillStyle = '#F59E0B';
+      ctx.fillStyle = '#EAB308';
       ctx.beginPath();
-      ctx.arc(-17.5, 0, 2.5, 0, Math.PI * 2);
+      ctx.arc(-18, 0, 2.3, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     } else {
@@ -1130,83 +1126,84 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
       ctx.strokeRect(shieldFrontX - 2.2, -4.5, 3.6, 9);
       ctx.restore();
     } else if (meleeKind === 'greatsword') {
-      const drawWarBlade = (baseX: number, isSwinging: boolean) => {
-        // Winged gold crossguard
-        ctx.fillStyle = '#F59E0B';
+      const drawKatana = (tsubaX: number, isSwinging: boolean) => {
+        // Dark navy diamond-wrapped tsuka hilt extending cleanly behind tsuba
+        ctx.fillStyle = '#1E293B';
+        ctx.strokeStyle = '#020617';
+        ctx.lineWidth = 1.7;
+        ctx.beginPath();
+        ctx.roundRect(tsubaX - 20, -2.3, 20, 4.6, 1.1);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#FACC15';
+        for (const ox of [-17, -12.5, -8, -4]) {
+          ctx.fillRect(tsubaX + ox, -1.0, 2.0, 2.0);
+        }
+
+        // Round gold kashira pommel
+        ctx.fillStyle = '#EAB308';
         ctx.strokeStyle = '#020617';
         ctx.lineWidth = 1.6;
         ctx.beginPath();
-        ctx.roundRect(baseX, -7.2, 4.2, 14.4, 1.4);
+        ctx.arc(tsubaX - 21, 0, 2.6, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
-        ctx.fillStyle = '#38BDF8';
-        ctx.beginPath();
-        ctx.arc(baseX + 2.1, 0, 1.6, 0, Math.PI * 2);
-        ctx.fill();
 
-        // Heavy broad war-blade body
+        // Slim gold tsuba guard
+        ctx.fillStyle = '#EAB308';
         ctx.beginPath();
-        ctx.moveTo(baseX + 4.2, -4.6);
-        ctx.quadraticCurveTo(baseX + 21, -6.2, baseX + 36, -0.4);
-        ctx.quadraticCurveTo(baseX + 21, 5.2, baseX + 4.2, 4.0);
+        ctx.roundRect(tsubaX, -5.25, 3.4, 10.5, 1.1);
+        ctx.fill();
+        ctx.stroke();
+
+        // Iconic long sleek katana blade (~57px, ~2x character body diameter)
+        const bladeStartX = tsubaX + 3.4;
+        const bladeTipX = tsubaX + 60;
+        ctx.beginPath();
+        ctx.moveTo(bladeStartX, -2.7);
+        ctx.quadraticCurveTo(bladeStartX + 30, -4.4, bladeTipX, -2.2);
+        ctx.lineTo(bladeTipX - 5.5, 2.6);
+        ctx.quadraticCurveTo(bladeStartX + 27, 1.4, bladeStartX, 2.7);
         ctx.closePath();
-        ctx.fillStyle = '#E2E8F0';
+        ctx.fillStyle = isSwinging ? '#FFFFFF' : '#F8FAFC';
         ctx.fill();
         ctx.strokeStyle = '#020617';
-        ctx.lineWidth = 1.7;
+        ctx.lineWidth = 1.9;
+        ctx.lineJoin = 'round';
         ctx.stroke();
 
-        // Dark tempered spine + fuller + bright silver edge
+        // Gunmetal-slate spine half along upper blade back
         ctx.beginPath();
-        ctx.moveTo(baseX + 4.5, -4.1);
-        ctx.quadraticCurveTo(baseX + 20, -5.4, baseX + 34.5, -0.5);
-        ctx.quadraticCurveTo(baseX + 20, -1.8, baseX + 4.5, -1.3);
+        ctx.moveTo(bladeStartX + 0.4, -2.3);
+        ctx.quadraticCurveTo(bladeStartX + 30, -4.0, bladeTipX - 1.5, -2.0);
+        ctx.lineTo(bladeTipX - 3.5, 0.2);
+        ctx.quadraticCurveTo(bladeStartX + 28, -1.2, bladeStartX + 0.4, 0);
         ctx.closePath();
-        ctx.fillStyle = '#334155';
+        ctx.fillStyle = '#475569';
         ctx.fill();
-
-        ctx.strokeStyle = '#F8FAFC';
-        ctx.lineWidth = isSwinging ? 1.8 : 1.2;
-        ctx.beginPath();
-        ctx.moveTo(baseX + 5.5, 2.8);
-        ctx.quadraticCurveTo(baseX + 20, 4.0, baseX + 34.2, -0.2);
-        ctx.stroke();
-
-        // Pommel orb behind grip
-        ctx.fillStyle = '#F59E0B';
-        ctx.strokeStyle = '#020617';
-        ctx.lineWidth = 1.4;
-        ctx.beginPath();
-        ctx.arc(baseX - 9.5, 0, 2.6, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
       };
 
       if (attackAnimKind === 'greatsword' && attackAnimProgress > 0) {
-        // 大刀順時針重斬：雙手握柄與寬刃大刀同步由負角順時針橫掃，外緣加亮刃光
-        const swingRot = -1.55 + attackAnimProgress * 3.0;
+        // 大刀順時針橫斬：雙手握柄與修長武士刀同步由負角順時針掃向正角
+        const swingRot = -1.45 + attackAnimProgress * 2.95;
         ctx.save();
         ctx.rotate(swingRot);
-        const gripInnerX = bodyR * 0.96;
-        const gripOuterX = bodyR * 1.28;
-        drawWarBlade(gripOuterX + 1, true);
-        drawGrip(gripInnerX, 2.5, 1);
-        drawGrip(gripOuterX, -2.0, -1);
+        drawKatana(bodyR * 1.18, true);
+        drawGrip(bodyR * 0.55, 2.5, 1);
+        drawGrip(bodyR * 0.98, -1.5, -1);
         ctx.restore();
       } else {
-        const rx = bodyR * 1.04 + armSwing * 0.25;
-        const ry = bodyR * 0.56;
-        const lx = bodyR * 1.16 + armSwing * 0.22;
-        const ly = bodyR * 0.1;
-
+        // 經典光暈戰記右側身平舉握刀姿：刀身沿角色右側腰際筆直前指，不擋臉
+        const flankX = bodyR * 0.15 + armSwing * 0.14;
+        const flankY = bodyR * 0.90;
         ctx.save();
-        ctx.translate(lx, ly);
-        ctx.rotate(-0.46);
-        drawWarBlade(-3.2, false);
+        ctx.translate(flankX, flankY);
+        ctx.rotate(-0.04);
+        drawKatana(bodyR * 0.48, false);
         ctx.restore();
 
-        drawGrip(rx, ry, 1);
-        drawGrip(lx, ly, -1);
+        drawGrip(-bodyR * 0.14 + armSwing * 0.14, bodyR * 0.92, 1);
+        drawHand(ctx, bodyR * 0.40 + armSwing * 0.14, bodyR * 0.88, handR, handColor);
       }
     } else {
       // 小刀：刺擊時右手筆直前刺、左手後收保持平衡
