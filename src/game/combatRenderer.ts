@@ -145,20 +145,20 @@ export function drawSlashEffect(ctx: CanvasRenderingContext2D, s: SlashEffect) {
       ctx.stroke();
     }
   } else {
-    // 順時針弧形刀光軌跡（由負角順時針掃向正角）
-    const startAng = -s.arc / 2;
+    // 由右至左逆時針弧形刀光軌跡（由角色右側正角掃向左側負角）
+    const startAng = s.arc / 2;
     const curEnd = s.isUltimate
-      ? s.arc / 2
-      : startAng + s.arc * clamp(progress * 1.25, 0.18, 1.0);
-    const trailStart = s.isUltimate ? startAng : Math.max(startAng, curEnd - s.arc * 0.72);
+      ? -s.arc / 2
+      : startAng - s.arc * clamp(progress * 1.25, 0.18, 1.0);
+    const trailStart = s.isUltimate ? startAng : Math.min(startAng, curEnd + s.arc * 0.72);
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.arc(0, 0, s.reach, trailStart, curEnd, false);
+    ctx.arc(0, 0, s.reach, trailStart, curEnd, true);
     ctx.closePath();
     ctx.fillStyle = `${s.color}${s.isUltimate ? '66' : '38'}`;
     ctx.fill();
     ctx.beginPath();
-    ctx.arc(0, 0, s.reach, trailStart, curEnd, false);
+    ctx.arc(0, 0, s.reach, trailStart, curEnd, true);
     ctx.strokeStyle = '#FFFFFF';
     ctx.lineWidth = s.isUltimate ? 6 : 4;
     ctx.stroke();
@@ -1156,14 +1156,14 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
         ctx.fill();
         ctx.stroke();
 
-        // Iconic long sleek katana blade (~57px, ~2x character body diameter)
+        // Iconic long sleek katana blade (~57px, ~2x character body diameter; bright edge leads right-to-left sweep on -Y)
         const bladeStartX = tsubaX + 3.4;
         const bladeTipX = tsubaX + 60;
         ctx.beginPath();
-        ctx.moveTo(bladeStartX, -2.7);
-        ctx.quadraticCurveTo(bladeStartX + 30, -4.4, bladeTipX, -2.2);
-        ctx.lineTo(bladeTipX - 5.5, 2.6);
-        ctx.quadraticCurveTo(bladeStartX + 27, 1.4, bladeStartX, 2.7);
+        ctx.moveTo(bladeStartX, 2.7);
+        ctx.quadraticCurveTo(bladeStartX + 30, 4.4, bladeTipX, 2.2);
+        ctx.lineTo(bladeTipX - 5.5, -2.6);
+        ctx.quadraticCurveTo(bladeStartX + 27, -1.4, bladeStartX, -2.7);
         ctx.closePath();
         ctx.fillStyle = isSwinging ? '#FFFFFF' : '#F8FAFC';
         ctx.fill();
@@ -1172,20 +1172,20 @@ export function drawCharacter(ctx: CanvasRenderingContext2D, params: CharacterRe
         ctx.lineJoin = 'round';
         ctx.stroke();
 
-        // Gunmetal-slate spine half along upper blade back
+        // Gunmetal-slate spine half along outer (+Y) blade back
         ctx.beginPath();
-        ctx.moveTo(bladeStartX + 0.4, -2.3);
-        ctx.quadraticCurveTo(bladeStartX + 30, -4.0, bladeTipX - 1.5, -2.0);
-        ctx.lineTo(bladeTipX - 3.5, 0.2);
-        ctx.quadraticCurveTo(bladeStartX + 28, -1.2, bladeStartX + 0.4, 0);
+        ctx.moveTo(bladeStartX + 0.4, 2.3);
+        ctx.quadraticCurveTo(bladeStartX + 30, 4.0, bladeTipX - 1.5, 2.0);
+        ctx.lineTo(bladeTipX - 3.5, -0.2);
+        ctx.quadraticCurveTo(bladeStartX + 28, 1.2, bladeStartX + 0.4, 0);
         ctx.closePath();
         ctx.fillStyle = '#475569';
         ctx.fill();
       };
 
       if (attackAnimKind === 'greatsword' && attackAnimProgress > 0) {
-        // 大刀順時針橫斬：雙手握柄與修長武士刀同步由負角順時針掃向正角
-        const swingRot = -1.45 + attackAnimProgress * 2.95;
+        // 大刀由右至左逆時針橫斬：從角色右側（+1.45）順暢掃向左側（-1.50），雪亮刀刃朝前斬出
+        const swingRot = 1.45 - attackAnimProgress * 2.95;
         ctx.save();
         ctx.rotate(swingRot);
         drawKatana(bodyR * 1.18, true);
