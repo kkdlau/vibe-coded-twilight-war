@@ -1,7 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
   ArrowLeft,
-  ArrowRight,
   Check,
   Clock,
   Crosshair,
@@ -14,12 +13,9 @@ import {
 import { FACTIONS, FACTION_CHARACTERS, GUNS, MELEES } from '../game/data';
 import {
   SIEGE_DURATION_OPTIONS,
-  SIEGE_HERO_PRESETS,
-  SIEGE_PASSIVES,
-  SIEGE_TACTICAL_SKILLS,
-  SIEGE_ULTIMATE_SKILLS,
   getDefaultSiegeLoadout,
   getPassiveMeta,
+  getSiegeHeroPreset,
   getTacticalMeta,
   getUltimateMeta,
 } from '../game/siegeData';
@@ -49,13 +45,11 @@ interface SiegeSetupViewProps {
   ) => void;
 }
 
-type SetupTab = 'gear' | 'skills';
-
 function formatMeleeSummary(m: MeleeDef): string {
   if (m.kind === 'shield') {
     return `正面格擋 · 耐久 100 · 震退破陣 · 移動 ${Math.round(m.moveSpeedMult * 100)}%`;
   }
-  return `傷害 ${m.damage} · 攻速 ${m.swingRate}/s · 距離 ${m.reach}px`;
+  return `傷害 ${m.damage} · 攻速 ${m.swingRate}/s · 距離 ${m.reach}px · 移動 ${Math.round(m.moveSpeedMult * 100)}%`;
 }
 
 export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
@@ -67,49 +61,36 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
 }) => {
   const [faction, setFaction] = useState<SiegeFactionId>(initialFaction);
   const [selectedCharId, setSelectedCharId] = useState<string>(FACTION_CHARACTERS[initialFaction][0].id);
-  const [loadout, setLoadout] = useState<SiegePlayerLoadout>(() =>
-    getDefaultSiegeLoadout(initialFaction, FACTION_CHARACTERS[initialFaction][0].id)
-  );
   const [durationSec, setDurationSec] = useState<SiegeMatchDurationSec>(1080);
-  const [activeTab, setActiveTab] = useState<SetupTab>('gear');
 
   const characters = FACTION_CHARACTERS[faction];
   const selectedChar = characters.find((c) => c.id === selectedCharId) || characters[0];
   const facInfo = FACTIONS[faction];
 
-  const tacticalList = useMemo(
-    () => SIEGE_TACTICAL_SKILLS.filter((s) => s.faction === faction),
-    [faction]
+  const activePreset = useMemo(
+    () => getSiegeHeroPreset(faction, selectedChar.id),
+    [faction, selectedChar.id]
   );
-  const ultimateList = useMemo(
-    () => SIEGE_ULTIMATE_SKILLS.filter((s) => s.faction === faction),
-    [faction]
-  );
-  const passiveList = useMemo(
-    () => SIEGE_PASSIVES.filter((s) => s.faction === faction),
-    [faction]
+  const bundledLoadout = useMemo(
+    () => getDefaultSiegeLoadout(faction, selectedChar.id),
+    [faction, selectedChar.id]
   );
 
-  const selectedGun = GUNS.find((g) => g.id === loadout.gunId) || GUNS[0];
-  const selectedMelee = MELEES.find((m) => m.id === loadout.meleeId) || MELEES[0];
-  const selectedTactical = getTacticalMeta(loadout.tacticalId);
-  const selectedUltimate = getUltimateMeta(loadout.ultimateId);
-  const selectedPassive = getPassiveMeta(loadout.passiveId);
+  const bundledGun = GUNS.find((g) => g.id === bundledLoadout.gunId) || GUNS[0];
+  const bundledGunProfile = getSiegeGunProfile(bundledGun.kind);
+  const bundledMelee = MELEES.find((m) => m.id === bundledLoadout.meleeId) || MELEES[0];
+  const bundledTactical = getTacticalMeta(bundledLoadout.tacticalId);
+  const bundledUltimate = getUltimateMeta(bundledLoadout.ultimateId);
+  const bundledPassive = getPassiveMeta(bundledLoadout.passiveId);
 
   const handleFactionSwitch = (nextFac: SiegeFactionId) => {
     if (nextFac === faction) return;
     setFaction(nextFac);
     const firstSkin = FACTION_CHARACTERS[nextFac][0];
     setSelectedCharId(firstSkin.id);
-    setLoadout(getDefaultSiegeLoadout(nextFac, firstSkin.id));
   };
 
-  const handleHeroPick = (skinId: string) => {
-    setSelectedCharId(skinId);
-    setLoadout(getDefaultSiegeLoadout(faction, skinId));
-  };
-
-  const activePreset = SIEGE_HERO_PRESETS.find((p) => p.faction === faction && p.skinId === selectedChar.id);
+  const effGunDmg = Math.round(bundledGun.damage * bundledGunProfile.damageMult);
 
   return (
     <div className="min-h-screen w-full flex flex-col bg-[#0B0F17] text-slate-100 select-none">
@@ -127,7 +108,7 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
           <div className="flex items-center gap-2.5">
             <Shield className="w-5 h-5 text-amber-400" />
             <span className="text-base sm:text-lg font-black tracking-wide text-white">
-              三路城堡攻防戰（塔防 MOBA · 5v5 無限復活）
+              三路城堡攻防戰（塔防 MOBA · 5v5 專屬英雄）
             </span>
           </div>
 
@@ -137,6 +118,7 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
               return (
                 <button
                   key={fac}
+                  type="button"
                   onClick={() => handleFactionSwitch(fac)}
                   className={`flex items-center gap-2 px-3.5 py-2 rounded-xl border text-xs sm:text-sm font-bold transition-all cursor-pointer ${
                     active
@@ -155,387 +137,58 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
         </div>
       </header>
 
-      {/* Main Content */}
+      {/* Single-Page Unified 2-Column Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-5 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* LEFT: 2-Tab Customizer */}
-        <div className="lg:col-span-7 flex flex-col gap-4">
-          {/* Tab Switcher */}
-          <div className="grid grid-cols-2 gap-2 p-1.5 rounded-2xl bg-[#121926] border border-slate-800">
-            <button
-              type="button"
-              onClick={() => setActiveTab('gear')}
-              className={`py-2.5 px-4 rounded-xl text-sm font-bold transition-all cursor-pointer flex items-center justify-center gap-2 ${
-                activeTab === 'gear'
-                  ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800/70'
-              }`}
-            >
-              <Swords className="w-4 h-4" />
-              <span>1. 選擇英雄與武器</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('skills')}
-              className={`py-2.5 px-4 rounded-xl text-sm font-bold transition-all cursor-pointer flex items-center justify-center gap-2 ${
-                activeTab === 'skills'
-                  ? 'bg-sky-500 text-slate-950 shadow-md shadow-sky-500/20'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800/70'
-              }`}
-            >
-              <Sparkles className="w-4 h-4" />
-              <span>2. 技能變種與天賦</span>
-            </button>
-          </div>
+        {/* LEFT COLUMN (5 cols): 5 Bundled Hero Roster + Match Settings + Map + Start */}
+        <div className="lg:col-span-5 flex flex-col gap-4">
+          <section className="bg-[#121926] border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-base font-bold text-white">選擇專屬英雄</h2>
+              <span className="text-xs text-slate-400">每位英雄自帶獨特武裝與技能組合</span>
+            </div>
 
-          {activeTab === 'gear' ? (
-            <>
-              {/* Hero Roster */}
-              <section className="bg-[#121926] border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="text-base font-bold text-white">選擇出戰英雄</h2>
-                    {activePreset && (
-                      <span className="px-2.5 py-0.5 rounded-md bg-amber-500/20 border border-amber-400/40 text-xs font-bold text-amber-300">
-                        {activePreset.roleBadge} · {activePreset.laneHint}
-                      </span>
-                    )}
-                  </div>
-                  <span className="text-xs text-slate-400">選英雄會自動配好推薦裝備與技能，仍可自由修改</span>
-                </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
-                  {characters.map((ch) => {
-                    const active = ch.id === selectedChar.id;
-                    const preset = SIEGE_HERO_PRESETS.find((p) => p.faction === faction && p.skinId === ch.id);
-                    return (
-                      <button
-                        key={ch.id}
-                        type="button"
-                        onClick={() => handleHeroPick(ch.id)}
-                        className={`p-3 rounded-xl border transition-all cursor-pointer flex flex-col items-center text-center gap-1.5 ${
-                          active
-                            ? 'bg-[#1A273D] border-amber-400 shadow-lg shadow-amber-500/15'
-                            : 'bg-slate-900/75 border-slate-800 hover:border-slate-600'
-                        }`}
-                      >
-                        <CharacterAvatarSvg skin={ch} className="w-12 h-12 shrink-0" />
-                        <span className="text-xs sm:text-sm font-bold text-slate-100 leading-tight">
+            <div className="flex flex-col gap-2">
+              {characters.map((ch) => {
+                const active = ch.id === selectedChar.id;
+                const preset = getSiegeHeroPreset(faction, ch.id);
+                const heroGun = GUNS.find((g) => g.id === preset.loadout.gunId) || GUNS[0];
+                const heroMelee = MELEES.find((m) => m.id === preset.loadout.meleeId) || MELEES[0];
+                return (
+                  <button
+                    key={ch.id}
+                    type="button"
+                    onClick={() => setSelectedCharId(ch.id)}
+                    className={`w-full p-2.5 sm:p-3 rounded-xl border text-left transition-all cursor-pointer flex items-center gap-3 ${
+                      active
+                        ? 'bg-[#1A273D] border-amber-400 shadow-lg shadow-amber-500/15'
+                        : 'bg-slate-950/75 border-slate-800 hover:border-slate-600'
+                    }`}
+                  >
+                    <CharacterAvatarSvg skin={ch} className="w-11 h-11 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold text-white truncate">
                           {ch.name.replace('（預設）', '')}
                         </span>
-                        <span className="text-xs text-sky-300 font-semibold">{preset?.roleBadge}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </section>
-
-              {/* Primary Gun Selector */}
-              <section className="bg-[#121926] border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-sm font-bold text-amber-300">
-                    <Crosshair className="w-4 h-4" />
-                    <span>主武器（遠程槍械 · 無地上執槍）</span>
-                  </div>
-                  <span className="text-xs text-slate-400">按 [R] 裝彈 · 脫戰自動補彈</span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {GUNS.map((g) => {
-                    const active = loadout.gunId === g.id;
-                    const profile = getSiegeGunProfile(g.kind);
-                    const effDmg = Math.round(g.damage * profile.damageMult);
-                    return (
-                      <button
-                        key={g.id}
-                        type="button"
-                        onClick={() => setLoadout((prev) => ({ ...prev, gunId: g.id }))}
-                        className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-center gap-3 ${
-                          active
-                            ? 'bg-[#1A273D] border-amber-400 shadow-md shadow-amber-500/15'
-                            : 'bg-slate-950/75 border-slate-800 hover:border-slate-600'
-                        }`}
-                      >
-                        <div className="w-12 h-12 rounded-xl bg-slate-900 border border-slate-700/80 flex items-center justify-center shrink-0">
-                          <WeaponIconSvg kind={g.kind} color={g.color} className="w-9 h-9" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <span className="text-sm font-bold text-white truncate">{g.name}</span>
-                              <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-bold text-sky-300 shrink-0">
-                                {profile.roleTag}
-                              </span>
-                            </div>
-                            {active && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-xs font-bold shrink-0">
-                                <Check className="w-3 h-3" />
-                                已裝備
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-slate-300 mt-1">
-                            {g.kind === 'shotgun'
-                              ? `單丸 ${effDmg}×${g.pellets} · 破甲 ${Math.round(profile.defensePenetration * 100)}%`
-                              : profile.defensePenetration > 0
-                                ? `傷害 ${effDmg} · 破甲 ${Math.round(profile.defensePenetration * 100)}% · ${g.magSize} 發`
-                                : `傷害 ${effDmg} · 彈匣 ${g.magSize} 發 · 射速 ${(g.fireRate * profile.fireRateMult).toFixed(1)}/s`}
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </section>
-
-              {/* Secondary Melee / Shield Selector */}
-              <section className="bg-[#121926] border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-sm font-bold text-sky-300">
-                    <Swords className="w-4 h-4" />
-                    <span>副武器（近戰兵器 / 戰術盾 · 按 [Q] 切換）</span>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {MELEES.map((m) => {
-                    const active = loadout.meleeId === m.id;
-                    return (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => setLoadout((prev) => ({ ...prev, meleeId: m.id }))}
-                        className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex items-center gap-3 ${
-                          active
-                            ? 'bg-[#1A273D] border-sky-400 shadow-md shadow-sky-500/15'
-                            : 'bg-slate-950/75 border-slate-800 hover:border-slate-600'
-                        }`}
-                      >
-                        <div className="w-12 h-12 rounded-xl bg-slate-900 border border-slate-700/80 flex items-center justify-center shrink-0">
-                          <WeaponIconSvg kind={m.kind} color={m.color} className="w-9 h-9" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm font-bold text-white">{m.name}</span>
-                            {active && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-sky-500/20 text-sky-300 text-xs font-bold shrink-0">
-                                <Check className="w-3 h-3" />
-                                已裝備
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-slate-300 mt-1">{formatMeleeSummary(m)}</div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <div className="pt-2 flex justify-end">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('skills')}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 border border-sky-400/50 text-sky-200 text-sm font-bold cursor-pointer transition-colors"
-                  >
-                    <span>下一步：自訂技能與天賦</span>
-                    <ArrowRight className="w-4 h-4" />
+                        <span className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-400/30 text-[11px] font-bold text-sky-300 shrink-0">
+                          {preset.roleBadge}
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-400 mt-0.5 truncate">{preset.laneHint}</div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0 bg-slate-900/90 border border-slate-700/80 rounded-lg px-2 py-1">
+                      <WeaponIconSvg kind={heroGun.kind} className="w-6 h-6" />
+                      <WeaponIconSvg kind={heroMelee.kind} className="w-6 h-6" />
+                      {active && <Check className="w-4 h-4 text-amber-400 ml-0.5" />}
+                    </div>
                   </button>
-                </div>
-              </section>
-            </>
-          ) : (
-            <div className="flex flex-col gap-4">
-              {/* Tactical [E / Right-Click] */}
-              <section className="bg-[#121926] border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-bold text-sky-300 flex items-center gap-2">
-                    <Sparkles className="w-4 h-4" />
-                    <span>戰術技能變種（Lv.2 解鎖 · 按 [E] 或滑鼠右鍵施放）</span>
-                  </span>
-                  <span className="text-xs text-slate-400">冷卻制主動技</span>
-                </div>
-                <div className="grid grid-cols-1 gap-2.5">
-                  {tacticalList.map((sk) => {
-                    const active = loadout.tacticalId === sk.id;
-                    return (
-                      <button
-                        key={sk.id}
-                        type="button"
-                        onClick={() => setLoadout((prev) => ({ ...prev, tacticalId: sk.id }))}
-                        className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-                          active
-                            ? 'bg-[#1A273D] border-sky-400 shadow-md shadow-sky-500/15'
-                            : 'bg-slate-950/75 border-slate-800 hover:border-slate-600'
-                        }`}
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-bold text-white">{sk.name}</span>
-                            <span className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-400/30 text-xs font-bold text-sky-300">
-                              {sk.shortTag}
-                            </span>
-                            <span className="px-2 py-0.5 rounded bg-slate-800 text-xs font-mono-num font-bold text-slate-200">
-                              CD {sk.cooldownSec} 秒
-                            </span>
-                          </div>
-                          {active && (
-                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded bg-sky-500/20 text-sky-200 text-xs font-bold">
-                              <Check className="w-3.5 h-3.5" />
-                              已裝備
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[13px] text-slate-200 leading-relaxed">{sk.desc}</p>
-                      </button>
-                    );
-                  })}
-                </div>
-              </section>
-
-              {/* Ultimate [F / Charge] */}
-              <section className="bg-[#121926] border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-bold text-amber-300 flex items-center gap-2">
-                    <Flame className="w-4 h-4" />
-                    <span>終極大招變種（Lv.4 解鎖 · 按 [Q] 切近戰滿氣長按左鍵釋放）</span>
-                  </span>
-                  <span className="text-xs text-slate-400">經典光暈集氣施放</span>
-                </div>
-                <div className="grid grid-cols-1 gap-2.5">
-                  {ultimateList.map((sk) => {
-                    const active = loadout.ultimateId === sk.id;
-                    return (
-                      <button
-                        key={sk.id}
-                        type="button"
-                        onClick={() => setLoadout((prev) => ({ ...prev, ultimateId: sk.id }))}
-                        className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-                          active
-                            ? 'bg-[#1A273D] border-amber-400 shadow-md shadow-amber-500/15'
-                            : 'bg-slate-950/75 border-slate-800 hover:border-slate-600'
-                        }`}
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-bold text-white">{sk.name}</span>
-                            <span className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-400/30 text-xs font-bold text-amber-300">
-                              {sk.shortTag}
-                            </span>
-                          </div>
-                          {active && (
-                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded bg-amber-500/20 text-amber-200 text-xs font-bold">
-                              <Check className="w-3.5 h-3.5" />
-                              已裝備
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[13px] text-slate-200 leading-relaxed">{sk.desc}</p>
-                      </button>
-                    );
-                  })}
-                </div>
-              </section>
-
-              {/* Passive */}
-              <section className="bg-[#121926] border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-bold text-emerald-300">陣營被動天賦（全場常駐生效）</span>
-                </div>
-                <div className="grid grid-cols-1 gap-2.5">
-                  {passiveList.map((sk) => {
-                    const active = loadout.passiveId === sk.id;
-                    return (
-                      <button
-                        key={sk.id}
-                        type="button"
-                        onClick={() => setLoadout((prev) => ({ ...prev, passiveId: sk.id }))}
-                        className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-                          active
-                            ? 'bg-[#1A273D] border-emerald-400 shadow-md shadow-emerald-500/15'
-                            : 'bg-slate-950/75 border-slate-800 hover:border-slate-600'
-                        }`}
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-bold text-white">{sk.name}</span>
-                            <span className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-400/30 text-xs font-bold text-emerald-300">
-                              {sk.shortTag}
-                            </span>
-                          </div>
-                          {active && (
-                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded bg-emerald-500/20 text-emerald-200 text-xs font-bold">
-                              <Check className="w-3.5 h-3.5" />
-                              已裝備
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[13px] text-slate-200 leading-relaxed">{sk.desc}</p>
-                      </button>
-                    );
-                  })}
-                </div>
-              </section>
+                );
+              })}
             </div>
-          )}
-        </div>
+          </section>
 
-        {/* RIGHT: Current Loadout Summary + Match Settings + Map + Launch CTA */}
-        <div className="lg:col-span-5 lg:sticky lg:top-20 flex flex-col gap-4 bg-[#121926] border border-slate-800 rounded-2xl p-4 sm:p-5">
-          {/* Selected Loadout Overview */}
-          <div className="rounded-xl bg-slate-950/80 border border-slate-800 p-3.5 space-y-2.5">
-            <div className="flex items-center gap-3 pb-2.5 border-b border-slate-800">
-              <CharacterAvatarSvg skin={selectedChar} className="w-11 h-11 shrink-0" />
-              <div className="min-w-0 flex-1">
-                <div className="text-sm font-extrabold text-white truncate">
-                  {facInfo.name} · {selectedChar.name.replace('（預設）', '')}
-                </div>
-                <div className="text-xs text-amber-300 font-semibold">
-                  {activePreset?.roleBadge} · {activePreset?.laneHint}
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-1.5 text-xs">
-              <button
-                type="button"
-                onClick={() => setActiveTab('gear')}
-                className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-left cursor-pointer"
-              >
-                <span className="text-slate-400">主／副武器</span>
-                <span className="font-bold text-slate-100">
-                  {selectedGun.name} + {selectedMelee.name}
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('skills')}
-                className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-left cursor-pointer"
-              >
-                <span className="text-sky-300 font-semibold">[E/右鍵 · Lv.2] 戰術技</span>
-                <span className="font-bold text-white">
-                  {selectedTactical.name} ({selectedTactical.cooldownSec}s)
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('skills')}
-                className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-left cursor-pointer"
-              >
-                <span className="text-amber-300 font-semibold">[近戰集氣 · Lv.4] 大招</span>
-                <span className="font-bold text-white">{selectedUltimate.name}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('skills')}
-                className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-left cursor-pointer"
-              >
-                <span className="text-emerald-300 font-semibold">常駐被動</span>
-                <span className="font-bold text-white">{selectedPassive.name}</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Match Settings */}
-          <div className="space-y-2.5">
+          {/* Compact Match Settings + Map + Launch CTA */}
+          <section className="bg-[#121926] border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-slate-200">
                 <Clock className="w-4 h-4 text-amber-400" />
@@ -576,33 +229,169 @@ export const SiegeSetupView: React.FC<SiegeSetupViewProps> = ({
                 ))}
               </select>
             </div>
-          </div>
 
-          {/* Map Preview */}
-          <div className="relative h-48 sm:h-52 rounded-xl overflow-hidden border border-slate-800 bg-slate-950">
-            <MiniMapPreview mapId={SIEGE_MAP_ID} className="w-full h-full border-0 rounded-none" />
-            <div className="pointer-events-none absolute top-2 left-2 bg-slate-950/90 border border-slate-700/80 rounded-lg px-2.5 py-1 text-xs font-semibold text-slate-200">
-              光暈裂谷 54×54 · 三路推塔
+            <div className="relative h-40 rounded-xl overflow-hidden border border-slate-800 bg-slate-950">
+              <MiniMapPreview mapId={SIEGE_MAP_ID} className="w-full h-full border-0 rounded-none" />
+              <div className="pointer-events-none absolute top-2 left-2 bg-slate-950/90 border border-slate-700/80 rounded-lg px-2.5 py-1 text-xs font-semibold text-slate-200">
+                光暈裂谷 54×54 · 三路推塔
+              </div>
             </div>
-          </div>
 
-          {/* Rule Summary */}
-          <div className="rounded-xl bg-slate-950/80 border border-slate-800 p-3.5 text-xs text-slate-300 space-y-1.5 leading-relaxed">
-            <div className="font-bold text-amber-300">模式規則摘要</div>
-            <p>• 升級大幅提升最大血量 (+22)、防禦與跑速；Lv.2 解鎖戰術技 [E]、Lv.4 解鎖近戰集氣大招！</p>
-            <p>• 軍功可於泉水／復活時升級 5 階裝備與技能：[3] 槍械 · [4] 戰技 · [5] 重甲 · [6] 大招（3 階覺醒進階型態）。</p>
-            <p>• 步槍／手槍／散彈（近距破甲）／狙擊（超遠穿甲）各有定位；小兵採純近戰步兵與大刀重兵。</p>
-          </div>
+            <button
+              type="button"
+              onClick={() => onStartSiege(faction, selectedChar, bundledLoadout, durationSec)}
+              className="w-full flex items-center justify-center gap-2 px-7 py-3.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-base rounded-xl shadow-lg shadow-amber-500/25 transition-all cursor-pointer"
+            >
+              <Play className="w-5 h-5 fill-current" />
+              <span>進入三路攻防戰</span>
+            </button>
+          </section>
+        </div>
 
-          {/* Launch Button */}
-          <button
-            type="button"
-            onClick={() => onStartSiege(faction, selectedChar, loadout, durationSec)}
-            className="w-full flex items-center justify-center gap-2 px-7 py-3.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-base rounded-xl shadow-lg shadow-amber-500/25 transition-all cursor-pointer"
-          >
-            <Play className="w-5 h-5 fill-current" />
-            <span>進入三路攻防戰</span>
-          </button>
+        {/* RIGHT COLUMN (7 cols): Complete Bundled Hero Showcase on One Page */}
+        <div className="lg:col-span-7 flex flex-col gap-4">
+          {/* Hero Header Showcase */}
+          <section className="bg-[#121926] border border-slate-800 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center gap-4">
+            <div className="w-16 h-16 rounded-2xl bg-slate-950 border border-slate-700/80 flex items-center justify-center shrink-0">
+              <CharacterAvatarSvg skin={selectedChar} className="w-14 h-14" />
+            </div>
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-xl font-black text-white">
+                  {selectedChar.name.replace('（預設）', '')}
+                </h1>
+                <span className="px-2.5 py-0.5 rounded-md bg-amber-500/20 border border-amber-400/40 text-xs font-bold text-amber-300">
+                  {activePreset.roleBadge}
+                </span>
+                <span className="px-2.5 py-0.5 rounded-md bg-slate-800 border border-slate-700 text-xs font-semibold text-sky-300">
+                  {facInfo.name} · {activePreset.laneHint}
+                </span>
+              </div>
+              <p className="text-sm text-slate-200 leading-relaxed">{activePreset.tagline}</p>
+            </div>
+          </section>
+
+          {/* Bundled Weapons Showcase */}
+          <section className="bg-[#121926] border border-slate-800 rounded-2xl p-5 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-bold text-amber-300 flex items-center gap-2">
+                <Swords className="w-4 h-4" />
+                <span>專屬武裝組合（按 [Q] 切換 · 脫戰緩速補彈／擊殺補彈）</span>
+              </h2>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              {/* Bundled Primary Gun */}
+              <div className="rounded-xl bg-slate-950/85 border border-slate-700/80 p-4 flex items-center gap-3.5">
+                <div className="w-14 h-14 rounded-xl bg-slate-900 border border-amber-500/40 flex items-center justify-center shrink-0">
+                  <WeaponIconSvg kind={bundledGun.kind} color={bundledGun.color} className="w-11 h-11" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <Crosshair className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span className="text-xs font-bold text-amber-300">主武器</span>
+                    <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-bold text-sky-300">
+                      {bundledGunProfile.roleTag}
+                    </span>
+                  </div>
+                  <div className="text-base font-extrabold text-white mt-0.5">{bundledGun.name}</div>
+                  <div className="text-xs text-slate-300 mt-1 leading-snug">
+                    {bundledGun.kind === 'shotgun'
+                      ? `單丸 ${effGunDmg}×${bundledGun.pellets} · 破甲 ${Math.round(bundledGunProfile.defensePenetration * 100)}% · 彈匣 ${bundledGun.magSize}`
+                      : bundledGunProfile.defensePenetration > 0
+                        ? `傷害 ${effGunDmg} · 破甲 ${Math.round(bundledGunProfile.defensePenetration * 100)}% · 彈匣 ${bundledGun.magSize} 發`
+                        : `傷害 ${effGunDmg} · 彈匣 ${bundledGun.magSize} 發 · 射速 ${(bundledGun.fireRate * bundledGunProfile.fireRateMult).toFixed(1)}/s`}
+                  </div>
+                </div>
+              </div>
+
+              {/* Bundled Secondary Melee */}
+              <div className="rounded-xl bg-slate-950/85 border border-slate-700/80 p-4 flex items-center gap-3.5">
+                <div className="w-14 h-14 rounded-xl bg-slate-900 border border-sky-500/40 flex items-center justify-center shrink-0">
+                  <WeaponIconSvg kind={bundledMelee.kind} color={bundledMelee.color} className="w-11 h-11" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <Swords className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    <span className="text-xs font-bold text-sky-300">近戰兵器 / 戰術盾</span>
+                  </div>
+                  <div className="text-base font-extrabold text-white mt-0.5">{bundledMelee.name}</div>
+                  <div className="text-xs text-slate-300 mt-1 leading-snug">{formatMeleeSummary(bundledMelee)}</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* Bundled Skills & Passive Showcase */}
+          <section className="bg-[#121926] border border-slate-800 rounded-2xl p-5 space-y-3">
+            <h2 className="text-sm font-bold text-sky-300 flex items-center gap-2">
+              <Sparkles className="w-4 h-4" />
+              <span>專屬技能變種與天賦</span>
+            </h2>
+
+            <div className="grid grid-cols-1 gap-3">
+              {/* Tactical */}
+              <div className="rounded-xl bg-slate-950/85 border border-sky-500/40 p-4 space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-sky-500/20 text-sky-300 text-xs font-bold">
+                      戰術技 · Lv.2 解鎖
+                    </span>
+                    <span className="text-base font-extrabold text-white">{bundledTactical.name}</span>
+                    <span className="px-2 py-0.5 rounded bg-slate-800 text-xs font-semibold text-sky-200">
+                      {bundledTactical.shortTag}
+                    </span>
+                  </div>
+                  <span className="px-2.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-xs font-mono-num font-bold text-slate-200">
+                    按 [E] / 右鍵 · CD {bundledTactical.cooldownSec}s
+                  </span>
+                </div>
+                <p className="text-[13px] text-slate-200 leading-relaxed">{bundledTactical.desc}</p>
+              </div>
+
+              {/* Ultimate */}
+              <div className="rounded-xl bg-slate-950/85 border border-amber-500/40 p-4 space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-xs font-bold inline-flex items-center gap-1">
+                      <Flame className="w-3.5 h-3.5" />
+                      終極大招 · Lv.4 解鎖
+                    </span>
+                    <span className="text-base font-extrabold text-white">{bundledUltimate.name}</span>
+                    <span className="px-2 py-0.5 rounded bg-slate-800 text-xs font-semibold text-amber-200">
+                      {bundledUltimate.shortTag}
+                    </span>
+                  </div>
+                  <span className="px-2.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-xs font-semibold text-amber-200">
+                    切近戰滿氣長按左鍵 · 升 3 階覺醒
+                  </span>
+                </div>
+                <p className="text-[13px] text-slate-200 leading-relaxed">{bundledUltimate.desc}</p>
+              </div>
+
+              {/* Passive */}
+              <div className="rounded-xl bg-slate-950/85 border border-emerald-500/40 p-4 space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-xs font-bold">
+                      常駐被動天賦
+                    </span>
+                    <span className="text-base font-extrabold text-white">{bundledPassive.name}</span>
+                    <span className="px-2 py-0.5 rounded bg-slate-800 text-xs font-semibold text-emerald-200">
+                      {bundledPassive.shortTag}
+                    </span>
+                  </div>
+                </div>
+                <p className="text-[13px] text-slate-200 leading-relaxed">{bundledPassive.desc}</p>
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-slate-900/70 border border-slate-800 px-4 py-3 text-xs text-slate-300 flex flex-wrap gap-x-5 gap-y-1 leading-relaxed">
+              <span>• 升級加最大血量 (+22)、防禦減傷與跑速</span>
+              <span>• 泉水／復活按 [3-6] 升 5 階軍功裝備與技能</span>
+              <span>• 彈藥回復放慢，善用近戰搶攻與切武節奏取勝！</span>
+            </div>
+          </section>
         </div>
       </main>
     </div>

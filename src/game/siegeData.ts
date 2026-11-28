@@ -182,6 +182,7 @@ export interface SiegeHeroPreset {
   faction: SiegeFactionId;
   roleBadge: string;
   laneHint: string;
+  tagline: string;
   loadout: SiegePlayerLoadout;
 }
 
@@ -191,6 +192,7 @@ export const SIEGE_HERO_PRESETS: SiegeHeroPreset[] = [
     faction: 'royal',
     roleBadge: '均衡射手',
     laneHint: '推薦中路 / 下路',
+    tagline: '穩定步槍火力配反震護盾與連珠光雨，攻守兼備最易上手。',
     loadout: {
       gunId: 'rifle',
       meleeId: 'knife',
@@ -203,9 +205,10 @@ export const SIEGE_HERO_PRESETS: SiegeHeroPreset[] = [
     skinId: 'royal_paladin',
     faction: 'royal',
     roleBadge: '聖光支援',
-    laneHint: '推薦雙人下路 / 團戰',
+    laneHint: '推薦團戰 / 推進',
+    tagline: '靈活手槍配重型大刀，結合聖域結界與治癒聖彈，奶隊推塔一手包辦。',
     loadout: {
-      gunId: 'rifle',
+      gunId: 'pistol',
       meleeId: 'greatsword',
       tacticalId: 'royal_sanctuary_zone',
       ultimateId: 'royal_healing_salvo',
@@ -217,6 +220,7 @@ export const SIEGE_HERO_PRESETS: SiegeHeroPreset[] = [
     faction: 'royal',
     roleBadge: '突進戰士',
     laneHint: '推薦上路 / 野區',
+    tagline: '破陣衝鋒貼臉暈控，散彈破甲接雙爪連斬，近身爆發極強。',
     loadout: {
       gunId: 'shotgun',
       meleeId: 'claw',
@@ -230,6 +234,7 @@ export const SIEGE_HERO_PRESETS: SiegeHeroPreset[] = [
     faction: 'royal',
     roleBadge: '鐵壁重坦',
     laneHint: '推薦上路扛塔先手',
+    tagline: '防彈盾牌＋反震盾＋堅壁減傷，硬扛塔傷開團並用審判光柱轟塔。',
     loadout: {
       gunId: 'shotgun',
       meleeId: 'shield',
@@ -243,6 +248,7 @@ export const SIEGE_HERO_PRESETS: SiegeHeroPreset[] = [
     faction: 'royal',
     roleBadge: '聖殿炮台',
     laneHint: '推薦中路遠程壓制',
+    tagline: '超遠狙擊穿甲點射，配審判光柱隔距破塔，陣地戰火力核心。',
     loadout: {
       gunId: 'sniper',
       meleeId: 'greatsword',
@@ -256,6 +262,7 @@ export const SIEGE_HERO_PRESETS: SiegeHeroPreset[] = [
     faction: 'shadow',
     roleBadge: '全能偵察',
     laneHint: '推薦中路 / 遊走',
+    tagline: '鷹眼獵殺標記增傷配步槍與雙影噬龍，節奏明快適合全場支援。',
     loadout: {
       gunId: 'rifle',
       meleeId: 'knife',
@@ -269,6 +276,7 @@ export const SIEGE_HERO_PRESETS: SiegeHeroPreset[] = [
     faction: 'shadow',
     roleBadge: '疾風影刺',
     laneHint: '推薦上路 / 單抓',
+    tagline: '瞬影殘步閃現引爆，貼身散彈＋雙爪秒殺殘血，專精刺殺收割。',
     loadout: {
       gunId: 'shotgun',
       meleeId: 'claw',
@@ -282,6 +290,7 @@ export const SIEGE_HERO_PRESETS: SiegeHeroPreset[] = [
     faction: 'shadow',
     roleBadge: '結界法師',
     laneHint: '推薦中路清線團控',
+    tagline: '影霧閃避走位拉扯，大刀斬擊配盤龍結界封鎖團戰與推塔要道。',
     loadout: {
       gunId: 'rifle',
       meleeId: 'greatsword',
@@ -295,6 +304,7 @@ export const SIEGE_HERO_PRESETS: SiegeHeroPreset[] = [
     faction: 'shadow',
     roleBadge: '幻影突襲',
     laneHint: '推薦下路 / 搶野',
+    tagline: '極速手槍＋影霧加速切入，雙爪追獵殘血與野區單挑無人能敵。',
     loadout: {
       gunId: 'pistol',
       meleeId: 'claw',
@@ -308,6 +318,7 @@ export const SIEGE_HERO_PRESETS: SiegeHeroPreset[] = [
     faction: 'shadow',
     roleBadge: '冥鴉狙擊',
     laneHint: '推薦中路超遠狙殺',
+    tagline: '狙擊槍配鷹眼與穿牆極速貫穿龍，專精隔牆搶 Boss 與遠程斬殺。',
     loadout: {
       gunId: 'sniper',
       meleeId: 'greatsword',
@@ -397,8 +408,8 @@ export const SIEGE_CONFIG = {
   baronBuffDurationSec: 90,
   recallDurationSec: 3.5,
   fountainHealPerSec: 28,
-  outOfCombatAmmoDelaySec: 2.0,
-  outOfCombatAmmoPerSec: 3.5,
+  outOfCombatAmmoDelaySec: 4.0,
+  outOfCombatAmmoPerSec: 1.2,
   backdoorRadiusPx: 310,
   backdoorDamageMult: 0.35,
   suddenDeathStructureDmgMult: 1.35,
@@ -411,11 +422,16 @@ const PASSIVE_IDS = new Set<string>(SIEGE_PASSIVES.map((s) => s.id));
 const VALID_GUN_IDS = new Set(['pistol', 'rifle', 'shotgun', 'sniper']);
 const VALID_MELEE_IDS = new Set(['knife', 'claw', 'greatsword', 'shield']);
 
+export function getSiegeHeroPreset(faction: SiegeFactionId, skinId?: string): SiegeHeroPreset {
+  return (
+    SIEGE_HERO_PRESETS.find((p) => p.faction === faction && p.skinId === skinId) ??
+    SIEGE_HERO_PRESETS.find((p) => p.faction === faction) ??
+    SIEGE_HERO_PRESETS[0]
+  );
+}
+
 export function getDefaultSiegeLoadout(faction: SiegeFactionId, skinId?: string): SiegePlayerLoadout {
-  const matched = SIEGE_HERO_PRESETS.find((p) => p.faction === faction && p.skinId === skinId);
-  if (matched) return { ...matched.loadout };
-  const fallback = SIEGE_HERO_PRESETS.find((p) => p.faction === faction) ?? SIEGE_HERO_PRESETS[0];
-  return { ...fallback.loadout };
+  return { ...getSiegeHeroPreset(faction, skinId).loadout };
 }
 
 export function sanitizeSiegeLoadout(faction: SiegeFactionId, raw?: Partial<SiegePlayerLoadout> | null): SiegePlayerLoadout {

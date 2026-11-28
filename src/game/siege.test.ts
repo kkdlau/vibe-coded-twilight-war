@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { FACTION_CHARACTERS } from './data';
 import { TwilightEngine } from './engine';
 import { TILE } from './maps';
-import { SIEGE_PASSIVES, SIEGE_TACTICAL_SKILLS, SIEGE_ULTIMATE_SKILLS, SIEGE_UPGRADES, getDefaultSiegeLoadout } from './siegeData';
+import { SIEGE_CONFIG, SIEGE_HERO_PRESETS, SIEGE_PASSIVES, SIEGE_TACTICAL_SKILLS, SIEGE_ULTIMATE_SKILLS, SIEGE_UPGRADES, getDefaultSiegeLoadout } from './siegeData';
 import { applySiegeDefenseReduction, computeSiegeDefense, computeSiegeGunFalloffMult, computeSiegeMaxHp, computeSiegeMoveSpeedMult, getSiegeGunProfile, grantSiegeXpAndGold } from './siegeHelpers';
 import { SIEGE_MAP_ID, createSiegeMapSpec } from './siegeMap';
 import { HudSnapshot, SiegeFactionId, SiegePlayerLoadout } from './types';
@@ -512,5 +512,71 @@ describe('3-Lane Castle Siege / MOBA Mode (siege)', () => {
     shadowEng.siege!.playerState.upgrades.blade = 3;
     shadowEng.triggerSiegeTactical();
     expect(shadowEng.siege!.playerState.tacticalCd).toBeLessThan(10);
+  });
+
+  it('keeps melee bots closing distance rather than retreating and applies slower out-of-combat ammo recovery', () => {
+    // 1. All 10 bundled Siege hero presets are complete with unique roles and taglines
+    expect(SIEGE_HERO_PRESETS.length).toBe(10);
+    for (const preset of SIEGE_HERO_PRESETS) {
+      expect(preset.tagline.length).toBeGreaterThan(8);
+      expect(preset.loadout.gunId).toBeTruthy();
+      expect(preset.loadout.meleeId).toBeTruthy();
+    }
+
+    // 2. Classic mode melee-wielding AI closes distance instead of backing away at ~115px
+    const meleeEng = new TwilightEngine(
+      'royal',
+      FACTION_CHARACTERS.royal[0],
+      'industrial_warehouse',
+      { royal: 0, shadow: 0, mercenary: 0 },
+      () => {}
+    );
+    meleeEng.player.x = 20.5 * TILE;
+    meleeEng.player.y = 16.5 * TILE;
+    meleeEng.player.elevation = meleeEng.getWalkableElevation(meleeEng.player.x, meleeEng.player.y);
+    meleeEng.player.invulnTimer = 0;
+    meleeEng.enemies = meleeEng.enemies.slice(0, 1);
+    const bot = meleeEng.enemies[0];
+    bot.faction = 'shadow';
+    bot.isAlly = false;
+    bot.x = meleeEng.player.x - 110;
+    bot.y = meleeEng.player.y;
+    bot.elevation = meleeEng.getWalkableElevation(bot.x, bot.y);
+    bot.hp = 100;
+    bot.maxHp = 100;
+    bot.qi = 0;
+    bot.swapTimer = 0;
+    bot.stunTimer = 0;
+    bot.blindTimer = 0;
+    bot.activeHand = 1; // hold knife
+    bot.weapons[0] = { ...bot.weapons[1] };
+    bot.reactionTimer = 0;
+    const startDist = Math.hypot(meleeEng.player.x - bot.x, meleeEng.player.y - bot.y);
+    for (let i = 0; i < 20; i++) {
+      meleeEng.update(0.05, 960, 720);
+    }
+    const endDist = Math.hypot(meleeEng.player.x - bot.x, meleeEng.player.y - bot.y);
+    expect(endDist).toBeLessThan(startDist - 20);
+
+    // 3. Slower out-of-combat ammo recovery outside fountain (delay 4.0s, rate 1.2/s) for local + remote humans
+    expect(SIEGE_CONFIG.outOfCombatAmmoDelaySec).toBe(4.0);
+    expect(SIEGE_CONFIG.outOfCombatAmmoPerSec).toBe(1.2);
+    const { engine: siegeEng } = createSiegeEngine('royal', { gunId: 'rifle' });
+    siegeEng.enemies = [];
+    siegeEng.player.x = 27 * TILE;
+    siegeEng.player.y = 27 * TILE;
+    siegeEng.player.reserveAmmo = 10;
+    siegeEng.siege!.playerState.outOfCombatTimer = 0;
+    for (let i = 0; i < 60; i++) {
+      // 3.0s < 4.0s delay -> should NOT recharge yet
+      siegeEng.update(0.05, 1280, 720);
+    }
+    expect(siegeEng.player.reserveAmmo).toBe(10);
+    for (let i = 0; i < 40; i++) {
+      // another 2.0s -> 1.0s past 4.0s delay -> ~1.2 ammo
+      siegeEng.update(0.05, 1280, 720);
+    }
+    expect(siegeEng.player.reserveAmmo).toBeGreaterThan(10.5);
+    expect(siegeEng.player.reserveAmmo).toBeLessThan(12.5);
   });
 });

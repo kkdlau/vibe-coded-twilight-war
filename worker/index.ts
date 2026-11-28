@@ -50,6 +50,12 @@ function validSiegeDuration(raw: unknown): SiegeMatchDurationSec {
     : 1080;
 }
 
+function defaultSkinForFaction(fac: FactionId): string {
+  if (fac === 'shadow') return 'shadow_default';
+  if (fac === 'mercenary') return 'merc_default';
+  return 'royal_default';
+}
+
 export class GameRoom extends DurableObject<Env> {
   private room: RoomLobbyState | null = null;
   private reconnectTokens: Record<string, string> = {};
@@ -108,6 +114,22 @@ export class GameRoom extends DurableObject<Env> {
       if (att?.isHost && sock.readyState === 1) return sock;
     }
     return null;
+  }
+
+  private enforceSiegeFactions(): void {
+    if (!this.room || this.room.mode !== 'siege') return;
+    let royalCount = this.room.players.filter((p) => p.faction === 'royal').length;
+    let shadowCount = this.room.players.filter((p) => p.faction === 'shadow').length;
+    for (const p of this.room.players) {
+      if (p.faction === 'mercenary') {
+        const nextFac: FactionId = shadowCount < royalCount ? 'shadow' : 'royal';
+        p.faction = nextFac;
+        p.skinId = defaultSkinForFaction(nextFac);
+        p.siegeLoadout = undefined;
+        if (nextFac === 'shadow') shadowCount += 1;
+        else royalCount += 1;
+      }
+    }
   }
 
   private async cleanupRoom(closeCode: number, reason: string): Promise<void> {
@@ -236,8 +258,13 @@ export class GameRoom extends DurableObject<Env> {
     const peerId = crypto.randomUUID().slice(0, 8);
     const reconnectToken = crypto.randomUUID().replace(/-/g, '').slice(0, 20);
     this.reconnectTokens[peerId] = reconnectToken;
-    const faction = validFaction(url.searchParams.get('faction'));
-    const skinId = (url.searchParams.get('skinId') ?? 'royal_vanguard').slice(0, 48);
+    const rawFaction = validFaction(url.searchParams.get('faction'));
+    const faction: FactionId =
+      this.room?.mode === 'siege' && rawFaction === 'mercenary' ? 'royal' : rawFaction;
+    const rawSkinId = (url.searchParams.get('skinId') ?? '').trim().slice(0, 48);
+    const skinId = rawSkinId.length > 0 && !(rawFaction === 'mercenary' && faction !== 'mercenary')
+      ? rawSkinId
+      : defaultSkinForFaction(faction);
 
     const isHost = !this.room || this.room.players.length === 0;
     const playerInfo: LobbyPlayerInfo = {
@@ -254,6 +281,8 @@ export class GameRoom extends DurableObject<Env> {
         phase: 'lobby',
         hostPeerId: peerId,
         maxPlayers: MAX_ROOM_PLAYERS,
+        mode: 'frontier',
+        siegeDurationSec: 1080,
         mapId: 'tokyo_shrine',
         difficulty: 'standard',
         players: [playerInfo],
@@ -264,6 +293,7 @@ export class GameRoom extends DurableObject<Env> {
         this.room.phase = 'lobby';
       }
       this.room.players.push(playerInfo);
+      this.enforceSiegeFactions();
       this.room.expiresAt = Date.now() + LOBBY_IDLE_TIMEOUT_MS;
     }
 
@@ -340,8 +370,14 @@ export class GameRoom extends DurableObject<Env> {
         const target = this.room.players.find((p) => p.peerId === attachment.peerId);
         if (!target) return;
         target.name = sanitizeNickname(msg.name, target.name);
-        target.faction = validFaction(msg.faction);
-        target.skinId = String(msg.skinId || target.skinId).slice(0, 48);
+        const rawNextFac = validFaction(msg.faction);
+        const effFac: FactionId =
+          this.room.mode === 'siege' && rawNextFac === 'mercenary' ? 'royal' : rawNextFac;
+        target.faction = effFac;
+        target.skinId =
+          rawNextFac !== effFac
+            ? defaultSkinForFaction(effFac)
+            : String(msg.skinId || defaultSkinForFaction(effFac)).slice(0, 48);
         if (msg.siegeLoadout) {
           target.siegeLoadout = msg.siegeLoadout;
         }
@@ -361,6 +397,7 @@ export class GameRoom extends DurableObject<Env> {
         this.room.mapId = String(msg.mapId || 'tokyo_shrine').slice(0, 80);
         this.room.customMap = msg.customMap;
         this.room.difficulty = validDifficulty(msg.difficulty);
+        this.enforceSiegeFactions();
         await this.scheduleCleanupAt(Date.now() + LOBBY_IDLE_TIMEOUT_MS);
         this.broadcast({ type: 'lobby_state', lobby: this.room });
         return;
@@ -377,6 +414,7 @@ export class GameRoom extends DurableObject<Env> {
         this.room.mapId = String(msg.mapId || this.room.mapId).slice(0, 80);
         this.room.customMap = msg.customMap;
         this.room.difficulty = validDifficulty(msg.difficulty);
+        this.enforceSiegeFactions();
         this.room.phase = 'playing';
         await this.scheduleCleanupAt(Date.now() + MAX_MATCH_DURATION_MS);
         this.broadcast({ type: 'match_started', lobby: this.room });

@@ -56,24 +56,45 @@ export const WeaponIconSvg: React.FC<WeaponSvgProps> = ({
     case 'greatsword':
       return (
         <svg viewBox="0 0 64 64" className={className} fill="none">
-          <g transform="rotate(18 32 32)">
-            {/* Curved katana blade */}
+          <g transform="rotate(24 32 32)">
+            {/* Broad War-Blade: heavy dark-steel spine + gleaming beveled silver cutting edge */}
             <path
-              d="M25 28 C37 28, 49 30, 60 35 C49 35.5, 37 33.5, 25 32.5 Z"
+              d="M23 23.5 C36 22.5, 49 24.5, 59.5 31.5 C50 38.5, 37 39.5, 23 36.5 Z"
               fill="#E2E8F0"
               stroke="#020617"
-              strokeWidth="2.2"
+              strokeWidth="2.4"
               strokeLinejoin="round"
             />
-            <path d="M26 29.2 C38 29.5, 49 31.2, 58 34.4 C48 33.2, 37 32, 26 31.5 Z" fill="#94A3B8" />
-            {/* Gold Tsuba circular guard */}
-            <ellipse cx="24.5" cy="30.5" rx="2.6" ry="6.2" fill="#EAB308" stroke="#020617" strokeWidth="2" />
-            {/* Dark blue diamond-wrapped Tsuka hilt */}
-            <rect x="6" y="27.8" width="17.5" height="5.4" rx="1.6" fill="#0F172A" stroke="#020617" strokeWidth="2" />
-            <path d="M9 30.5 L11 28.6 L13 30.5 L11 32.4 Z" fill="#FACC15" />
-            <path d="M14 30.5 L16 28.6 L18 30.5 L16 32.4 Z" fill="#FACC15" />
-            <path d="M19 30.5 L21 28.6 L23 30.5 L21 32.4 Z" fill="#FACC15" />
-            <rect x="5" y="27.5" width="3" height="6" rx="1" fill="#EAB308" stroke="#020617" strokeWidth="1.4" />
+            {/* Upper tempered dark spine */}
+            <path
+              d="M23 23.5 C35 22.8, 48 24.5, 58 31 C47 28.5, 35 27.8, 23 28.2 Z"
+              fill="#334155"
+            />
+            {/* Crisp silver edge gleam & fuller groove */}
+            <path
+              d="M25 34.5 C37 36.8, 48 36.2, 57.5 31.8 C48 34.2, 37 34.5, 25 33 Z"
+              fill="#F8FAFC"
+            />
+            <line x1="26" y1="30.2" x2="49" y2="30.8" stroke="#64748B" strokeWidth="1.4" strokeLinecap="round" />
+
+            {/* Ornate Flared Gold Crossguard with Gemstone Centerpiece */}
+            <path
+              d="M20 20.5 L25.5 22.5 L25.5 38 L20 40 L18.5 35 L18.5 25.5 Z"
+              fill="#F59E0B"
+              stroke="#020617"
+              strokeWidth="2"
+              strokeLinejoin="round"
+            />
+            <circle cx="22.2" cy="30.2" r="2.2" fill="#38BDF8" stroke="#020617" strokeWidth="1.2" />
+
+            {/* Dark Diamond-Wrapped Two-Handed Grip */}
+            <rect x="6.5" y="27" width="12.5" height="6.5" rx="1.6" fill="#0F172A" stroke="#020617" strokeWidth="2" />
+            <path d="M8.5 30.2 L10.5 28 L12.5 30.2 L10.5 32.5 Z" fill="#FACC15" />
+            <path d="M13.5 30.2 L15.5 28 L17.5 30.2 L15.5 32.5 Z" fill="#FACC15" />
+
+            {/* Heavy Gold Pommel */}
+            <circle cx="5.2" cy="30.2" r="3.4" fill="#F59E0B" stroke="#020617" strokeWidth="1.8" />
+            <circle cx="5.2" cy="30.2" r="1.2" fill="#FEF08A" />
           </g>
         </svg>
       );

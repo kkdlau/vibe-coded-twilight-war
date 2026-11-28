@@ -1,7 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  Crosshair,
+  Flame,
   Heart,
+  Home,
+  Lock,
   RotateCcw,
+  Shield,
+  Sparkles,
+  Swords,
   Volume2,
   VolumeX,
 } from 'lucide-react';
@@ -554,7 +561,7 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
         <canvas
           ref={canvasRef}
           tabIndex={0}
-          className="block w-full h-full cursor-none outline-none"
+          className={`block w-full h-full outline-none ${p?.weapon.type === 'melee' ? 'cursor-default' : 'cursor-none'}`}
           onMouseDown={(e) => {
             canvasRef.current?.focus();
             syncMouseFromClient(e.clientX, e.clientY);
@@ -614,12 +621,12 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
                   className="font-mono-num text-xl font-black text-white leading-none"
                   style={{ WebkitTextStroke: '1px #020617', textShadow: '0 2px 4px rgba(0,0,0,0.9)' }}
                 >
-                  {hpPct}%
+                  {Math.round(p.hp)}
                 </span>
-                <div className="flex items-center gap-0.5 mt-1">
+                <div className="flex items-center gap-0.5 mt-0.5">
                   {hud.mode === 'siege' ? (
-                    <span className="text-[10px] font-mono-num font-black text-sky-200 drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)]">
-                      {Math.round(p.hp)}/{Math.round(p.maxHp)}
+                    <span className="text-[10px] font-mono-num font-bold text-slate-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)]">
+                      / {Math.round(p.maxHp)}
                     </span>
                   ) : (
                     Array.from({ length: p.maxLives }).map((_, i) => (
@@ -662,48 +669,50 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
             )}
           </div>
 
-          <div className="bg-slate-950/78 border border-slate-800/90 rounded-lg px-2.5 py-1.5 backdrop-blur-xs flex items-center gap-2.5 min-w-[205px]">
-            <CharacterAvatarSvg skin={p.characterSkin} className="w-8 h-8 shrink-0" />
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 text-xs font-bold">
-                <span className={facInfo.color}>{facInfo.name}</span>
-                {p.chargeReady && <span className="text-amber-400">氣滿可放</span>}
-              </div>
-              <div className="text-[11px] text-slate-300 truncate">{p.characterSkin.name}</div>
-              <div className="mt-1 flex items-baseline gap-2 font-mono-num bg-slate-900/85 border border-slate-700/80 rounded px-2 py-0.5">
-                {hud.mode === 'siege' && hud.siege ? (
-                  <div className="w-full">
-                    <div className="flex flex-wrap items-baseline gap-1.5">
-                      <span className="text-[11px] font-sans text-sky-300 font-bold">Lv.{hud.siege.playerLevel}</span>
-                      <span className="text-slate-600">·</span>
-                      <span className="text-[11px] font-mono-num text-emerald-200 font-bold">
-                        HP {Math.round(p.hp)}/{Math.round(p.maxHp)}
-                      </span>
-                      <span className="text-slate-600">·</span>
-                      <span className="text-[11px] font-sans text-emerald-300 font-bold">防 {hud.siege.playerDefense}</span>
-                      <span className="text-slate-600">·</span>
-                      <strong className="text-sm font-black text-amber-300 leading-none">{hud.siege.playerGold}G</strong>
-                    </div>
-                    <div className="mt-1 h-1 w-full bg-slate-800 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-amber-400"
-                        style={{
-                          width: `${Math.min(100, Math.round((hud.siege.playerXp / Math.max(1, hud.siege.playerXpToNext)) * 100))}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <span className="text-[11px] font-sans text-slate-300">聲望</span>
-                    <strong className="text-sm font-black text-amber-300 leading-none">{p.reputation}</strong>
-                    <span className="text-slate-600">·</span>
-                    <span className="text-xs font-bold text-sky-300">氣 {p.qiSpeedMultiplier.toFixed(2)}×</span>
-                  </>
-                )}
+          {hud.mode === 'siege' && hud.siege ? (
+            <div className="bg-[#0B1220]/85 border border-slate-700/80 rounded-xl px-3 py-2 backdrop-blur-md flex items-center gap-2.5 min-w-[200px] shadow-xl">
+              <CharacterAvatarSvg skin={p.characterSkin} className="w-8 h-8 shrink-0" />
+              <div className="flex-1 min-w-0 space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-white truncate">
+                    {p.characterSkin.name.replace('（預設）', '')}
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded bg-sky-500/20 border border-sky-400/40 font-mono-num text-[10px] font-black text-sky-200 shrink-0">
+                    Lv.{hud.siege.playerLevel}
+                  </span>
+                </div>
+                <div className="h-1 w-full bg-slate-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-amber-400 transition-all duration-150"
+                    style={{
+                      width: `${Math.min(100, Math.round((hud.siege.playerXp / Math.max(1, hud.siege.playerXpToNext)) * 100))}%`,
+                    }}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2 font-mono-num text-[11px]">
+                  <span className="text-emerald-300 font-bold">防 {hud.siege.playerDefense}</span>
+                  <span className="font-black text-amber-300">{hud.siege.playerGold}G</span>
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="bg-slate-950/78 border border-slate-800/90 rounded-lg px-2.5 py-1.5 backdrop-blur-xs flex items-center gap-2.5 min-w-[205px]">
+              <CharacterAvatarSvg skin={p.characterSkin} className="w-8 h-8 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 text-xs font-bold">
+                  <span className={facInfo.color}>{facInfo.name}</span>
+                  {p.chargeReady && <span className="text-amber-400">氣滿可放</span>}
+                </div>
+                <div className="text-[11px] text-slate-300 truncate">{p.characterSkin.name}</div>
+                <div className="mt-1 flex items-baseline gap-2 font-mono-num bg-slate-900/85 border border-slate-700/80 rounded px-2 py-0.5">
+                  <span className="text-[11px] font-sans text-slate-300">聲望</span>
+                  <strong className="text-sm font-black text-amber-300 leading-none">{p.reputation}</strong>
+                  <span className="text-slate-600">·</span>
+                  <span className="text-xs font-bold text-sky-300">氣 {p.qiSpeedMultiplier.toFixed(2)}×</span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -798,57 +807,105 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
             </div>
           )}
 
-          <div className="flex items-center gap-2 bg-slate-950/88 border border-slate-700/90 rounded-xl px-2.5 py-1.5 shadow-2xl">
+          <div className="flex items-center gap-2.5 bg-[#0B1220]/92 backdrop-blur-md border border-slate-700/80 rounded-2xl px-3 py-2 shadow-[0_12px_36px_rgba(0,0,0,0.75)]">
             {/* Tactical [E / RClick] */}
-            <button
-              type="button"
-              disabled={!hud.siege.tacticalUnlocked}
-              onClick={() => {
-                engineRef.current?.triggerSiegeTactical();
-                if (multiplayer && !multiplayer.session.isHost) {
-                  seqsRef.current.tacticalSeq += 1;
-                  sendClientInputIfNeeded(true);
-                }
-              }}
-              className={`px-2.5 py-1 rounded-lg border text-left ${
-                !hud.siege.tacticalUnlocked
-                  ? 'bg-slate-950/70 border-slate-800 text-slate-500 cursor-default'
-                  : hud.siege.tacticalCd <= 0
-                    ? 'bg-sky-950/70 border-sky-400/80 text-white cursor-pointer'
-                    : 'bg-slate-900 border-slate-700 text-slate-400 cursor-pointer'
-              }`}
-            >
-              <div className="text-[10px] font-mono-num text-sky-300">
-                {!hud.siege.tacticalUnlocked
-                  ? 'Lv.2 解鎖'
-                  : `[E/右鍵] ${hud.siege.tacticalCd > 0 ? `${hud.siege.tacticalCd.toFixed(1)}s` : '就緒'}`}
-              </div>
-              <div className="text-[11px] font-bold truncate max-w-[90px]">
-                {getTacticalMeta(hud.siege.loadout.tacticalId).name}
-              </div>
-            </button>
+            {(() => {
+              const tacMeta = getTacticalMeta(hud.siege.loadout.tacticalId);
+              const tacMaxCd = Math.max(1, hud.siege.tacticalMaxCd ?? tacMeta.cooldownSec ?? 12);
+              const tacCdPct = hud.siege.tacticalCd > 0 ? Math.min(100, (hud.siege.tacticalCd / tacMaxCd) * 100) : 0;
+              const tacReady = hud.siege.tacticalUnlocked && hud.siege.tacticalCd <= 0;
+              return (
+                <button
+                  type="button"
+                  disabled={!hud.siege.tacticalUnlocked}
+                  onClick={() => {
+                    engineRef.current?.triggerSiegeTactical();
+                    if (multiplayer && !multiplayer.session.isHost) {
+                      seqsRef.current.tacticalSeq += 1;
+                      sendClientInputIfNeeded(true);
+                    }
+                  }}
+                  title={tacMeta.desc}
+                  className={`relative overflow-hidden min-w-[96px] px-2.5 py-1.5 rounded-xl border text-left transition-all ${
+                    !hud.siege.tacticalUnlocked
+                      ? 'bg-slate-950/80 border-slate-800 text-slate-500 cursor-default'
+                      : tacReady
+                        ? 'bg-sky-950/80 border-sky-400/90 text-white shadow-[0_0_16px_rgba(56,189,248,0.22)] cursor-pointer hover:bg-sky-900/80'
+                        : 'bg-slate-900/90 border-slate-700 text-slate-300 cursor-pointer'
+                  }`}
+                >
+                  {hud.siege.tacticalUnlocked && tacCdPct > 0 && (
+                    <div
+                      className="absolute inset-x-0 bottom-0 bg-slate-950/75 pointer-events-none"
+                      style={{ height: `${tacCdPct}%` }}
+                    />
+                  )}
+                  <div className="relative z-10 flex items-center justify-between gap-1.5">
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-900/90 border border-slate-700/80 font-mono-num text-[10px] font-bold text-sky-300">
+                      <Sparkles className="w-2.5 h-2.5" />
+                      E
+                    </span>
+                    {!hud.siege.tacticalUnlocked ? (
+                      <span className="inline-flex items-center gap-0.5 text-[10px] font-mono-num font-bold text-slate-400">
+                        <Lock className="w-2.5 h-2.5" />
+                        Lv.2
+                      </span>
+                    ) : hud.siege.tacticalCd > 0 ? (
+                      <span className="text-[10px] font-mono-num font-black text-amber-300">
+                        {hud.siege.tacticalCd.toFixed(1)}s
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-bold text-emerald-300">就緒</span>
+                    )}
+                  </div>
+                  <div className="relative z-10 text-[11px] font-bold truncate mt-1">{tacMeta.name}</div>
+                </button>
+              );
+            })()}
 
             {/* Ultimate (Lv.4 Unlocked · Melee Charge) */}
-            <div
-              className={`px-2.5 py-1 rounded-lg border text-left ${
-                !hud.siege.ultimateUnlocked
-                  ? 'bg-slate-950/70 border-slate-800 text-slate-500'
-                  : p.qi >= p.maxQi - 1
-                    ? 'bg-amber-950/70 border-amber-400/90 text-white'
-                    : 'bg-slate-900 border-slate-700 text-slate-400'
-              }`}
-            >
-              <div className="text-[10px] font-mono-num text-amber-300">
-                {!hud.siege.ultimateUnlocked
-                  ? 'Lv.4 解鎖 · 近戰集氣'
-                  : p.qi >= p.maxQi - 1
-                    ? '滿氣! [Q]長按左鍵'
-                    : `近戰集氣 ${Math.round((p.qi / p.maxQi) * 100)}%`}
-              </div>
-              <div className="text-[11px] font-bold truncate max-w-[104px]">
-                {getUltimateMeta(hud.siege.loadout.ultimateId).name}
-              </div>
-            </div>
+            {(() => {
+              const ultMeta = getUltimateMeta(hud.siege.loadout.ultimateId);
+              const ultReady = hud.siege.ultimateUnlocked && p.qi >= p.maxQi - 1;
+              return (
+                <div
+                  title={ultMeta.desc}
+                  className={`relative overflow-hidden min-w-[106px] px-2.5 py-1.5 rounded-xl border text-left transition-all ${
+                    !hud.siege.ultimateUnlocked
+                      ? 'bg-slate-950/80 border-slate-800 text-slate-500'
+                      : ultReady
+                        ? 'bg-amber-950/80 border-amber-400 text-white shadow-[0_0_16px_rgba(251,191,36,0.25)]'
+                        : 'bg-slate-900/90 border-slate-700 text-slate-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-900/90 border border-slate-700/80 font-mono-num text-[10px] font-bold text-amber-300">
+                      <Flame className="w-2.5 h-2.5" />
+                      Q集氣
+                    </span>
+                    {!hud.siege.ultimateUnlocked ? (
+                      <span className="inline-flex items-center gap-0.5 text-[10px] font-mono-num font-bold text-slate-400">
+                        <Lock className="w-2.5 h-2.5" />
+                        Lv.4
+                      </span>
+                    ) : ultReady ? (
+                      <span className="text-[10px] font-black text-amber-300">滿氣可放</span>
+                    ) : (
+                      <span className="text-[10px] font-mono-num font-bold text-sky-300">{Math.round(qiPct)}%</span>
+                    )}
+                  </div>
+                  <div className="text-[11px] font-bold truncate mt-1">{ultMeta.name}</div>
+                  {hud.siege.ultimateUnlocked && (
+                    <div className="mt-1 h-1 w-full bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full transition-all duration-100 ${ultReady ? 'bg-amber-400' : 'bg-sky-400'}`}
+                        style={{ width: `${Math.min(100, Math.round(qiPct))}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Recall [B] */}
             <button
@@ -860,20 +917,35 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
                   sendClientInputIfNeeded(true);
                 }
               }}
-              className="px-2 py-1 rounded-lg border border-slate-700 bg-slate-900 hover:border-sky-400 text-slate-200 cursor-pointer"
+              className={`px-2.5 py-1.5 rounded-xl border text-center transition-all cursor-pointer ${
+                hud.siege.recallTimer > 0
+                  ? 'bg-sky-950/90 border-sky-400 text-sky-100 shadow-[0_0_12px_rgba(56,189,248,0.3)]'
+                  : 'bg-slate-900/90 border-slate-700 hover:border-sky-400/80 text-slate-200'
+              }`}
             >
-              <div className="text-[10px] font-mono-num text-sky-300">[B]</div>
-              <div className="text-[11px] font-bold">回城</div>
+              <div className="flex items-center justify-center gap-1 text-[10px] font-mono-num font-bold text-sky-300">
+                <Home className="w-3 h-3" />
+                <span>[B]</span>
+              </div>
+              <div className="text-[11px] font-bold mt-1">回城</div>
             </button>
 
-            <div className="w-px h-7 bg-slate-700/80 mx-0.5" />
+            <div className="w-px h-9 bg-slate-700/80 mx-0.5" />
 
-            {/* 4 Gold Upgrade Buttons */}
+            {/* 4-Track Gold Armory ([3] 槍械 · [4] 戰技 · [5] 重甲 · [6] 大招) */}
             {SIEGE_UPGRADES.map((u) => {
               const lv = hud.siege!.upgrades[u.track] ?? 0;
               const maxed = lv >= u.maxLevel;
               const cost = maxed ? 0 : u.costs[lv];
               const affordable = !maxed && hud.siege!.canShop && hud.siege!.playerGold >= cost;
+              const TrackIcon =
+                u.track === 'firepower'
+                  ? Crosshair
+                  : u.track === 'blade'
+                    ? Swords
+                    : u.track === 'armor'
+                      ? Shield
+                      : Flame;
               return (
                 <button
                   key={u.track}
@@ -888,20 +960,34 @@ export const GameCanvasView: React.FC<GameCanvasViewProps> = ({
                     }
                   }}
                   title={u.bonusText}
-                  className={`px-2 py-1 rounded-lg border text-left transition-all ${
+                  className={`min-w-[82px] px-2.5 py-1.5 rounded-xl border text-left transition-all ${
                     affordable
-                      ? 'bg-slate-900 border-amber-400/80 hover:bg-slate-800 text-white cursor-pointer'
-                      : 'bg-slate-950/70 border-slate-800 text-slate-500 cursor-default'
+                      ? 'bg-[#172338] border-amber-400/90 hover:bg-[#1E2E4A] text-white shadow-[0_0_14px_rgba(251,191,36,0.2)] cursor-pointer'
+                      : maxed
+                        ? 'bg-emerald-950/35 border-emerald-500/40 text-emerald-200 cursor-default'
+                        : 'bg-slate-950/75 border-slate-800 text-slate-400 cursor-default'
                   }`}
                 >
-                  <div className="text-[10px] font-mono-num flex items-center justify-between gap-1">
-                    <span>[{u.keyHint}]</span>
-                    <span className={maxed ? 'text-emerald-400' : 'text-amber-300'}>
+                  <div className="flex items-center justify-between gap-1 text-[10px] font-mono-num">
+                    <span className="inline-flex items-center gap-1 font-bold" style={{ color: u.color }}>
+                      <TrackIcon className="w-3 h-3" />
+                      [{u.keyHint}]
+                    </span>
+                    <span className={maxed ? 'text-emerald-400 font-bold' : affordable ? 'text-amber-300 font-black' : 'text-slate-400 font-bold'}>
                       {maxed ? 'MAX' : `${cost}G`}
                     </span>
                   </div>
-                  <div className="text-[11px] font-bold">
-                    {u.shortName} {lv}/{u.maxLevel}
+                  <div className="text-[11px] font-bold text-slate-100 mt-0.5">{u.shortName}</div>
+                  <div className="mt-1 flex items-center gap-1">
+                    {Array.from({ length: u.maxLevel }).map((_, idx) => (
+                      <span
+                        key={idx}
+                        className="h-1.5 flex-1 rounded-full transition-colors"
+                        style={{
+                          backgroundColor: idx < lv ? u.color : '#1E293B',
+                        }}
+                      />
+                    ))}
                   </div>
                 </button>
               );

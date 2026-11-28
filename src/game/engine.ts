@@ -5146,13 +5146,15 @@ export class TwilightEngine {
       const canHitRanged = losTargetPos
         ? this.canRangedHitTarget(e.x, e.y, e.elevation, losTargetPos.x, losTargetPos.y, losTargetPos.elev)
         : false;
+      const meleeEngageRange = Math.max(84, (heldMelee?.def.reach ?? 56) + 22);
       const isCloseMeleeRange = Boolean(
-        losTargetPos && bestLosDist <= 74 && Math.abs(e.elevation - losTargetPos.elev) <= 1.0
+        losTargetPos && bestLosDist <= meleeEngageRange && Math.abs(e.elevation - losTargetPos.elev) <= 1.0
       );
 
       // 雙手武器切換邏輯（完全沿用 swapTimer 搓手切換時間）：
+      // - 純近戰單位（無槍械）恆常持握近戰兵器
       // - 持盾敵人於裝彈或中近距受傷推進時，主動切出盾牌進行正面防禦
-      // - 貼身近戰距離且高度可及 -> 切近戰手位
+      // - 貼身近戰距離（或已切近戰追擊中且距離 <= 125px、或槍械裝彈時距離 <= 135px）且高度可及 -> 持近戰主動搶攻
       // - 有一定距離且槍彈可射中目標 -> 切遠程槍械手位
       // - 其餘狀態／高低差受阻／趕路追擊 -> 切換最輕武器手位加速移動
       const gunHand = this.getEnemyHandByType(e, 'gun');
@@ -5165,11 +5167,26 @@ export class TwilightEngine {
             : -1;
       const curActiveWeapon = e.weapons[e.activeHand];
       const activeGunReloading = curActiveWeapon.type === 'gun' && curActiveWeapon.reloadTimer > 0;
+      const sameElevForMelee = Boolean(losTargetPos && Math.abs(e.elevation - losTargetPos.elev) <= 1.0);
+      const stickyMeleeChase =
+        meleeHand !== -1 &&
+        curActiveWeapon.type === 'melee' &&
+        curActiveWeapon.def.kind !== 'shield' &&
+        sameElevForMelee &&
+        bestLosDist <= 125;
+      const meleePunishOnReload =
+        meleeHand !== -1 &&
+        heldMelee?.def.kind !== 'shield' &&
+        activeGunReloading &&
+        sameElevForMelee &&
+        bestLosDist <= 135;
 
       let desiredHand: WeaponHand;
-      if (shieldHand !== -1 && Boolean(losTargetPos) && bestLosDist <= 155 && e.hp < 55) {
+      if (gunHand === -1 && meleeHand !== -1) {
+        desiredHand = meleeHand;
+      } else if (shieldHand !== -1 && Boolean(losTargetPos) && bestLosDist <= 155 && e.hp < 55) {
         desiredHand = shieldHand;
-      } else if (isCloseMeleeRange && meleeHand !== -1) {
+      } else if ((isCloseMeleeRange || stickyMeleeChase || meleePunishOnReload) && meleeHand !== -1) {
         desiredHand = meleeHand;
       } else if (losTargetPos && canHitRanged && gunHand !== -1) {
         desiredHand = gunHand;
@@ -5265,8 +5282,14 @@ export class TwilightEngine {
         e.angle += clamp(angleDiff(e.angle, desiredAimAngle), -maxTurn, maxTurn);
         const aimAngle = rawTargetAngle;
 
-        const desiredRange =
-          !canHitRanged
+        const isMeleeFighting = !heldGun || activeWeapon.type === 'melee';
+        const activeMeleeReach =
+          activeWeapon.type === 'melee' ? activeWeapon.def.reach : (heldMelee?.def.reach ?? 56);
+        const meleeStrikeRange = clamp(activeMeleeReach * 0.72, 30, 52);
+
+        const desiredRange = isMeleeFighting
+          ? meleeStrikeRange
+          : !canHitRanged
             ? 44
             : heldMelee?.def.kind === 'claw' || heldMelee?.def.kind === 'greatsword'
               ? 135
@@ -5275,7 +5298,7 @@ export class TwilightEngine {
                 : combat.preferredRange;
 
         const needsClimb = losTargetPos.elev > e.elevation + 0.5;
-        const holdingHighGround = e.elevation > losTargetPos.elev + 0.25 && canHitRanged;
+        const holdingHighGround = !isMeleeFighting && e.elevation > losTargetPos.elev + 0.25 && canHitRanged;
         const enemyCanHitAi = this.canRangedHitTarget(
           losTargetPos.x,
           losTargetPos.y,
@@ -5284,9 +5307,9 @@ export class TwilightEngine {
           e.y,
           e.elevation
         );
-        const aiHasOneWayAdvantage = canHitRanged && !enemyCanHitAi;
+        const aiHasOneWayAdvantage = !isMeleeFighting && canHitRanged && !enemyCanHitAi;
         const tacticalSpot =
-          heldGun && (canHitRanged || !needsClimb)
+          !isMeleeFighting && heldGun && (canHitRanged || !needsClimb)
             ? this.findBestTacticalSpot(
                 e,
                 losTargetPos,
@@ -5297,7 +5320,24 @@ export class TwilightEngine {
               )
             : null;
 
-        if (!canHitRanged || needsClimb) {
+        if (isMeleeFighting) {
+          // 近戰單位或正持近戰搏鬥的 AI：絕不拉開後退，果斷貼近目標並保持壓迫斬擊
+          if (bestLosDist > meleeStrikeRange || needsClimb || Math.abs(e.elevation - losTargetPos.elev) > 0.5) {
+            astarGoal = { x: losTargetPos.x, y: losTargetPos.y };
+            desiredX = losTargetPos.x;
+            desiredY = losTargetPos.y;
+            moveFactor = 1.05;
+          } else if (bestLosDist > Math.max(24, e.radius * 1.45)) {
+            desiredX = losTargetPos.x;
+            desiredY = losTargetPos.y;
+            moveFactor = 0.65;
+          } else {
+            const strafe = aimAngle + (Math.sin(e.aiTimer * 3.1 + idSeed) > 0 ? Math.PI / 2 : -Math.PI / 2);
+            desiredX = e.x + Math.cos(strafe) * 40 + Math.cos(aimAngle) * 18;
+            desiredY = e.y + Math.sin(strafe) * 40 + Math.sin(aimAngle) * 18;
+            moveFactor = 0.35;
+          }
+        } else if (!canHitRanged || needsClimb) {
           if (tacticalSpot && tacticalSpot.oneWayAdvantage) {
             astarGoal = { x: tacticalSpot.x, y: tacticalSpot.y };
             desiredX = tacticalSpot.x;
@@ -5605,7 +5645,16 @@ export class TwilightEngine {
       } else if (!e.chargingMelee && e.swapTimer <= 0 && readyToAttack && losTargetPos && e.attackCooldown <= 0 && (targetIsPlayer || targetEntity)) {
         const targetAngle = Math.atan2(losTargetPos.y - e.y, losTargetPos.x - e.x);
         const angleErr = Math.abs(angleDiff(e.angle, targetAngle));
-        if (postPickupWeapon.type === 'melee' && isCloseMeleeRange && angleErr <= 0.75) {
+        const meleeHitReach =
+          postPickupWeapon.type === 'melee'
+            ? Math.max(76, postPickupWeapon.def.reach * e.sizeScale + 16)
+            : 0;
+        const canMeleeStrike =
+          postPickupWeapon.type === 'melee' &&
+          bestLosDist <= meleeHitReach &&
+          Math.abs(e.elevation - losTargetPos.elev) <= 1.0 &&
+          angleErr <= 0.9;
+        if (canMeleeStrike) {
           const heldMeleeDef = postPickupWeapon.def;
           const meleeKind = heldMeleeDef.kind;
           e.attackCooldown = 1 / (heldMeleeDef.swingRate * (e.freezeTimer > 0 ? 0.9 : 1));
@@ -6224,29 +6273,31 @@ export class TwilightEngine {
 
     if (this.status === 'PLAYING') {
       const weapon = p.weapons[p.activeHand];
-      const radiusPx = weapon.type === 'gun' ? this.getPlayerGunSpread(weapon.def) * GUN_AIM.spreadScale : 12;
-      let { x: aimX, y: aimY } = this.mouseScreen;
-      if (weapon.type === 'gun' && weapon.def.kind === 'rifle' && weapon.reloadTimer <= 0 && weapon.ammoInMag > 0) {
-        const playerScreenX = width / 2 + (p.x - this.camera.x) * this.camera.zoom;
-        const playerScreenY = height / 2 + (p.y - this.camera.y) * this.camera.zoom;
-        const dx = aimX - playerScreenX;
-        const dy = aimY - playerScreenY;
-        const recoil = this.getPlayerRifleDrift();
-        aimX = playerScreenX + dx * Math.cos(recoil) - dy * Math.sin(recoil);
-        aimY = playerScreenY + dx * Math.sin(recoil) + dy * Math.cos(recoil);
-      }
+      if (weapon.type === 'gun') {
+        const radiusPx = this.getPlayerGunSpread(weapon.def) * GUN_AIM.spreadScale;
+        let { x: aimX, y: aimY } = this.mouseScreen;
+        if (weapon.def.kind === 'rifle' && weapon.reloadTimer <= 0 && weapon.ammoInMag > 0) {
+          const playerScreenX = width / 2 + (p.x - this.camera.x) * this.camera.zoom;
+          const playerScreenY = height / 2 + (p.y - this.camera.y) * this.camera.zoom;
+          const dx = aimX - playerScreenX;
+          const dy = aimY - playerScreenY;
+          const recoil = this.getPlayerRifleDrift();
+          aimX = playerScreenX + dx * Math.cos(recoil) - dy * Math.sin(recoil);
+          aimY = playerScreenY + dx * Math.sin(recoil) + dy * Math.cos(recoil);
+        }
 
-      drawCrosshair(
-        ctx,
-        aimX,
-        aimY,
-        this.time,
-        radiusPx,
-        weapon.type === 'gun' && weapon.reloadTimer > 0,
-        weapon.type === 'gun' && weapon.ammoInMag <= 0,
-        p.eagleEyeTimer > 0,
-        p.comboEmpowerTimer > 0
-      );
+        drawCrosshair(
+          ctx,
+          aimX,
+          aimY,
+          this.time,
+          radiusPx,
+          weapon.reloadTimer > 0,
+          weapon.ammoInMag <= 0,
+          p.eagleEyeTimer > 0,
+          p.comboEmpowerTimer > 0
+        );
+      }
     }
   }
 
@@ -6682,6 +6733,13 @@ export class TwilightEngine {
     if (e.attackCooldown > 0 || e.swapTimer > 0 || weapon.reloadTimer > 0 || weapon.ammoInMag <= 0) return;
     const gun = weapon.def;
     const gunProfile = this.siege ? getSiegeGunProfile(gun.kind) : null;
+    if (this.siege) {
+      const rState = this.siege.remoteStates.get(rt.peerId);
+      if (rState) {
+        rState.outOfCombatTimer = 0;
+        rState.recallTimer = 0;
+      }
+    }
     const pelletsToFire = gun.kind === 'shotgun' ? Math.max(1, Math.min(gun.pellets, weapon.ammoInMag)) : gun.pellets;
     const ammoCost = gun.kind === 'shotgun' ? pelletsToFire : 1;
     e.attackCooldown = 1 / (gun.fireRate * (gunProfile?.fireRateMult ?? 1));
@@ -6997,6 +7055,13 @@ export class TwilightEngine {
     } else {
       if (clicked) {
         if (e.swapTimer <= 0 && e.attackCooldown <= 0) {
+          if (this.siege) {
+            const rState = this.siege.remoteStates.get(rt.peerId);
+            if (rState) {
+              rState.outOfCombatTimer = 0;
+              rState.recallTimer = 0;
+            }
+          }
           const melee = activeWeapon.def;
           const comboMult = rt.comboEmpowerTimer > 0 ? 1 + rt.delayCancelBonus : 1.0;
           e.attackCooldown = 1 / (melee.swingRate * (e.freezeTimer > 0 ? 0.9 : 1));
@@ -9174,7 +9239,7 @@ export class TwilightEngine {
         this.player.qi = Math.min(this.player.maxQi, this.player.qi + 18);
       }
       if (isHeroKill || isCreepKill) {
-        this.player.reserveAmmo = Math.min(this.player.maxReserveAmmo, this.player.reserveAmmo + 12);
+        this.player.reserveAmmo = Math.min(this.player.maxReserveAmmo, this.player.reserveAmmo + 6);
       }
       if (res.leveledUp) {
         this.player.maxHp = computeSiegeMaxHp(ps);
@@ -9209,7 +9274,9 @@ export class TwilightEngine {
         const res = grantSiegeXpAndGold(rState, gold, xp);
         if (isTowerKill) rState.towerKills += 1;
         if (isCreepKill) rState.minionKills += 1;
-        rPeer.reserveAmmo = Math.min(rPeer.maxReserveAmmo, rPeer.reserveAmmo + 12);
+        if (isHeroKill || isCreepKill) {
+          rPeer.reserveAmmo = Math.min(rPeer.maxReserveAmmo, rPeer.reserveAmmo + 6);
+        }
         const ent = this.enemies.find((e) => e.id === attackerId);
         if (ent && res.leveledUp) {
           ent.maxHp = computeSiegeMaxHp(rState);
@@ -9352,6 +9419,7 @@ export class TwilightEngine {
       rState.aegisReflectTimer = Math.max(0, rState.aegisReflectTimer - dt);
       rState.smokeSpeedTimer = Math.max(0, rState.smokeSpeedTimer - dt);
       rState.markedTimer = Math.max(0, rState.markedTimer - dt);
+      rState.outOfCombatTimer += dt;
       const rt = this.remoteHumans.get(peerId);
       const ent = this.enemies.find((e) => e.peerId === peerId);
       if (rt && ent && ent.hp > 0) {
@@ -9359,6 +9427,11 @@ export class TwilightEngine {
         if (this.isInsideOwnFountain(ent.x, ent.y, rFac)) {
           ent.hp = Math.min(ent.maxHp, ent.hp + SIEGE_CONFIG.fountainHealPerSec * dt);
           rt.reserveAmmo = rt.maxReserveAmmo;
+          for (const w of ent.weapons) {
+            if (w.type === 'gun' && w.reloadTimer <= 0) w.ammoInMag = w.def.magSize;
+          }
+        } else if (rState.outOfCombatTimer >= SIEGE_CONFIG.outOfCombatAmmoDelaySec) {
+          rt.reserveAmmo = Math.min(rt.maxReserveAmmo, rt.reserveAmmo + SIEGE_CONFIG.outOfCombatAmmoPerSec * dt);
         }
         if (rState.recallTimer > 0) {
           rState.recallTimer = Math.max(0, rState.recallTimer - dt);

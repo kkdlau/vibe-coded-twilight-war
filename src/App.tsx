@@ -144,7 +144,7 @@ export default function App() {
     if (lobbyMode === 'siege') {
       const sFac = effFac === 'shadow' ? 'shadow' : 'royal';
       setSiegeOptions({
-        loadout: me.siegeLoadout ?? getDefaultSiegeLoadout(sFac, skin.id),
+        loadout: getDefaultSiegeLoadout(sFac, skin.id),
         durationSec: sess.lobby.siegeDurationSec ?? 1080,
       });
     } else {

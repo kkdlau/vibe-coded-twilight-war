@@ -16,12 +16,13 @@ import { CustomMapData } from '../game/customMaps';
 import { FACTIONS, FACTION_CHARACTERS, GUNS, MAP_CATALOG, MELEES } from '../game/data';
 import {
   SIEGE_DURATION_OPTIONS,
-  SIEGE_PASSIVES,
-  SIEGE_TACTICAL_SKILLS,
-  SIEGE_ULTIMATE_SKILLS,
   getDefaultSiegeLoadout,
-  sanitizeSiegeLoadout,
+  getPassiveMeta,
+  getSiegeHeroPreset,
+  getTacticalMeta,
+  getUltimateMeta,
 } from '../game/siegeData';
+import { getSiegeGunProfile } from '../game/siegeHelpers';
 import { SIEGE_MAP_ID } from '../game/siegeMap';
 import { AI_DIFFICULTY, type AiDifficulty } from '../game/tuning';
 import { FactionId, GameMode, SiegeMatchDurationSec, SiegePlayerLoadout } from '../game/types';
@@ -34,7 +35,7 @@ import {
 } from '../net/protocol';
 import { RoomTransport, WebSocketRoomTransport } from '../net/transport';
 import { MiniMapPreview } from './MiniMapPreview';
-import { CharacterAvatarSvg, FactionLogoSvg } from './WeaponArt';
+import { CharacterAvatarSvg, FactionLogoSvg, WeaponIconSvg } from './WeaponArt';
 
 const NICKNAME_STORAGE_KEY = 'twilight_wars_mp_nickname_v1';
 const RECONNECT_STORAGE_KEY = 'twilight_wars_reconnect_v1';
@@ -119,15 +120,34 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
   const [passcodeRequired, setPasscodeRequired] = useState<boolean>(false);
   const [showPasscodeField, setShowPasscodeField] = useState<boolean>(false);
 
-  const [selectedFaction, setSelectedFaction] = useState<FactionId>('royal');
-  const [selectedSkinId, setSelectedSkinId] = useState<string>(FACTION_CHARACTERS.royal[0].id);
-  const [selectedLoadout, setSelectedLoadout] = useState<SiegePlayerLoadout>(() =>
-    getDefaultSiegeLoadout('royal', FACTION_CHARACTERS.royal[0].id)
+  const initialSelfPlayer = existingSession?.lobby.players.find(
+    (p) => p.peerId === existingSession.localPeerId
   );
-  const [roomMode, setRoomMode] = useState<GameMode>('frontier');
-  const [siegeDurationSec, setSiegeDurationSec] = useState<SiegeMatchDurationSec>(1080);
-  const [mapChoice, setMapChoice] = useState<string>('random');
-  const [difficulty, setDifficulty] = useState<AiDifficulty>('standard');
+  const initialMode: GameMode = existingSession?.lobby.mode === 'siege' ? 'siege' : 'frontier';
+  const initialFac: FactionId =
+    initialMode === 'siege' && (!initialSelfPlayer || initialSelfPlayer.faction === 'mercenary')
+      ? 'royal'
+      : (initialSelfPlayer?.faction ?? 'royal');
+  const initialSkin =
+    initialSelfPlayer?.skinId &&
+    FACTION_CHARACTERS[initialFac].some((s) => s.id === initialSelfPlayer.skinId)
+      ? initialSelfPlayer.skinId
+      : FACTION_CHARACTERS[initialFac][0].id;
+  const initialSiegeFac = initialFac === 'shadow' ? 'shadow' : 'royal';
+
+  const [selectedFaction, setSelectedFaction] = useState<FactionId>(initialFac);
+  const [selectedSkinId, setSelectedSkinId] = useState<string>(initialSkin);
+  const [roomMode, setRoomMode] = useState<GameMode>(initialMode);
+  const [siegeDurationSec, setSiegeDurationSec] = useState<SiegeMatchDurationSec>(
+    existingSession?.lobby.siegeDurationSec ?? 1080
+  );
+  const [mapChoice, setMapChoice] = useState<string>(() => {
+    if (!existingSession?.lobby || existingSession.lobby.mode === 'siege') return 'random';
+    return existingSession.lobby.customMap?.id ?? existingSession.lobby.mapId ?? 'random';
+  });
+  const [difficulty, setDifficulty] = useState<AiDifficulty>(
+    existingSession?.lobby.difficulty ?? 'standard'
+  );
 
   const [connecting, setConnecting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -266,6 +286,29 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
     };
   }, [onMatchStarted]);
 
+  useEffect(() => {
+    const lobby = session?.lobby;
+    if (!lobby) return;
+    const nextMode: GameMode = lobby.mode === 'siege' ? 'siege' : 'frontier';
+    setRoomMode(nextMode);
+    if (lobby.siegeDurationSec) {
+      setSiegeDurationSec(lobby.siegeDurationSec);
+    }
+    setDifficulty(lobby.difficulty);
+    if (nextMode !== 'siege' && lobby.mapId && lobby.mapId !== SIEGE_MAP_ID) {
+      setMapChoice((prev) => (prev === 'random' ? 'random' : lobby.customMap?.id ?? lobby.mapId));
+    }
+    const me = lobby.players.find((pl) => pl.peerId === session.localPeerId);
+    if (me) {
+      const safeFac: FactionId = nextMode === 'siege' && me.faction === 'mercenary' ? 'royal' : me.faction;
+      const validSkin = FACTION_CHARACTERS[safeFac].some((s) => s.id === me.skinId)
+        ? me.skinId
+        : FACTION_CHARACTERS[safeFac][0].id;
+      setSelectedFaction(safeFac);
+      setSelectedSkinId(validSkin);
+    }
+  }, [session?.lobby, session?.localPeerId]);
+
   const connectToRoom = async (roomCode: string, overrideName?: string) => {
     const normalized = normalizeRoomCode(roomCode);
     if (!normalized) {
@@ -332,23 +375,23 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
   const pushProfileUpdate = (
     nextName: string,
     nextFaction: FactionId,
-    nextSkinId: string,
-    nextLoadout?: SiegePlayerLoadout
+    nextSkinId: string
   ) => {
-    setSelectedFaction(nextFaction);
-    setSelectedSkinId(nextSkinId);
-    const effFac = nextFaction === 'shadow' ? 'shadow' : 'royal';
-    const resolvedLoadout = sanitizeSiegeLoadout(
-      effFac,
-      nextLoadout ?? getDefaultSiegeLoadout(effFac, nextSkinId)
-    );
-    setSelectedLoadout(resolvedLoadout);
+    const activeMode = session?.lobby.mode ?? roomMode;
+    const clampedFac: FactionId =
+      activeMode === 'siege' && nextFaction === 'mercenary' ? 'royal' : nextFaction;
+    const clampedSkin =
+      clampedFac !== nextFaction ? FACTION_CHARACTERS[clampedFac][0].id : nextSkinId;
+    setSelectedFaction(clampedFac);
+    setSelectedSkinId(clampedSkin);
+    const effFac = clampedFac === 'shadow' ? 'shadow' : 'royal';
+    const resolvedLoadout = getDefaultSiegeLoadout(effFac, clampedSkin);
     if (session) {
       session.transport.send({
         type: 'update_profile',
         name: sanitizeNickname(nextName),
-        faction: nextFaction,
-        skinId: nextSkinId,
+        faction: clampedFac,
+        skinId: clampedSkin,
         siegeLoadout: resolvedLoadout,
       });
     }
@@ -733,83 +776,77 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
                   })}
                 </div>
 
-                {(activeLobby.mode ?? 'frontier') === 'siege' && (
-                  <div className="pt-3 border-t border-slate-800 space-y-2">
-                    <div className="text-xs font-bold text-amber-300">三路攻防配裝與技能變種</div>
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
-                      <select
-                        value={selectedLoadout.gunId}
-                        onChange={(e) =>
-                          pushProfileUpdate(nickname, selectedFaction, selectedSkinId, {
-                            ...selectedLoadout,
-                            gunId: e.target.value,
-                          })
-                        }
-                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-slate-100"
-                      >
-                        {GUNS.map((g) => (
-                          <option key={g.id} value={g.id}>{g.name}</option>
-                        ))}
-                      </select>
-                      <select
-                        value={selectedLoadout.meleeId}
-                        onChange={(e) =>
-                          pushProfileUpdate(nickname, selectedFaction, selectedSkinId, {
-                            ...selectedLoadout,
-                            meleeId: e.target.value,
-                          })
-                        }
-                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-slate-100"
-                      >
-                        {MELEES.map((m) => (
-                          <option key={m.id} value={m.id}>{m.name}</option>
-                        ))}
-                      </select>
-                      <select
-                        value={selectedLoadout.tacticalId}
-                        onChange={(e) =>
-                          pushProfileUpdate(nickname, selectedFaction, selectedSkinId, {
-                            ...selectedLoadout,
-                            tacticalId: e.target.value as SiegePlayerLoadout['tacticalId'],
-                          })
-                        }
-                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-slate-100"
-                      >
-                        {SIEGE_TACTICAL_SKILLS.filter((s) => s.faction === (selectedFaction === 'shadow' ? 'shadow' : 'royal')).map((s) => (
-                          <option key={s.id} value={s.id}>{s.name}</option>
-                        ))}
-                      </select>
-                      <select
-                        value={selectedLoadout.ultimateId}
-                        onChange={(e) =>
-                          pushProfileUpdate(nickname, selectedFaction, selectedSkinId, {
-                            ...selectedLoadout,
-                            ultimateId: e.target.value as SiegePlayerLoadout['ultimateId'],
-                          })
-                        }
-                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-slate-100"
-                      >
-                        {SIEGE_ULTIMATE_SKILLS.filter((s) => s.faction === (selectedFaction === 'shadow' ? 'shadow' : 'royal')).map((s) => (
-                          <option key={s.id} value={s.id}>{s.name}</option>
-                        ))}
-                      </select>
-                      <select
-                        value={selectedLoadout.passiveId}
-                        onChange={(e) =>
-                          pushProfileUpdate(nickname, selectedFaction, selectedSkinId, {
-                            ...selectedLoadout,
-                            passiveId: e.target.value as SiegePlayerLoadout['passiveId'],
-                          })
-                        }
-                        className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1.5 text-slate-100"
-                      >
-                        {SIEGE_PASSIVES.filter((s) => s.faction === (selectedFaction === 'shadow' ? 'shadow' : 'royal')).map((s) => (
-                          <option key={s.id} value={s.id}>{s.name}</option>
-                        ))}
-                      </select>
+                {(activeLobby.mode ?? 'frontier') === 'siege' && (() => {
+                  const sFac = selectedFaction === 'shadow' ? 'shadow' : 'royal';
+                  const bundle = getDefaultSiegeLoadout(sFac, selectedSkinId);
+                  const preset = getSiegeHeroPreset(sFac, selectedSkinId);
+                  const gun = GUNS.find((g) => g.id === bundle.gunId) || GUNS[0];
+                  const gunProfile = getSiegeGunProfile(gun.kind);
+                  const melee = MELEES.find((m) => m.id === bundle.meleeId) || MELEES[0];
+                  const tac = getTacticalMeta(bundle.tacticalId);
+                  const ult = getUltimateMeta(bundle.ultimateId);
+                  const pas = getPassiveMeta(bundle.passiveId);
+                  return (
+                    <div className="pt-3 border-t border-slate-800 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-amber-300">英雄專屬套裝預覽</span>
+                          <span className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/40 text-[11px] font-bold text-amber-200">
+                            {preset.roleBadge} · {preset.laneHint}
+                          </span>
+                        </div>
+                        <span className="text-[11px] text-slate-400">每位英雄配專屬武器與技能，切換上方英雄即可更換打法</span>
+                      </div>
+
+                      <p className="text-xs text-slate-200 bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2">
+                        {preset.tagline}
+                      </p>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div className="flex items-center gap-3 rounded-xl bg-slate-950/80 border border-slate-800 p-2.5">
+                          <WeaponIconSvg kind={gun.kind} color={gun.color} className="w-9 h-9 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                              <span>主武器：{gun.name}</span>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-sky-300">{gunProfile.roleTag}</span>
+                            </div>
+                            <div className="text-[11px] text-slate-400 truncate">
+                              {gun.kind === 'shotgun'
+                                ? `近戰破甲 ${Math.round(gunProfile.defensePenetration * 100)}% · 彈匣 ${gun.magSize} 發`
+                                : gunProfile.defensePenetration > 0
+                                  ? `穿甲 ${Math.round(gunProfile.defensePenetration * 100)}% · 彈匣 ${gun.magSize} 發`
+                                  : `均衡射速 · 彈匣 ${gun.magSize} 發`}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3 rounded-xl bg-slate-950/80 border border-slate-800 p-2.5">
+                          <WeaponIconSvg kind={melee.kind} color={melee.color} className="w-9 h-9 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-white">副兵器：{melee.name}</div>
+                            <div className="text-[11px] text-slate-400 truncate">
+                              {melee.kind === 'shield' ? '正面格擋減傷 · 震退破陣' : `傷害 ${melee.damage} · 攻速 ${melee.swingRate}/s · 按 [Q] 切換`}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                        <div className="rounded-xl bg-slate-950/80 border border-sky-500/30 p-2.5 space-y-1">
+                          <div className="font-bold text-sky-300">[E / 右鍵 · Lv.2] {tac.name}</div>
+                          <p className="text-[11px] text-slate-300 leading-relaxed">{tac.desc}</p>
+                        </div>
+                        <div className="rounded-xl bg-slate-950/80 border border-amber-500/30 p-2.5 space-y-1">
+                          <div className="font-bold text-amber-300">[近戰集氣 · Lv.4] {ult.name}</div>
+                          <p className="text-[11px] text-slate-300 leading-relaxed">{ult.desc}</p>
+                        </div>
+                        <div className="rounded-xl bg-slate-950/80 border border-emerald-500/30 p-2.5 space-y-1">
+                          <div className="font-bold text-emerald-300">[常駐被動] {pas.name}</div>
+                          <p className="text-[11px] text-slate-300 leading-relaxed">{pas.desc}</p>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             </div>
 
@@ -931,12 +968,31 @@ export const MultiplayerLobbyView: React.FC<MultiplayerLobbyViewProps> = ({
               ) : (
                 <div className="space-y-3 text-xs text-slate-300">
                   <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between">
-                    <span>地圖</span>
-                    <span className="font-bold text-white flex items-center gap-1">
-                      {mapChoice === 'random' && !activeLobby.customMap ? <Shuffle className="w-3.5 h-3.5" /> : null}
-                      {activeLobby.customMap?.name ?? activeMapMeta?.name ?? activeLobby.mapId}
+                    <span>遊戲模式</span>
+                    <span className="font-bold text-amber-300">
+                      {(activeLobby.mode ?? 'frontier') === 'siege' ? '三路塔防 MOBA' : '經典混戰'}
                     </span>
                   </div>
+                  {(activeLobby.mode ?? 'frontier') === 'siege' ? (
+                    <>
+                      <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between">
+                        <span>戰場地圖</span>
+                        <span className="font-bold text-white">光暈裂谷 5v5</span>
+                      </div>
+                      <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between">
+                        <span>對戰時長</span>
+                        <span className="font-bold text-white">{(activeLobby.siegeDurationSec ?? 1080) / 60} 分鐘</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between">
+                      <span>地圖</span>
+                      <span className="font-bold text-white flex items-center gap-1">
+                        {mapChoice === 'random' && !activeLobby.customMap ? <Shuffle className="w-3.5 h-3.5" /> : null}
+                        {activeLobby.customMap?.name ?? activeMapMeta?.name ?? activeLobby.mapId}
+                      </span>
+                    </div>
+                  )}
                   <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between">
                     <span>AI 強度</span>
                     <span className="font-bold text-white">{AI_DIFFICULTY[activeLobby.difficulty].label}</span>

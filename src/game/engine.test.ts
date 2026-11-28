@@ -4912,6 +4912,42 @@ describe('Dead-player spectator camera and non-freezing post-match epilogue', ()
     victorySpy.mockRestore();
     defeatSpy.mockRestore();
   });
+
+  it('draws aim crosshair only when holding a gun and hides it when holding melee', () => {
+    const { engine } = createTestEngine('royal', 'tokyo_shrine', 10);
+    const translates: [number, number][] = [];
+    const mockCtx = new Proxy(
+      {},
+      {
+        get(_t, prop) {
+          if (prop === 'canvas') return { width: 960, height: 720 };
+          if (prop === 'createLinearGradient' || prop === 'createRadialGradient') {
+            return () => ({ addColorStop() {} });
+          }
+          if (prop === 'measureText') return () => ({ width: 20 });
+          if (prop === 'translate') {
+            return (x: number, y: number) => translates.push([x, y]);
+          }
+          return () => {};
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+
+    const aimX = 412;
+    const aimY = 273;
+    engine.setMousePos(aimX, aimY);
+
+    // 1. Holding gun (slot 0) -> crosshair is drawn at cursor
+    engine.render(mockCtx, 960, 720);
+    expect(translates.some(([x, y]) => Math.abs(x - aimX) < 1 && Math.abs(y - aimY) < 1)).toBe(true);
+
+    // 2. Switch to melee weapon (slot 1) -> gun crosshair is hidden
+    translates.length = 0;
+    engine.switchWeapon();
+    expect(engine.player.weapons[engine.player.activeHand].type).toBe('melee');
+    engine.render(mockCtx, 960, 720);
+    expect(translates.some(([x, y]) => Math.abs(x - aimX) < 1 && Math.abs(y - aimY) < 1)).toBe(false);
+  });
 });
 
 
